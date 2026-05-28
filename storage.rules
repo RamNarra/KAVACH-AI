@@ -1,0 +1,15 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Allow authenticated users to upload APKs under 'apks/' directory
+    match /apks/{allPaths=**} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Default fallback: allow read/write if authenticated
+    match /{allPaths=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}

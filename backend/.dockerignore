@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.env
+.pytest_cache/
+.vscode/
+.idea/
+*.apk
+*.zip
+*.jar
+temp_dir/
+apktool_out/
+jadx_out/
