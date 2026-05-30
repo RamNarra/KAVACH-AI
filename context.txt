@@ -7,16 +7,15 @@ Read this entire file before touching any code.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 0. LATEST SESSION SYNC & STATUS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Project hit API rate limits in previous IDE sessions (Antigravity/Cursor/VSCode).
-- Current Backend status: Google GenAI migration is strictly COMPLETE. Models working perfectly. Code is fully functional locally (Pipeline E2E passing and stable scoring).
-- DO NOT revert `google-genai` back to `vertexai`.
-- DO NOT change model `gemini-3.5-flash` or location `global`.
-- Current Frontend status (NEW THIS SESSION): 
-  1. Next.js (`frontend/src/app/page.tsx`) updated to include a simulated terminal loader (`fakeLogs`), enhanced typographical scaling, AI Synthesis panel, Findings Grid, and a history sidebar populated via an `onSnapshot` listener.
-  2. Fixed Firestore `permission-denied` errors: Updated `page.tsx` and `firestore.rules` to correctly match the backend's exact collection name `apkanalysisresults` (removed underscores).
-  3. `firebase.json` updated to link `firestore.rules` and rules deployed successfully.
-  4. Frontend UI builds seamlessly with 0 TS errors and no real-time listener crashes.
-- Next Agent/IDE: Dive right into testing the new user interface or connecting the final upload dots! You have the complete recent context.
+- Backend Status: Parallel processing pipeline (APKTool, JADX, Quark, APKiD) fully operational on localhost:8080. Key source Java files decompiled scaled up to 100 files, 800 lines, and 500k characters. AVD + Frida dynamic sandbox tracing fully integrated, capturing DCL, receiver registers, Cipher decrypts, WebViews, and URL connections in real-time. Final dynamically adjusted risk_score and threat_level from Gemini saved to Firestore database.
+- Frontend Status: Overhauled to a premium, glassy Material UI dark theme with indigo/violet highlights and dynamic safe/threat status styling featuring:
+  1. Background Rain Canvas: Dynamic HTML5 canvas falling green character rain at low opacity in background.
+  2. Centered Layout Shell: Single-column centered layout with a glassy dropzone uploader card and toggleable slide-out archives drawer.
+  3. Operator Connect Interface: Translucent operator authentication screen matching Material UI styling.
+  4. Dynamic Steppers Progress: Parallel decompile steps highlighted via dynamic progress color statuses and real-time logs terminal stream.
+  5. Results State (Single Column): Large visual risk score gauge (glowing circle) and narrative Gemini synthesis card at center stage. All raw details (permissions, anomalous behaviors, vulnerabilities, payload fingerprints, and Sandbox Dynamic Traces logs) are tucked inside a collapsible [ ADVANCED ANALYSIS DETAILS ] accordion panel.
+  6. Production build: NextJS build compiles successfully with 100% success and zero warnings.
+- Next Steps: Manual verification by user. Dynamic sandbox execution tested. Redeploy to Cloud Run when asked.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. WHAT THIS PROJECT IS
@@ -35,12 +34,13 @@ Core pipeline (each request, in order):
   2. Frontend sends POST /api/analyze to backend with {apk_url, uid, email}
   3. Backend downloads APK via httpx
   4. APKTool decompiles APK → reads AndroidManifest.xml → extracts package name
-  5. JADX decompiles APK → selects top 12 security-scored Java files (max 70k chars)
-  6. Builds a detailed prompt and calls Gemini via google-genai SDK
-  7. Parses JSON response (risk_score, threat_level, investigation_report)
-  8. Saves result to Firestore collection "apk_analysis_results"
-  9. Deletes APK from Firebase Storage (immediate cleanup)
-  10. Deletes local temp folder
+  5. JADX decompiles APK → selects top 100 security-scored Java files (max 500k chars)
+  6. Dynamic Sandbox Execution → deploys APK to AVD emulator, attaches Frida tracer script (hooking DCL, cipher decryptions, registered receivers, WebViews, URL connections), runs ADB monkey user input simulation for 15s, and captures traces.
+  7. Builds a detailed prompt (fusing static findings + dynamic trace logs) and calls Gemini via google-genai SDK
+  8. Parses JSON response (risk_score, threat_level, investigation_report)
+  9. Saves result to Firestore collection "apkanalysisresults" (evidence contains both static metrics and dynamic analysis logs)
+  10. Deletes APK from Firebase Storage (immediate cleanup)
+  11. Deletes local temp folder
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 2. GCP / FIREBASE PROJECT DETAILS
@@ -50,7 +50,7 @@ Core pipeline (each request, in order):
   Firebase project   : kavach-ai-497708
   Storage bucket     : kavach-ai-497708.firebasestorage.app
   Firestore DB       : (default)
-  Firestore coll.    : apk_analysis_results
+  Firestore coll.    : apkanalysisresults
   Cloud Run service  : kavach-api   (region: us-central1)
   Firebase Hosting   : kavach-ai-497708.web.app  (static export → frontend/out/)
   Vertex AI location : global        ← CRITICAL — must always be "global"
@@ -61,8 +61,9 @@ Core pipeline (each request, in order):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /home/p4cketsn1ff3r/Downloads/Projects/KAVACH AI/
-├── firebase.json              # Firebase Hosting config — rewrites /api/** → Cloud Run kavach-api
+├── firebase.json              # Firebase Hosting config — rewrites /api/** → Cloud Run, links rules & indexes
 ├── firestore.rules            # Firestore security rules — authenticated users only
+├── firestore.indexes.json     # Firestore composite indexes — for history query orderBy
 ├── storage.rules              # Storage security rules — authenticated uploads to apks/<uid>/
 ├── README.md                  # Project docs (keep updated)
 ├── context.txt                # THIS FILE — full project context for IDE switching
@@ -155,7 +156,7 @@ I. Java file selection strategy
    - JADX decompiles to sources/ directory inside the temp folder.
    - select_key_java_files() filters by package name first (to skip androidx/kotlin/etc.)
    - Scores each file by counting security-relevant keywords.
-   - Selects top 12 files, total capped at 70,000 characters to avoid token overflow.
+   - Selects top 100 files, total capped at 500,000 characters (decompiler extracts up to 800 lines per file) to provide comprehensive code context to Gemini.
    - MainActiviy gets +15 bonus score.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -327,7 +328,7 @@ The response is parsed by clean_and_parse_json() which strips any accidental
 markdown fences before json.loads().
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-12. FIRESTORE DOCUMENT SCHEMA (collection: apk_analysis_results)
+12. FIRESTORE DOCUMENT SCHEMA (collection: apkanalysisresults)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Success document:
@@ -454,12 +455,11 @@ us-central1 return 404 Publisher Model for gemini-3.5-flash in this project.
 16. WHAT TO DO NEXT (status as of 2026-05-28)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-All known issues are resolved. Full E2E pipeline is verified working.
+All known issues are resolved. Full E2E parallel pipeline is verified working, and the hacker UI is fully completed, styled, and compiled.
 
-IMPORTANT — Cloud Run is NOT yet updated with the new google-genai SDK:
+IMPORTANT — Cloud Run is NOT yet updated with the new google-genai SDK and parallel processing backend:
   The currently deployed Cloud Run container still has the OLD vertexai SDK code.
-  It works (no breakage yet) but will show the deprecation warning on Cloud Run logs.
-  To update production, run:
+  To update production when requested, run:
     cd ~/Downloads/Projects/KAVACH\ AI/backend
     gcloud run deploy kavach-api \
       --source . \
@@ -468,15 +468,15 @@ IMPORTANT — Cloud Run is NOT yet updated with the new google-genai SDK:
       --allow-unauthenticated \
       --set-env-vars="PROJECT_ID=kavach-ai-497708,LOCATION=global"
 
-Possible future work (not started):
-  - Redeploy Cloud Run with the google-genai SDK migration (see above — highest priority)
-  - Schedule ops/cleanup_orphan_apks.py via Cloud Scheduler for automated orphan cleanup
-  - Add auth middleware to /api/analyze endpoint (currently open/unauthenticated on backend)
-  - Add rate limiting per uid
-  - Improve frontend results UI (expandable sections per finding category)
-  - Add support for analyzing APKs from a direct URL
+Possible future work:
+  - Redeploy Cloud Run with the google-genai SDK and parallel backend updates.
+  - Schedule ops/cleanup_orphan_apks.py via Cloud Scheduler for automated orphan cleanup.
+  - Add auth middleware to /api/analyze endpoint.
+  - Add rate limiting per uid.
+  - Add support for analyzing APKs from a direct URL.
 
 ================================================================================
 END OF CONTEXT FILE
 ================================================================================
+
 

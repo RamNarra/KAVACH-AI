@@ -51,6 +51,7 @@ gcloud services enable aiplatform.googleapis.com \
 Ensure you have Python 3.11+, Java (JRE), `apktool`, and `jadx` installed locally on your system path.
 
 ### 1. Run the Python Backend Locally
+Start the backend server using the standard uvicorn launcher:
 ```bash
 cd backend
 python3 -m venv venv
@@ -58,6 +59,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
+Upon startup, FastAPI automatically triggers the **Dynamic Sandbox Bootstrapper** in the background:
+- It checks if the Android Virtual Device (`kavach_sandbox`) is running. If not, it launches it headlessly.
+- It automatically deploys and starts the matching **Frida Server-16** on the emulator.
+- You can monitor the live bootstrap state at `/api/sandbox-health`.
+- If the emulator/Frida setup is offline, the backend degrades gracefully to static-only reports.
 
 ### 2. Run the Next.js Frontend Locally
 Create `frontend/.env.local`:

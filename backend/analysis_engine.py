@@ -129,7 +129,6 @@ def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
         # Extract URLs
         urls = URL_REGEX.findall(code)
         for url in urls:
-            # Filter out common benign schema URLs
             if any(x in url for x in ["schemas.android.com", "google.com/apk", "w3.org", "android.com/tools"]):
                 continue
             findings["suspicious_urls"].append({
@@ -140,7 +139,6 @@ def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
         # Extract secrets
         secrets = SECRET_REGEX.findall(code)
         for sec in secrets:
-            # Avoid matching standard variable types or short words
             if len(sec) < 16:
                 continue
             findings["score"] += 10
@@ -153,53 +151,91 @@ def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
 
     return findings
 
-def analyze_quark(quark_json_path: str) -> Dict[str, Any]:
+def analyze_apkid(apkid_json_path: str) -> Dict[str, Any]:
     findings = {
-        "malware_rule_hits": [],
+        "anti_vm": [],
+        "obfuscator_packer": [],
+        "compiler_manipulator": [],
         "score": 0
     }
     try:
-        with open(quark_json_path, "r") as f:
+        with open(apkid_json_path, "r") as f:
             data = json.load(f)
-            crimes = data.get("crimes", [])
-            for crime in crimes:
-                confidence = crime.get("confidence", "0%")
-                rule = crime.get("rule", "Unknown rule")
-                if isinstance(confidence, str) and confidence.endswith("%"):
-                    conf_val = int(confidence[:-1])
-                else:
-                    conf_val = int(confidence)
+            files = data.get("files", [])
+            for file_entry in files:
+                matches = file_entry.get("matches", {})
                 
-                # Weight by confidence (100% -> 10 pts)
-                add_score = int(conf_val / 10)
-                findings["score"] += add_score
-                findings["malware_rule_hits"].append({
-                    "rule": rule,
-                    "confidence": confidence,
-                    "risk_score": add_score,
-                    "description": f"Quark rule hit: {rule} ({confidence})"
-                })
+                # Anti VM
+                for avm in matches.get("anti_vm", []):
+                    findings["score"] += 10
+                    findings["anti_vm"].append({
+                        "type": "Anti-VM Check",
+                        "match": avm,
+                        "risk_score": 10,
+                        "description": f"Anti-VM indicator: {avm}"
+                    })
+                
+                # Obfuscators & Packers
+                for obf in matches.get("obfuscator", []):
+                    findings["score"] += 15
+                    findings["obfuscator_packer"].append({
+                        "type": "Obfuscator",
+                        "match": obf,
+                        "risk_score": 15,
+                        "description": f"Obfuscated with {obf}"
+                    })
+                for pack in matches.get("packer", []):
+                    findings["score"] += 25
+                    findings["obfuscator_packer"].append({
+                        "type": "Packer",
+                        "match": pack,
+                        "risk_score": 25,
+                        "description": f"Packed with {pack} (possible evasion)"
+                    })
+                
+                # Compilers & Manipulators
+                for comp in matches.get("compiler", []):
+                    findings["compiler_manipulator"].append({
+                        "type": "Compiler",
+                        "match": comp,
+                        "risk_score": 0,
+                        "description": f"Compiled with {comp}"
+                    })
+                for manip in matches.get("manipulator", []):
+                    findings["score"] += 5
+                    findings["compiler_manipulator"].append({
+                        "type": "Manipulator",
+                        "match": manip,
+                        "risk_score": 5,
+                        "description": f"Manipulated with {manip}"
+                    })
     except Exception:
         pass
     
     return findings
 
-def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str, str], quark_json_path: str) -> Dict[str, Any]:
+def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str, str], apkid_json_path: str = None) -> Dict[str, Any]:
     m_res = analyze_manifest(manifest_content)
     j_res = analyze_jadx(jadx_sources)
-    q_res = analyze_quark(quark_json_path)
+    a_res = analyze_apkid(apkid_json_path) if apkid_json_path else {"anti_vm": [], "obfuscator_packer": [], "compiler_manipulator": [], "score": 0}
 
-    total_score = m_res["score"] + j_res["score"] + q_res["score"]
-    clamped_score = max(0, min(100, total_score))
+    total_score = m_res["score"] + j_res["score"] + a_res["score"]
+    
+    # Use asymptotic scoring so it scales naturally up to 100
+    import math
+    # Re-tuned divisor to 35.0 so that a score without quark scales accurately
+    clamped_score = int(100 * (1 - math.exp(-total_score / 35.0)))
+    if total_score == 0:
+        clamped_score = 0
 
     threat_level = "SAFE"
-    if clamped_score >= 85:
+    if clamped_score >= 80:
         threat_level = "CRITICAL"
-    elif clamped_score >= 65:
+    elif clamped_score >= 60:
         threat_level = "HIGH"
-    elif clamped_score >= 40:
+    elif clamped_score >= 35:
         threat_level = "MEDIUM"
-    elif clamped_score >= 15:
+    elif clamped_score >= 10:
         threat_level = "LOW"
 
     # Assemble normalized evidence model
@@ -213,8 +249,8 @@ def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str,
         "hardcoded_secrets": j_res["hardcoded_secrets"],
         "suspicious_urls": j_res["suspicious_urls"],
         "reflection_dynamic_loading": j_res["reflection_dynamic_loading"],
-        "obfuscation_signals": j_res["obfuscation_signals"],
-        "malware_rule_hits": q_res["malware_rule_hits"]
+        "obfuscation_signals": j_res["obfuscation_signals"] + a_res["obfuscator_packer"] + a_res["compiler_manipulator"],
+        "malware_rule_hits": a_res["anti_vm"] # Re-purposed for anti-VM / evasion signatures from APKiD
     }
 
     # Format description summaries for Vertex AI prompt context
@@ -225,9 +261,10 @@ def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str,
     jadx_details = []
     for cat in ["network_indicators", "data_storage_issues", "crypto_issues", "hardcoded_secrets", "reflection_dynamic_loading", "obfuscation_signals"]:
         for item in evidence[cat]:
-            jadx_details.append(f"- {item['type']} found in {item['file']}")
+            file_str = f" in {item.get('file')}" if item.get('file') else ""
+            jadx_details.append(f"- {item['type']}{file_str} ({item.get('description', '')})")
             
-    quark_details = [f"- {hit['description']}" for hit in evidence["malware_rule_hits"]]
+    evasion_details = [f"- {hit['description']}" for hit in evidence["malware_rule_hits"]]
 
     return {
         "risk_score": clamped_score,
@@ -237,6 +274,6 @@ def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str,
         "details": {
             "manifest": manifest_details,
             "jadx": jadx_details,
-            "quark": quark_details
+            "evasion": evasion_details
         }
     }
