@@ -1,6 +1,31 @@
 export type ThreatLevel = 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 export type AnalysisStatus = 'PROCESSING' | 'COMPLETED' | 'FAILED';
 
+export interface FraudBadge {
+  id: string;
+  title: string;
+  severity: string;
+  summary: string;
+  evidence?: string[];
+}
+
+export interface AttackTechnique {
+  id: string;
+  name: string;
+  tactic: string;
+  sources?: { source: string; detail: string }[];
+}
+
+export interface RiskDecomposition {
+  composite_score?: number;
+  confidence?: string;
+  summary?: string;
+  components?: Record<string, number>;
+  weights?: Record<string, number>;
+  weighted_contribution?: Record<string, number>;
+  top_contributors?: { label: string; category: string; weight: number }[];
+}
+
 export interface AnalysisDoc {
   id: string;
   status: AnalysisStatus;
@@ -12,6 +37,18 @@ export interface AnalysisDoc {
   created_at?: string;
   progress?: Record<string, string>;
   logs?: string[];
+  banking_fraud?: {
+    fraud_score?: number;
+    badges?: FraudBadge[];
+    recommended_actions?: string[];
+    indicator_count?: number;
+  };
+  risk_decomposition?: RiskDecomposition;
+  attack_techniques?: AttackTechnique[];
+  family_signals?: {
+    anti_vm?: { description?: string; match?: string }[];
+    packers_obfuscators?: { description?: string; type?: string }[];
+  };
   investigation_report?: {
     summary?: string;
     executive_verdict?: string;
@@ -20,14 +57,13 @@ export interface AnalysisDoc {
     recommendations?: string[];
   };
   evidence?: {
+    permissions?: { name?: string; description?: string; risk_score?: number }[];
     dynamic_analysis?: {
       status?: string;
-      runtime_findings?: { title?: string; summary?: string; severity?: string }[];
-      run_metadata?: {
-        event_count?: number;
-        runtime_confidence?: string;
-        sandbox_status?: string;
-      };
+      runtime_findings?: { id?: string; title?: string; summary?: string; severity?: string }[];
+      normalized_events?: unknown[];
+      trigger_transcript?: unknown[];
+      run_metadata?: Record<string, unknown>;
     };
   };
 }

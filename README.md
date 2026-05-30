@@ -18,6 +18,12 @@ Kavach AI is an automated, AI-driven malware analysis system for Android applica
 ## ✨ Features
 
 - 🧠 **AI-Powered Threat Audits**: Employs Gemini 3.5 Flash for deep static analysis of code behaviors.
+- 🏦 **Banking Fraud Intelligence**: Dedicated fraud score and badges (SMS stealer, overlay, UPI targeting, credential exfil).
+- 🎯 **MITRE ATT&CK Mapping**: Mobile technique tags on static and fraud findings.
+- 📊 **Explainable Risk Decomposition**: Static / dynamic / AI / fraud weighted breakdown.
+- 🔬 **Dynamic Sandbox**: Frida instrumentation with runtime findings and trigger playbooks.
+- 💬 **AI Analyst Chat**: Follow-up Q&A on completed reports (`POST /api/chat`).
+- 📄 **Report Export**: Text executive report download (`GET /api/analysis/{id}/report`).
 - 📦 **Automated Decompilation**: Uses `apktool` and `jadx` to extract `.class` and `.dex` bytecode right inside the Cloud Run environment.
 - ⚡ **Real-Time Next.js Frontend**: Sleek dashboard featuring fake-terminal progress loaders, AI synthesis panels, findings grids, and historical run sidebars powered by Firebase Firestore.
 - 🔐 **Robust Security Gating**: Enforces Google Cloud Storage lifecycle hygiene and strict Firebase security rules for authenticated-only access.
@@ -57,6 +63,8 @@ cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+# Local dev without Firebase token middleware:
+export DISABLE_AUTH=1
 uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 Upon startup, FastAPI automatically triggers the **Dynamic Sandbox Bootstrapper** in the background:

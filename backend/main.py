@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 import threading
 from urllib.parse import urlparse, unquote
 from typing import Dict, List, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -26,6 +26,10 @@ from google import genai
 from google.genai import types as genai_types
 
 from analysis_engine import calculate_deterministic_score
+from banking_fraud import analyze_banking_fraud
+from attack_mapping import map_evidence_to_attack
+from risk_engine import build_risk_decomposition, derive_dynamic_score, build_contributors
+from auth import verify_request_uid
 from frida_hooks import select_packs_from_signals
 from runtime_findings import (
     cluster_runtime_findings,
@@ -945,6 +949,46 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         analysis_json["risk_score"] = gemini_score
         analysis_json["threat_level"] = gemini_threat
 
+        # Banking fraud intelligence layer
+        banking_fraud = analyze_banking_fraud(
+            manifest_content,
+            key_sources,
+            dynamic_result.get("normalized_events") or [],
+            runtime_findings or [],
+        )
+
+        static_score = det_score
+        dynamic_score = derive_dynamic_score(
+            runtime_findings,
+            dynamic_result.get("event_count", 0),
+            dynamic_result.get("status", "UNAVAILABLE"),
+        )
+        contributors = build_contributors(
+            deterministic_result["evidence"],
+            banking_fraud.get("badges", []),
+            runtime_findings,
+        )
+        risk_decomposition = build_risk_decomposition(
+            static_score=static_score,
+            dynamic_score=dynamic_score,
+            ai_score=gemini_score,
+            fraud_score=banking_fraud.get("fraud_score", 0),
+            contributors=contributors,
+        )
+
+        attack_techniques = map_evidence_to_attack(
+            deterministic_result["evidence"],
+            banking_fraud.get("badges", []),
+        )
+
+        family_signals = {
+            "anti_vm": deterministic_result["evidence"].get("malware_rule_hits") or [],
+            "packers_obfuscators": [
+                x for x in (deterministic_result["evidence"].get("obfuscation_signals") or [])
+                if x.get("type") in ("Packer", "Obfuscator", "Manipulator")
+            ],
+        }
+
         update_progress("finalize", "RUNNING", "Saving final report to database...")
         
         now_str = datetime.datetime.utcnow().isoformat() + "Z"
@@ -977,6 +1021,10 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
                 **analysis_json.get("investigation_report", {}),
                 "executive_verdict": analysis_json.get("executive_verdict", ""),
             },
+            "banking_fraud": banking_fraud,
+            "risk_decomposition": risk_decomposition,
+            "attack_techniques": attack_techniques,
+            "family_signals": family_signals,
             "created_at": now_str,
             "uid": request.uid,
             "email": request.email,
@@ -1088,7 +1136,7 @@ def get_analysis(id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/chat")
-def chat_with_analyst(request: ChatRequest):
+def chat_with_analyst(request: ChatRequest, http_request: Request):
     if not request.analysis_id or not request.message:
         raise HTTPException(status_code=400, detail="Missing required parameters")
     
@@ -1100,34 +1148,42 @@ def chat_with_analyst(request: ChatRequest):
         analysis_data = snapshot.to_dict()
         
         summary = analysis_data.get("investigation_report", {}).get("summary", "")
+        verdict = analysis_data.get("investigation_report", {}).get("executive_verdict", "")
         vulns = analysis_data.get("investigation_report", {}).get("code_vulnerabilities", [])
         anomalies = analysis_data.get("investigation_report", {}).get("suspicious_activities", [])
         evidence = analysis_data.get("evidence", {})
+        banking = analysis_data.get("banking_fraud", {})
+        attack = analysis_data.get("attack_techniques", [])
         
         prompt = f"""
-You are Kavach AI Analyst, an interactive assistant for the Android Malware Analysis Platform.
-The user is asking questions about a previously analyzed APK file named '{analysis_data.get("filename")}' (Package: '{analysis_data.get("package_name")}').
+You are Kavach AI Analyst — a banking fraud specialist assistant.
+The user asks about APK '{analysis_data.get("filename")}' (Package: '{analysis_data.get("package_name")}').
 
-Here is the static analysis report context:
-Risk Score: {analysis_data.get("risk_score")}/100
-Threat Level: {analysis_data.get("threat_level")}
+Risk Score: {analysis_data.get("risk_score")}/100 | Threat: {analysis_data.get("threat_level")}
+Banking Fraud Score: {banking.get("fraud_score", "N/A")}/100
 
-AI Synthesis Summary:
-{summary}
+Executive Verdict:
+{verdict or summary}
 
-Behavior Anomalies flagged:
+Banking Fraud Indicators:
+{json.dumps(banking.get("badges", []), indent=2)}
+
+MITRE ATT&CK Techniques:
+{json.dumps(attack, indent=2)}
+
+Anomalies:
 {json.dumps(anomalies, indent=2)}
 
-Code Vulnerabilities flagged:
+Vulnerabilities:
 {json.dumps(vulns, indent=2)}
 
-Deterministic Scorecard Evidence:
-{json.dumps(evidence, indent=2)}
+Evidence summary:
+{json.dumps(evidence, indent=2)[:8000]}
 
-User's Question:
+User question:
 {request.message}
 
-Please provide a clear, concise, and expert answer to the user's question. Focus on Android security concepts, remediation steps, and technical explanations. Keep it professional. Use markdown.
+Answer clearly for a bank fraud analyst. Use markdown. Be concise. Cite evidence when possible.
 """
         
         ai_response = genai_client.models.generate_content(
@@ -1139,8 +1195,57 @@ Please provide a clear, concise, and expert answer to the user's question. Focus
         logger.error(f"Chat endpoint failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/analysis/{id}/report")
+def export_report(id: str):
+    """Plain-text executive report suitable for download or print-to-PDF."""
+    try:
+        doc_ref = db.collection("apkanalysisresults").document(id)
+        snapshot = doc_ref.get()
+        if not snapshot.exists:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+        d = snapshot.to_dict()
+        ir = d.get("investigation_report") or {}
+        bf = d.get("banking_fraud") or {}
+        lines = [
+            "KAVACH AI — INVESTIGATION REPORT",
+            "=" * 40,
+            f"File: {d.get('filename', 'N/A')}",
+            f"Package: {d.get('package_name', 'N/A')}",
+            f"Risk Score: {d.get('risk_score', 'N/A')}/100",
+            f"Threat Level: {d.get('threat_level', 'N/A')}",
+            f"Banking Fraud Score: {bf.get('fraud_score', 'N/A')}/100",
+            "",
+            "EXECUTIVE VERDICT",
+            ir.get("executive_verdict") or ir.get("summary") or "N/A",
+            "",
+            "BANKING FRAUD INDICATORS",
+        ]
+        for b in bf.get("badges") or []:
+            lines.append(f"  • [{b.get('severity')}] {b.get('title')}: {b.get('summary')}")
+        lines.extend(["", "RECOMMENDATIONS"])
+        for r in ir.get("recommendations") or []:
+            lines.append(f"  • {r}")
+        for r in bf.get("recommended_actions") or []:
+            lines.append(f"  • {r}")
+        lines.extend(["", "MITRE ATT&CK TECHNIQUES"])
+        for t in d.get("attack_techniques") or []:
+            lines.append(f"  • {t.get('id')} — {t.get('name')} ({t.get('tactic')})")
+        text = "\n".join(lines)
+        return {"format": "text", "content": text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
 @app.post("/api/analyze")
-def analyze_apk(request: AnalysisRequest, background_tasks: BackgroundTasks, background: bool = True):
+def analyze_apk(
+    request: AnalysisRequest,
+    http_request: Request,
+    background_tasks: BackgroundTasks,
+    background: bool = True,
+):
+    verified_uid = verify_request_uid(http_request, request.uid)
+    request.uid = verified_uid
     apk_url = request.apk_url
     logger.info(f"Received analysis request for URL: {apk_url} (background={background})")
     
