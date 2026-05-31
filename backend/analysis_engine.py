@@ -1,5 +1,6 @@
 import json
 import re
+import os
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, List
 
@@ -214,16 +215,356 @@ def analyze_apkid(apkid_json_path: str) -> Dict[str, Any]:
     
     return findings
 
-def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str, str], apkid_json_path: str = None) -> Dict[str, Any]:
+def analyze_quark(quark_json_path: str) -> Dict[str, Any]:
+    import os
+    import json
+    findings = {
+        "rule_hits": [],
+        "score": 0
+    }
+    if not quark_json_path or not os.path.exists(quark_json_path):
+        return findings
+    try:
+        with open(quark_json_path, "r") as f:
+            data = json.load(f)
+            crimes = data.get("crimes", [])
+            for crime in crimes:
+                rule_id = crime.get("rule", "")
+                desc = crime.get("crime", "")
+                labels = crime.get("label", [])
+                confidence = crime.get("confidence", "0%")
+                try:
+                    conf_val = float(confidence.replace("%", "")) / 100.0
+                except Exception:
+                    conf_val = 0.0
+
+                if conf_val >= 0.6:  # only include high confidence hits
+                    base_sc = 5
+                    if any(l in ["sms", "stealer", "credentials", "banking"] for l in labels):
+                        base_sc = 15
+                    elif any(l in ["network", "collection", "reflection"] for l in labels):
+                        base_sc = 8
+
+                    risk_sc = int(base_sc * conf_val)
+                    findings["score"] += risk_sc
+                    findings["rule_hits"].append({
+                        "rule": rule_id,
+                        "description": desc,
+                        "severity": "HIGH" if risk_sc >= 10 else "MEDIUM",
+                        "confidence": confidence,
+                        "risk_score": risk_sc
+                    })
+    except Exception:
+        pass
+    return findings
+
+
+def analyze_network_security_config(apktool_out: str, manifest_content: str) -> Dict[str, Any]:
+    import os
+    import xml.etree.ElementTree as ET
+    findings = {
+        "issues": [],
+        "score": 0
+    }
+    if not apktool_out or not os.path.isdir(apktool_out):
+        return findings
+
+    config_file = None
+    # 1. Parse manifest to find config name
+    try:
+        if manifest_content:
+            root = ET.fromstring(manifest_content)
+            app = root.find(".//application")
+            if app is not None:
+                # Find namespace-neutral or explicit namespace attribute
+                cfg_attr = None
+                for k, v in app.attrib.items():
+                    if k.endswith("networkSecurityConfig"):
+                        cfg_attr = v
+                        break
+                if cfg_attr:
+                    # e.g., @xml/network_security_config -> network_security_config
+                    cfg_name = cfg_attr.split("/")[-1]
+                    config_file = os.path.join(apktool_out, "res", "xml", f"{cfg_name}.xml")
+    except Exception:
+        pass
+
+    # Fallback to default name if not found
+    if not config_file or not os.path.exists(config_file):
+        config_file = os.path.join(apktool_out, "res", "xml", "network_security_config.xml")
+
+    if not os.path.exists(config_file):
+        return findings
+
+    # 2. Parse the config file
+    try:
+        tree = ET.parse(config_file)
+        root = tree.getroot()
+
+        # Check cleartextTrafficPermitted
+        for domain_cfg in root.findall(".//domain-config"):
+            cleartext = domain_cfg.attrib.get("cleartextTrafficPermitted")
+            if cleartext == "true":
+                findings["score"] += 10
+                domains = [d.text for d in domain_cfg.findall("domain")]
+                domains_str = ", ".join(domains) if domains else "configured domains"
+                findings["issues"].append({
+                    "type": "Insecure Cleartext Permission",
+                    "risk_score": 10,
+                    "description": f"Cleartext (HTTP) traffic explicitly permitted for: {domains_str}"
+                })
+
+        # Check trust-anchors (trusting user certificates)
+        debug_overrides = root.findall(".//debug-overrides")
+        all_anchors = root.findall(".//trust-anchors")
+        for anchor in all_anchors:
+            # Check if this anchor is inside debug_overrides
+            is_debug_only = any(anchor in dob.iter() for dob in debug_overrides)
+            if not is_debug_only:
+                for cert in anchor.findall("certificates"):
+                    src = cert.attrib.get("src")
+                    if src == "user":
+                        findings["score"] += 20
+                        findings["issues"].append({
+                            "type": "Insecure Trust Anchor (User Certs)",
+                            "risk_score": 20,
+                            "description": "App trusts user-installed certificates in release builds (vulnerable to MitM)."
+                        })
+                    elif src == "all":
+                        findings["score"] += 25
+                        findings["issues"].append({
+                            "type": "Insecure Trust Anchor (All Certs)",
+                            "risk_score": 25,
+                            "description": "App trusts ALL certificates (disables TLS verification completely)."
+                        })
+    except Exception:
+        pass
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Engine 4: Deep Secrets Scanner
+# Finds credential strings unique to financial malware that JADX regex misses:
+# AWS keys, Firebase project URLs, GCP service accounts, JWT tokens, PEM keys,
+# Stripe/Twilio live keys, hardcoded C2 IPs and ngrok tunnels.
+# ---------------------------------------------------------------------------
+_SECRET_PATTERNS = [
+    ("AWS Access Key",        r"AKIA[0-9A-Z]{16}",                                                    25),
+    ("AWS Secret Key",        r"(?i)aws.{0,20}[\'\"]([ 0-9a-zA-Z/+]{40})[\'\"]",                   25),
+    ("Firebase Project URL",  r"https://[a-zA-Z0-9-]+\.firebaseio\.com",                             15),
+    ("Firebase App ID",       r"1:[0-9]{12}:android:[0-9a-f]{16,}",                                   10),
+    ("Google API Key",        r"AIza[0-9A-Za-z\-_]{35}",                                              15),
+    ("GCP Service Account",   r"[a-zA-Z0-9._-]+@[a-zA-Z0-9-]+\.iam\.gserviceaccount\.com",          15),
+    ("JWT Token",             r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",     20),
+    ("PEM Private Key",       r"-----BEGIN (RSA|EC|DSA|OPENSSH)? PRIVATE KEY-----",                    30),
+    ("Stripe Live Key",       r"sk_live_[0-9a-zA-Z]{24,}",                                            30),
+    ("Stripe Restricted Key", r"rk_live_[0-9a-zA-Z]{24,}",                                            25),
+    ("Twilio Auth Token",     r"(?i)twilio.{0,20}[\'\"]([ 0-9a-f]{32})[\'\"]",                        25),
+    ("GitHub Token",          r"ghp_[0-9A-Za-z]{36}",                                                 20),
+    ("ngrok Tunnel URL",      r"https://[a-zA-Z0-9]+\.ngrok\.io",                                    20),
+    ("Hardcoded IPv4 C2",     r"(?<![\d.])(?!10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)(?:\d{1,3}\.){3}\d{1,3}(?!\d|\.)(?::[0-9]{2,5})?", 10),
+]
+
+def analyze_secrets(jadx_out: str) -> Dict[str, Any]:
+    """
+    Walk the JADX decompiled source tree and scan every .java file for
+    credential patterns not caught by the basic JADX regex engine.
+    Returns structured findings with file references and risk scores.
+    """
+    findings: Dict[str, Any] = {"credential_leaks": [], "score": 0}
+    if not jadx_out or not os.path.isdir(jadx_out):
+        return findings
+
+    seen: set = set()
+    sources_dir = os.path.join(jadx_out, "sources")
+    if not os.path.isdir(sources_dir):
+        sources_dir = jadx_out
+
+    for root_dir, _, files in os.walk(sources_dir):
+        for fname in files:
+            if not fname.endswith(".java"):
+                continue
+            fpath = os.path.join(root_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                    content = fh.read()
+            except Exception:
+                continue
+
+            rel = os.path.relpath(fpath, jadx_out)
+            for label, pattern, score in _SECRET_PATTERNS:
+                try:
+                    matches = re.findall(pattern, content)
+                except re.error:
+                    continue
+                for m in matches:
+                    val = m if isinstance(m, str) else str(m)
+                    dedup_key = f"{label}:{val[:30]}"
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    # Redact the actual secret value in the evidence
+                    redacted = val[:6] + "****" + val[-3:] if len(val) > 12 else "****"
+                    findings["credential_leaks"].append({
+                        "type": label,
+                        "file": rel,
+                        "risk_score": score,
+                        "severity": "CRITICAL" if score >= 25 else "HIGH",
+                        "description": f"{label} detected in source ({redacted})"
+                    })
+                    findings["score"] += score
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Engine 5: Androguard APK Structure Analyzer
+# Uses androguard's low-level DEX parser to extract:
+#   - All string constants (finds obfuscated URLs, C2s, encoded payloads)
+#   - Dangerous API call chains (contacts → SMS, storage → network)
+#   - Class-level risk signals (reflection, overlay services, device admin)
+# Does NOT require running code — purely static bytecode inspection.
+# ---------------------------------------------------------------------------
+_DANGEROUS_API_CHAINS = [
+    # (read_api, write_api, label, score)
+    ("getDeviceId",         "sendTextMessage",    "IMEI Exfiltration via SMS",          25),
+    ("query",               "sendTextMessage",    "Contacts/SMS Exfiltration",           25),
+    ("getAccounts",         "openConnection",     "Account Data Sent to Network",        20),
+    ("getInstalledPackages","openConnection",     "App List Exfiltration",               15),
+    ("getLastKnownLocation","openConnection",     "GPS Location Exfiltration",           20),
+    ("onAccessibilityEvent","performGlobalAction","Accessibility Abuse (Overlay/Spy)",   30),
+    ("loadUrl",             "evaluateJavascript", "WebView JS Injection",                15),
+    ("PackageInstaller",    "install",            "Silently Installs Packages",          25),
+]
+
+_RISKY_SUPERCLASSES = [
+    ("DeviceAdminReceiver",      "Device Admin Receiver",          20),
+    ("AccessibilityService",     "Accessibility Service (Overlay)", 25),
+    ("NotificationListenerService", "Notification Listener",        20),
+    ("VpnService",               "VPN Service",                     20),
+    ("InputMethodService",       "Input Method / Keylogger Risk",   20),
+]
+
+def analyze_androguard(apk_path: str) -> Dict[str, Any]:
+    """
+    Parse the APK's DEX bytecode with androguard to find:
+    1. Suspicious string constants (obfuscated C2 URLs, base64 blobs)
+    2. Dangerous API call chain patterns across methods
+    3. Risky class inheritance patterns (device admin, accessibility, etc.)
+    Returns structured findings — does not require emulation.
+    """
+    findings: Dict[str, Any] = {
+        "suspicious_strings": [],
+        "dangerous_api_chains": [],
+        "risky_classes": [],
+        "score": 0,
+    }
+    if not apk_path or not os.path.exists(apk_path):
+        return findings
+
+    try:
+        from androguard.misc import AnalyzeAPK
+        a, d_list, dx = AnalyzeAPK(apk_path)
+    except ImportError:
+        # androguard not installed — skip silently
+        return findings
+    except Exception as e:
+        return findings
+
+    seen_strings: set = set()
+    # Suspicious string patterns inside DEX constants
+    _STR_PATTERNS = [
+        (r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?[/\w]*", "Hardcoded IP URL",         15),
+        (r"https?://[a-zA-Z0-9-]+\.onion",                                  "Tor .onion C2 URL",       30),
+        (r"https?://[a-zA-Z0-9]+\.ngrok\.io",                               "ngrok Tunnel URL",        20),
+        (r"(?:[A-Za-z0-9+/]{4}){10,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", "Long Base64 Blob", 8),
+    ]
+    try:
+        for d in (d_list if isinstance(d_list, list) else [d_list]):
+            for cls in d.get_classes():
+                for method in cls.get_methods():
+                    for _, _, val in method.get_instructions():
+                        if not isinstance(val, str) or len(val) < 12:
+                            continue
+                        for pat, label, sc in _STR_PATTERNS:
+                            if re.search(pat, val) and val not in seen_strings:
+                                seen_strings.add(val)
+                                findings["suspicious_strings"].append({
+                                    "type": label,
+                                    "value": val[:120],
+                                    "risk_score": sc,
+                                    "severity": "HIGH",
+                                    "description": f"{label} found in bytecode constant: {val[:60]}"
+                                })
+                                findings["score"] += sc
+                                break
+    except Exception:
+        pass
+
+    # Dangerous API chain detection
+    try:
+        for read_api, write_api, label, score in _DANGEROUS_API_CHAINS:
+            read_refs = list(dx.get_method_analysis_by_name(read_api) or [])
+            write_refs = list(dx.get_method_analysis_by_name(write_api) or [])
+            if read_refs and write_refs:
+                findings["dangerous_api_chains"].append({
+                    "type": label,
+                    "risk_score": score,
+                    "severity": "CRITICAL" if score >= 25 else "HIGH",
+                    "description": f"API chain detected: {read_api} → {write_api} ({label})"
+                })
+                findings["score"] += score
+    except Exception:
+        pass
+
+    # Risky superclass detection
+    try:
+        for cls in dx.get_classes():
+            supers = [cls.get_superclassname() or ""]
+            for sup in supers:
+                for risky_cls, label, score in _RISKY_SUPERCLASSES:
+                    if risky_cls in sup:
+                        class_name = cls.get_class_name().replace("/", ".").strip("L;")
+                        findings["risky_classes"].append({
+                            "class": class_name,
+                            "type": label,
+                            "risk_score": score,
+                            "severity": "HIGH",
+                            "description": f"Class `{class_name}` extends {risky_cls} ({label})"
+                        })
+                        findings["score"] += score
+    except Exception:
+        pass
+
+    return findings
+
+
+def calculate_deterministic_score(
+    manifest_content: str,
+    jadx_sources: Dict[str, str],
+    apkid_json_path: str = None,
+    quark_json_path: str = None,
+    apktool_out: str = None,
+    jadx_out: str = None,
+    apk_path: str = None,
+) -> Dict[str, Any]:
+    import math
     m_res = analyze_manifest(manifest_content)
     j_res = analyze_jadx(jadx_sources)
     a_res = analyze_apkid(apkid_json_path) if apkid_json_path else {"anti_vm": [], "obfuscator_packer": [], "compiler_manipulator": [], "score": 0}
+    q_res = analyze_quark(quark_json_path) if quark_json_path else {"rule_hits": [], "score": 0}
+    net_res = analyze_network_security_config(apktool_out, manifest_content) if apktool_out else {"issues": [], "score": 0}
+    # Engine 4: Deep Secrets Scanner (runs over JADX source tree)
+    sec_res = analyze_secrets(jadx_out) if jadx_out else {"credential_leaks": [], "score": 0}
+    # Engine 5: Androguard DEX bytecode analysis
+    ag_res = analyze_androguard(apk_path) if apk_path else {"suspicious_strings": [], "dangerous_api_chains": [], "risky_classes": [], "score": 0}
 
-    total_score = m_res["score"] + j_res["score"] + a_res["score"]
-    
+    total_score = (
+        m_res["score"] + j_res["score"] + a_res["score"] + q_res["score"]
+        + net_res["score"] + sec_res["score"] + ag_res["score"]
+    )
+
     # Use asymptotic scoring so it scales naturally up to 100
-    import math
-    # Re-tuned divisor to 35.0 so that a score without quark scales accurately
     clamped_score = int(100 * (1 - math.exp(-total_score / 35.0)))
     if total_score == 0:
         clamped_score = 0
@@ -238,32 +579,32 @@ def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str,
     elif clamped_score >= 10:
         threat_level = "LOW"
 
-    # Assemble normalized evidence model
+    # Assemble normalized evidence model (engines 4 & 5 merged in)
     evidence = {
         "permissions": m_res["permissions"],
         "exported_components": m_res["exported_components"],
         "dangerous_manifest_flags": m_res["dangerous_manifest_flags"],
-        "network_indicators": j_res["network_indicators"],
+        "network_indicators": j_res["network_indicators"] + net_res["issues"],
         "data_storage_issues": j_res["data_storage_issues"],
         "crypto_issues": j_res["crypto_issues"],
-        "hardcoded_secrets": j_res["hardcoded_secrets"],
-        "suspicious_urls": j_res["suspicious_urls"],
-        "reflection_dynamic_loading": j_res["reflection_dynamic_loading"],
-        "obfuscation_signals": j_res["obfuscation_signals"] + a_res["obfuscator_packer"] + a_res["compiler_manipulator"],
-        "malware_rule_hits": a_res["anti_vm"] # Re-purposed for anti-VM / evasion signatures from APKiD
+        "hardcoded_secrets": j_res["hardcoded_secrets"] + sec_res["credential_leaks"],
+        "suspicious_urls": j_res["suspicious_urls"] + ag_res["suspicious_strings"],
+        "reflection_dynamic_loading": j_res["reflection_dynamic_loading"] + ag_res["dangerous_api_chains"],
+        "obfuscation_signals": j_res["obfuscation_signals"] + a_res["obfuscator_packer"] + a_res["compiler_manipulator"] + ag_res["risky_classes"],
+        "malware_rule_hits": a_res["anti_vm"] + q_res["rule_hits"],
     }
 
     # Format description summaries for Vertex AI prompt context
     manifest_details = [f"- {p['description']}" for p in evidence["permissions"]]
     manifest_details += [f"- {ec['description']}: {ec['name']}" for ec in evidence["exported_components"]]
     manifest_details += [f"- {f['description']}" for f in evidence["dangerous_manifest_flags"]]
-    
+
     jadx_details = []
     for cat in ["network_indicators", "data_storage_issues", "crypto_issues", "hardcoded_secrets", "reflection_dynamic_loading", "obfuscation_signals"]:
         for item in evidence[cat]:
             file_str = f" in {item.get('file')}" if item.get('file') else ""
-            jadx_details.append(f"- {item['type']}{file_str} ({item.get('description', '')})")
-            
+            jadx_details.append(f"- {item.get('type', item.get('class', 'Finding'))}{file_str} ({item.get('description', '')})")
+
     evasion_details = [f"- {hit['description']}" for hit in evidence["malware_rule_hits"]]
 
     return {
@@ -274,6 +615,6 @@ def calculate_deterministic_score(manifest_content: str, jadx_sources: Dict[str,
         "details": {
             "manifest": manifest_details,
             "jadx": jadx_details,
-            "evasion": evasion_details
-        }
+            "evasion": evasion_details,
+        },
     }

@@ -11,13 +11,15 @@ import {
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { collection, doc, onSnapshot, query, where, orderBy } from 'firebase/firestore';
 import { auth, googleProvider, storage, db } from '../lib/firebase';
-import { apiFetch, fetchSandboxHealth, downloadReport, sendChat } from '../lib/api';
+import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis } from '../lib/api';
 import { DEMO_ANALYSIS } from '../lib/demo';
 import type { AnalysisDoc, ThreatLevel } from '../lib/types';
 import {
   DynamicAnalysisOperatorSmokeView,
   type AnalysisResultForUi,
 } from '../lib/dynamic-analysis-ui';
+import { livelyScanHeadline, recentScanLogs, runningStepKeys } from '../lib/scan-messages';
+import { ChatBubble, MarkdownBody } from '../lib/chat-ui';
 
 const threatColor: Record<ThreatLevel, string> = {
   SAFE: '#81c995',
@@ -27,13 +29,6 @@ const threatColor: Record<ThreatLevel, string> = {
   CRITICAL: '#ea4335',
 };
 
-
-function activeStep(progress?: Record<string, string>) {
-  if (!progress) return 'Starting';
-  const running = Object.entries(progress).find(([, s]) => s === 'RUNNING');
-  if (running) return running[0].replace(/_/g, ' ');
-  return 'Finalizing';
-}
 
 function toDynamicUi(doc: AnalysisDoc): AnalysisResultForUi {
   return {
@@ -59,6 +54,8 @@ export default function Home() {
   const [chatInput, setChatInput] = useState('');
   const [chatLog, setChatLog] = useState<{ role: 'user' | 'ai'; text: string }[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
+  const [scanTick, setScanTick] = useState(0);
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
 
   useEffect(() => onAuthStateChanged(auth, (u) => { setUser(u); setAuthReady(true); }), []);
 
@@ -119,6 +116,20 @@ export default function Home() {
     }
   };
 
+  const startDynamic = async () => {
+    if (!current || !user || busy) return;
+    setError(null);
+    setBusy(true);
+    try {
+      await triggerDynamicAnalysis(current.id, user.uid);
+      setActiveId(current.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to start dynamic analysis.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const loadDemo = useCallback(() => {
     setIsDemo(true);
     setActiveId('demo');
@@ -145,6 +156,22 @@ export default function Home() {
     if (current?.status === 'COMPLETED' || current?.status === 'FAILED') return 'result';
     return 'home';
   }, [user, current, busy]);
+
+  useEffect(() => {
+    if (view !== 'scan') return;
+    const health = setInterval(() => {
+      fetchSandboxHealth().then((h) => setSandboxOk(h.sandbox_status === 'READY'));
+    }, 5000);
+    const tick = setInterval(() => setScanTick((t) => t + 1), 2400);
+    return () => {
+      clearInterval(health);
+      clearInterval(tick);
+    };
+  }, [view]);
+
+  const scanHeadline = livelyScanHeadline(current?.progress, current?.logs, scanTick);
+  const scanFeed = recentScanLogs(current?.logs, 8);
+  const parallelSteps = runningStepKeys(current?.progress);
 
   const score = current?.risk_score ?? 0;
   const level = (current?.threat_level ?? 'SAFE') as ThreatLevel;
@@ -252,9 +279,67 @@ export default function Home() {
           )}
 
           {view === 'scan' && (
-            <motion.div key="scan" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-center space-y-6 py-20 w-full">
-              <p className="text-[20px] font-medium">{busy ? `Uploading ${uploadPct}%` : 'Analyzing'}</p>
-              <p className="text-[15px] text-[var(--muted)] capitalize">{busy ? file?.name : activeStep(current?.progress)}</p>
+            <motion.div key="scan" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-center space-y-8 py-16 w-full max-w-lg mx-auto">
+              <div className="space-y-3">
+                <p className="text-[20px] font-medium">{busy ? `Uploading ${uploadPct}%` : 'Analyzing'}</p>
+                <AnimatePresence mode="wait">
+                  <motion.p
+                    key={busy ? `upload-${uploadPct}` : scanHeadline}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    transition={{ duration: 0.25 }}
+                    className="text-[15px] text-[var(--muted)] leading-relaxed min-h-[48px]"
+                  >
+                    {busy ? `Securely uploading ${file?.name ?? 'APK'}…` : scanHeadline}
+                  </motion.p>
+                </AnimatePresence>
+              </div>
+
+              {!busy && parallelSteps.length > 0 && (
+                <div className="flex flex-wrap justify-center gap-2">
+                  {parallelSteps.map((step) => (
+                    <span
+                      key={step}
+                      className="text-[11px] px-3 py-1 rounded-full border border-[var(--blue)]/30 bg-[var(--blue)]/10 text-[var(--blue)] animate-pulse"
+                    >
+                      {step.replace(/_/g, ' ')}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {!busy && (
+                <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-left space-y-2 min-h-[140px]">
+                  <p className="text-[11px] uppercase tracking-widest text-[var(--muted)]">Live trace</p>
+                  {scanFeed.length === 0 ? (
+                    <p className="text-[13px] text-[var(--muted)] animate-pulse">Spinning up decompilers and sandbox hooks…</p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {scanFeed.map((line, i) => (
+                        <motion.li
+                          key={`${i}-${line.slice(0, 24)}`}
+                          initial={{ opacity: 0, x: -4 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          className={`text-[13px] leading-snug ${i === scanFeed.length - 1 ? 'text-[var(--text)]' : 'text-[var(--muted)]'}`}
+                        >
+                          {line}
+                        </motion.li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <div className="flex justify-center gap-1.5 pt-2">
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="w-1.5 h-1.5 rounded-full bg-[var(--blue)] animate-pulse"
+                    style={{ animationDelay: `${i * 180}ms` }}
+                  />
+                ))}
+              </div>
             </motion.div>
           )}
 
@@ -273,11 +358,23 @@ export default function Home() {
                     <p className="text-[14px] text-[var(--muted)]">{current.filename}</p>
                   </div>
 
-                  {(current.investigation_report?.executive_verdict || current.investigation_report?.summary) && (
-                    <div className="rounded-3xl bg-[var(--surface)] p-6">
-                      <p className="text-[16px] leading-relaxed">{current.investigation_report.executive_verdict || current.investigation_report.summary}</p>
-                    </div>
-                  )}
+                  {(current.investigation_report?.summary || current.investigation_report?.executive_verdict) && (() => {
+                    const summaryText = current.investigation_report?.summary || current.investigation_report?.executive_verdict || '';
+                    return (
+                      <div className="rounded-3xl bg-[var(--surface)] p-6 space-y-3">
+                        <div className={summaryExpanded ? '' : 'line-clamp-[8] overflow-hidden'}>
+                          <MarkdownBody text={summaryText} />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setSummaryExpanded(e => !e)}
+                          className="text-[13px] text-[var(--blue)] bg-transparent border-0 cursor-pointer p-0 hover:opacity-80"
+                        >
+                          {summaryExpanded ? 'Show less ↑' : 'Show more ↓'}
+                        </button>
+                      </div>
+                    );
+                  })()}
 
                   {current.banking_fraud?.badges && current.banking_fraud.badges.length > 0 && (
                     <section className="space-y-3">
@@ -300,10 +397,10 @@ export default function Home() {
                           <div key={key}>
                             <div className="flex justify-between text-[13px] mb-1 capitalize">
                               <span className="text-[var(--muted)]">{key.replace('_', ' ')}</span>
-                              <span className="tabular-nums">{val}</span>
+                              <span className="tabular-nums">{String(val)}</span>
                             </div>
                             <div className="h-1.5 rounded-full bg-[var(--surface-2)] overflow-hidden">
-                              <div className="h-full rounded-full bg-[var(--blue)]" style={{ width: `${Math.min(100, val)}%` }} />
+                              <div className="h-full rounded-full bg-[var(--blue)]" style={{ width: `${Math.min(100, Number(val) || 0)}%` }} />
                             </div>
                           </div>
                         ))}
@@ -317,20 +414,61 @@ export default function Home() {
                   {current.attack_techniques && current.attack_techniques.length > 0 && (
                     <section className="space-y-3">
                       <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">MITRE ATT&CK</p>
-                      <div className="flex flex-wrap gap-2">
+                      <div className="space-y-2">
                         {current.attack_techniques.map((t) => (
-                          <span key={t.id} className="text-[11px] font-mono px-2.5 py-1 rounded-lg bg-[var(--surface)] border border-[var(--border)]" title={t.name}>
-                            {t.id}
-                          </span>
+                          <div key={t.id} className="rounded-2xl bg-[var(--surface)] border border-[var(--border)] p-4 space-y-1.5">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/20">{t.id}</span>
+                                <span className="text-[14px] font-semibold">{t.name}</span>
+                              </div>
+                              {t.tactic && (
+                                <span className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--surface-2)] text-[var(--muted)] whitespace-nowrap border border-[var(--border)] shrink-0">{t.tactic}</span>
+                              )}
+                            </div>
+                            {t.sources && t.sources.length > 0 && (
+                              <ul className="space-y-1 pt-1">
+                                {t.sources.map((s, si) => (
+                                  <li key={si} className="text-[13px] text-[var(--muted)] pl-3 border-l border-[var(--border)]">
+                                    <span className="text-[var(--text)] font-medium">{String(s.source || '')}</span>{s.detail ? ` — ${String(s.detail)}` : ''}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
                         ))}
                       </div>
                     </section>
                   )}
 
-                  <FindingsBlock title="Threats" items={current.investigation_report?.suspicious_activities?.map((a) => ({ label: a.title, detail: a.description }))} />
-                  <FindingsBlock title="Vulnerabilities" items={current.investigation_report?.code_vulnerabilities?.map((a) => ({ label: a.title, detail: a.description }))} />
+                  <FindingsBlock title="Threats" items={current.investigation_report?.suspicious_activities?.map((a) => ({ label: a.title, detail: a.description, severity: a.severity }))} />
+                  <FindingsBlock title="Vulnerabilities" items={current.investigation_report?.code_vulnerabilities?.map((a) => ({ label: a.title, detail: a.description, severity: a.severity }))} />
 
-                  {current.evidence?.dynamic_analysis && (
+                  {(!current.evidence?.dynamic_analysis || current.progress?.dynamic_sandbox === "SKIPPED") ? (
+                    <section className="rounded-3xl bg-[var(--surface)] p-6 border border-[var(--border)] space-y-4">
+                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Runtime Analysis</p>
+                      <div className="space-y-2">
+                        <p className="text-[15px] font-medium">Interactive Dynamic Sandbox</p>
+                        {score < 30 ? (
+                          <p className="text-[13px] text-[var(--muted)] leading-relaxed">
+                            No critical static threats were found. However, malware can dynamically load encrypted payloads or check for VM signatures. Booting the dynamic emulator allows Kavach to trace runtime API calls, network sockets, and crypt operations.
+                          </p>
+                        ) : (
+                          <p className="text-[13px] text-[var(--muted)] leading-relaxed">
+                            Static warnings were detected in the codebase. Initiate dynamic trace monitoring to inspect active network packets, dynamic overlays, or evasion techniques at runtime.
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={startDynamic}
+                        disabled={busy}
+                        className="w-full h-11 rounded-full bg-[var(--blue)] text-white text-[14px] font-semibold cursor-pointer hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center justify-center gap-2"
+                      >
+                        <span className="text-[16px]">⚡</span> Initiate Dynamic Sandbox Analysis
+                      </button>
+                    </section>
+                  ) : (
                     <section className="rounded-3xl bg-[var(--surface)] p-6">
                       <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] mb-4">Runtime</p>
                       <DynamicAnalysisOperatorSmokeView activeResult={toDynamicUi(current)} />
@@ -339,7 +477,7 @@ export default function Home() {
 
                   {(current.investigation_report?.recommendations?.length || current.banking_fraud?.recommended_actions?.length) ? (
                     <section className="rounded-3xl bg-[var(--surface)] p-6 space-y-3">
-                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Actions</p>
+                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Remediation Tips</p>
                       <ul className="space-y-2">
                         {[...(current.investigation_report?.recommendations || []), ...(current.banking_fraud?.recommended_actions || [])].map((r, i) => (
                           <li key={i} className="text-[15px] pl-3 border-l-2 border-[var(--green)]">{r}</li>
@@ -360,22 +498,32 @@ export default function Home() {
                   </div>
 
                   {chatOpen && (
-                    <div className="rounded-3xl bg-[var(--surface)] p-4 space-y-3">
-                      <div className="max-h-48 overflow-y-auto space-y-2 text-[14px]">
-                        {chatLog.length === 0 && <p className="text-[var(--muted)]">Ask about fraud risk, remediation, or evidence.</p>}
+                    <div className="rounded-3xl bg-[var(--surface)] p-4 space-y-4">
+                      <div className="max-h-[min(420px,50vh)] overflow-y-auto space-y-4 pr-1">
+                        {chatLog.length === 0 && (
+                          <p className="text-[14px] text-[var(--muted)] text-center py-6">
+                            Ask about fraud risk, remediation, or evidence — powered by Gemini.
+                          </p>
+                        )}
                         {chatLog.map((m, i) => (
-                          <p key={i} className={m.role === 'user' ? 'text-[var(--blue)]' : 'text-[var(--text)]'}>{m.text}</p>
+                          <ChatBubble key={i} role={m.role} text={m.text} />
                         ))}
+                        {chatBusy && (
+                          <div className="flex gap-3 items-center text-[13px] text-[var(--muted)]">
+                            <span className="w-8 h-8 rounded-full bg-[var(--surface-2)] border border-[var(--border)] flex items-center justify-center animate-pulse">✦</span>
+                            Gemini is thinking…
+                          </div>
+                        )}
                       </div>
                       <div className="flex gap-2">
                         <input
                           value={chatInput}
                           onChange={(e) => setChatInput(e.target.value)}
-                          onKeyDown={(e) => e.key === 'Enter' && askChat()}
+                          onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && askChat()}
                           placeholder="Explain overlay risk to a branch manager…"
-                          className="flex-1 h-10 px-4 rounded-full bg-[var(--surface-2)] border border-[var(--border)] text-[14px] text-[var(--text)] outline-none"
+                          className="flex-1 h-11 px-4 rounded-full bg-[var(--surface-2)] border border-[var(--border)] text-[14px] text-[var(--text)] outline-none focus:border-[var(--blue)]/50"
                         />
-                        <button type="button" onClick={askChat} disabled={chatBusy} className="h-10 px-5 rounded-full bg-[var(--blue)] text-[#0b0b0c] text-[14px] font-medium border-0 cursor-pointer disabled:opacity-50">
+                        <button type="button" onClick={askChat} disabled={chatBusy} className="h-11 px-5 rounded-full bg-[var(--blue)] text-[#0b0b0c] text-[14px] font-medium border-0 cursor-pointer disabled:opacity-50">
                           Send
                         </button>
                       </div>
@@ -397,18 +545,36 @@ export default function Home() {
   );
 }
 
-function FindingsBlock({ title, items }: { title: string; items?: { label: string; detail?: string }[] }) {
+const SEVERITY_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  CRITICAL: { bg: 'bg-[#ea4335]/10', text: 'text-[#ea4335]', border: 'border-l-[#ea4335]' },
+  HIGH:     { bg: 'bg-[#f28b82]/10', text: 'text-[#f28b82]', border: 'border-l-[#f28b82]' },
+  MEDIUM:   { bg: 'bg-[#fdd663]/10', text: 'text-[#fdd663]', border: 'border-l-[#fdd663]' },
+  LOW:      { bg: 'bg-[#81c995]/10', text: 'text-[#81c995]', border: 'border-l-[#81c995]' },
+};
+
+function FindingsBlock({ title, items }: { title: string; items?: { label: string; detail?: string; severity?: string }[] }) {
   if (!items?.length) return null;
   return (
     <section className="rounded-3xl bg-[var(--surface)] overflow-hidden">
-      <p className="px-6 pt-5 pb-2 text-[12px] uppercase tracking-widest text-[var(--muted)]">{title}</p>
+      <p className="px-6 pt-5 pb-3 text-[12px] uppercase tracking-widest text-[var(--muted)]">{title}</p>
       <ul>
-        {items.map((item, i) => (
-          <li key={i} className="px-6 py-4 border-t border-[var(--border)]">
-            <p className="text-[15px] font-medium">{item.label}</p>
-            {item.detail && <p className="text-[14px] text-[var(--muted)] mt-1 line-clamp-2">{item.detail}</p>}
-          </li>
-        ))}
+        {items.map((item, i) => {
+          const sev = (item.severity || '').toUpperCase();
+          const colors = SEVERITY_COLORS[sev] || { bg: '', text: 'text-[var(--muted)]', border: 'border-l-[var(--border)]' };
+          return (
+            <li key={i} className={`px-6 py-4 border-t border-[var(--border)] border-l-4 ${colors.border}`}>
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <p className="text-[15px] font-semibold leading-snug">{String(item.label || '')}</p>
+                {sev && SEVERITY_COLORS[sev] && (
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${colors.bg} ${colors.text}`}>{sev}</span>
+                )}
+              </div>
+              {item.detail && (
+                <p className="text-[13px] text-[var(--muted)] leading-relaxed">{String(item.detail)}</p>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

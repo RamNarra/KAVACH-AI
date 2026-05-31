@@ -1,0 +1,6 @@
+# watchfiles config — only watch .py source files in the backend dir.
+# This prevents the OSError: OS file watch limit reached crash caused by
+# uvicorn --reload trying to watch the entire venv (fontTools alone has 40k+ files).
+[filter]
+included_paths = ["."]
+excluded_paths = ["venv", "tools", "__pycache__", ".git", "*.pyc"]

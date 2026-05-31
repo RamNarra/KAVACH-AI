@@ -3,28 +3,30 @@ import time
 import subprocess
 import logging
 import threading
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-# Configure logger
+from toolchain import configure_android_env, resolve_adb, resolve_emulator
+
 logger = logging.getLogger("kavach-bootstrap")
 logger.setLevel(logging.INFO)
 
-# Setup SDK environment
-ANDROID_HOME = "/home/p4cketsn1ff3r/Android/Sdk"
-os.environ["ANDROID_HOME"] = ANDROID_HOME
-os.environ["PATH"] = f"{ANDROID_HOME}/cmdline-tools/latest/bin:{ANDROID_HOME}/platform-tools:{ANDROID_HOME}/emulator:{os.environ.get('PATH', '')}"
+configure_android_env()
 
-ADB_PATH = os.path.join(ANDROID_HOME, "platform-tools", "adb")
-EMULATOR_PATH = os.path.join(ANDROID_HOME, "emulator", "emulator")
+ANDROID_HOME = os.environ.get("ANDROID_HOME")
+ADB_PATH = resolve_adb()
+EMULATOR_PATH = resolve_emulator()
+SANDBOX_AVD = os.environ.get("SANDBOX_AVD", "kavach_sandbox")
+FRIDA_REMOTE_PATH = os.environ.get("FRIDA_SERVER_PATH", "/data/local/tmp/frida-server-16")
 
-# Shared state
 sandbox_status = "UNAVAILABLE"
 error_message = None
 emulator_running = False
 adb_connected = False
 frida_server_running = False
+_bootstrap_started = False
 
 status_lock = threading.Lock()
+
 
 def get_status_dict() -> Dict[str, Any]:
     with status_lock:
@@ -33,10 +35,11 @@ def get_status_dict() -> Dict[str, Any]:
             "emulator_running": emulator_running,
             "adb_connected": adb_connected,
             "frida_server_running": frida_server_running,
-            "error_message": error_message
+            "error_message": error_message,
         }
 
-def update_status(status: str, emu: bool, adb: bool, frida_srv: bool, err: str = None):
+
+def update_status(status: str, emu: bool, adb: bool, frida_srv: bool, err: Optional[str] = None):
     global sandbox_status, emulator_running, adb_connected, frida_server_running, error_message
     with status_lock:
         sandbox_status = status
@@ -45,143 +48,286 @@ def update_status(status: str, emu: bool, adb: bool, frida_srv: bool, err: str =
         frida_server_running = frida_srv
         error_message = err
 
+
+def _adb_run(args: list, timeout: float = 20) -> subprocess.CompletedProcess:
+    return subprocess.run([ADB_PATH, *args], capture_output=True, text=True, timeout=timeout)
+
+
 def is_emulator_running_adb() -> bool:
     try:
-        res = subprocess.run([ADB_PATH, "devices"], capture_output=True, text=True, timeout=20)
-        for line in res.stdout.splitlines():
-            if "emulator-" in line:
-                return True
+        res = _adb_run(["devices"])
+        return any("emulator-" in line for line in res.stdout.splitlines())
     except Exception:
-        pass
-    return False
+        return False
+
 
 def is_emulator_online_adb() -> bool:
     try:
-        res = subprocess.run([ADB_PATH, "devices"], capture_output=True, text=True, timeout=20)
-        for line in res.stdout.splitlines():
-            if "emulator-" in line and "device" in line:
-                return True
+        res = _adb_run(["devices"])
+        return any("emulator-" in line and "device" in line for line in res.stdout.splitlines())
     except Exception:
-        pass
-    return False
+        return False
+
+
+def is_package_manager_responsive() -> bool:
+    try:
+        res = _adb_run(["shell", "pm", "path", "android"], timeout=5)
+        if "Can't find service" in res.stdout or "Broken pipe" in res.stdout or "Can't find service" in res.stderr:
+            return False
+        return "package:" in res.stdout or res.returncode == 0
+    except Exception:
+        return False
+
+
+def kill_stale_emulator():
+    logger.warning("[sandbox] Stale/unresponsive emulator detected. Force-killing to restart...")
+    try:
+        subprocess.run(["pkill", "-9", "-f", "kavach_sandbox"], capture_output=True)
+        subprocess.run(["pkill", "-9", "-f", "qemu-system-x86_64-headless"], capture_output=True)
+        avd_dir = os.path.expanduser(f"~/.android/avd/{SANDBOX_AVD}.avd")
+        for lock in ["hardware-qemu.ini.lock", "multiinstance.lock"]:
+            lock_path = os.path.join(avd_dir, lock)
+            if os.path.exists(lock_path):
+                try:
+                    os.remove(lock_path)
+                    logger.info(f"[sandbox] Cleared lock file: {lock_path}")
+                except Exception:
+                    pass
+        time.sleep(2)
+    except Exception as e:
+        logger.error(f"[sandbox] Error killing stale emulator: {e}")
+
 
 def check_frida_server_running() -> bool:
     try:
-        # Check if frida-server-16 is running on the target emulator
-        res = subprocess.run([ADB_PATH, "shell", "ps -A | grep frida-server-16"], capture_output=True, text=True, timeout=20)
-        if "frida-server-16" in res.stdout:
+        pidof = _adb_run(["shell", "pidof", os.path.basename(FRIDA_REMOTE_PATH)])
+        if pidof.stdout.strip():
             return True
+        ps = _adb_run(["shell", "sh", "-c", "ps -A 2>/dev/null | grep -E 'frida-server' || true"])
+        return "frida-server" in ps.stdout
     except Exception:
-        pass
-    return False
+        return False
+
 
 def start_frida_server() -> bool:
+    binary = FRIDA_REMOTE_PATH
+    name = os.path.basename(binary)
     try:
-        logger.info("[sandbox] frida-server-16 not detected. Attempting to start...")
-        # 1. Run adb root
-        subprocess.run([ADB_PATH, "root"], capture_output=True, timeout=20)
-        
-        # 2. Try standard nohup startup using Popen to avoid blocking host processes
-        subprocess.Popen(
-            [ADB_PATH, "shell", "nohup /data/local/tmp/frida-server-16 < /dev/null > /dev/null 2>&1 &"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+        logger.info("[sandbox] frida-server not detected — attempting start...")
+        _adb_run(["root"], timeout=15)
+        _adb_run(["shell", "setenforce", "0"], timeout=10)
+
+        launch = (
+            f"setenforce 0 2>/dev/null; "
+            f"killall {name} 2>/dev/null; killall frida-server 2>/dev/null; "
+            f"{binary} -D"
         )
-        time.sleep(2)
-        
-        if check_frida_server_running():
-            logger.info("[sandbox] frida-server-16 started successfully via adb root.")
-            return True
-            
-        # 3. Fallback to su -c
-        logger.warning("[sandbox] frida-server-16 failed to launch as root. Trying su -c fallback...")
         subprocess.Popen(
-            [ADB_PATH, "shell", "su -c 'nohup /data/local/tmp/frida-server-16 < /dev/null > /dev/null 2>&1 &'"],
+            [ADB_PATH, "shell", launch],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
         )
-        time.sleep(2)
-        
+        time.sleep(3)
+
         if check_frida_server_running():
-            logger.info("[sandbox] frida-server-16 started successfully via su -c fallback.")
+            logger.info("[sandbox] frida-server started.")
             return True
+
+        logger.warning("[sandbox] root launch failed — trying su -c fallback...")
+        subprocess.Popen(
+            [ADB_PATH, "shell", f"su -c 'setenforce 0; {binary} -D'"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(3)
+        return check_frida_server_running()
+    except Exception as exc:
+        logger.error(f"[sandbox] Error launching frida-server: {exc}")
+        return False
+
+
+def ensure_sandbox_ready(force_bootstrap: bool = False) -> Dict[str, Any]:
+    """Best-effort heal: promote to READY when emulator + frida are actually up."""
+    global _bootstrap_started
+    online = is_emulator_online_adb()
+    
+    if online:
+        _adb_run(["shell", "setenforce", "0"], timeout=5)
+        try:
+            _adb_run(["shell", "wm", "dismiss-keyguard"], timeout=10)
+        except Exception:
+            pass
+        boot_res = _adb_run(["shell", "getprop", "sys.boot_completed"], timeout=5)
+        is_booted = "1" in boot_res.stdout or is_package_manager_responsive()
+        if is_booted:
+            pm_ready = False
+            for _ in range(30):
+                if is_package_manager_responsive():
+                    pm_ready = True
+                    break
+                time.sleep(2)
+            if not pm_ready:
+                logger.warning("[sandbox] Emulator is online and booted but package manager is unresponsive after 60s. Force-killing to heal...")
+                kill_stale_emulator()
+                online = False
+                _bootstrap_started = False
             
-    except Exception as e:
-        logger.error(f"[sandbox] Error launching frida-server: {e}")
-    return False
+    frida = check_frida_server_running() if online else False
+
+    if online and frida:
+        update_status("READY", True, True, True, None)
+        return get_status_dict()
+
+    if online and not frida:
+        if start_frida_server():
+            update_status("READY", True, True, True, None)
+            return get_status_dict()
+        update_status("ERROR", True, True, False, "Frida server failed to start")
+        return get_status_dict()
+
+    # Self-healing: if emulator is offline, reset bootstrap state to allow launching it
+    if not online:
+        _bootstrap_started = False
+
+    if force_bootstrap and not _bootstrap_started:
+        start_bootstrap_async()
+    return get_status_dict()
+
 
 def bootstrap_worker():
+    global _bootstrap_started
     logger.info("[sandbox] starting background sandbox bootstrap sequence...")
     update_status("BOOTING", False, False, False, None)
 
     try:
-        # 1. Check if ADB is accessible
         if not os.path.exists(ADB_PATH):
             logger.error(f"[sandbox] adb binary not found at path: {ADB_PATH}")
             update_status("UNAVAILABLE", False, False, False, "ADB binary missing")
             return
-            
-        # 2. Check if emulator is already running
+
         logger.info("[sandbox] checking adb devices...")
         emu_already_running = is_emulator_running_adb()
-        
+        if emu_already_running:
+            boot_res = _adb_run(["shell", "getprop", "sys.boot_completed"], timeout=5)
+            is_booted = "1" in boot_res.stdout
+            if is_booted:
+                pm_ready = False
+                for _ in range(8):
+                    if is_package_manager_responsive():
+                        pm_ready = True
+                        break
+                    time.sleep(2)
+                if not pm_ready:
+                    logger.warning("[sandbox] Stuck emulator detected in bootstrap (package manager unresponsive after 15s). Restarting...")
+                    kill_stale_emulator()
+                    emu_already_running = False
+
         if not emu_already_running:
-            # Check if emulator binary exists
-            if not os.path.exists(EMULATOR_PATH):
-                logger.error(f"[sandbox] emulator binary not found at path: {EMULATOR_PATH}")
+            if not EMULATOR_PATH or not os.path.exists(EMULATOR_PATH):
+                logger.error("[sandbox] emulator binary not found")
                 update_status("UNAVAILABLE", False, False, False, "Emulator binary missing")
                 return
 
-            logger.info("[sandbox] emulator not running, launching kavach_sandbox...")
-            # Spawn emulator in background
+            logger.info(f"[sandbox] launching AVD {SANDBOX_AVD}...")
             subprocess.Popen(
-                [EMULATOR_PATH, "-avd", "kavach_sandbox", "-no-window", "-no-audio"],
+                [
+                    EMULATOR_PATH,
+                    "-avd",
+                    SANDBOX_AVD,
+                    "-no-window",
+                    "-no-audio",
+                    "-no-boot-anim",
+                    "-gpu",
+                    "swiftshader_indirect",
+                    "-memory",
+                    "3072",
+                    "-partition-size",
+                    "4096",
+                    "-no-snapshot-save",
+                ],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stderr=subprocess.DEVNULL,
             )
         else:
-            logger.info("[sandbox] emulator process already active. Skipping duplicate launch.")
-            
-        # Wait for boot completion (timeout of 75 seconds)
+            logger.info("[sandbox] emulator already active — skipping duplicate launch.")
+
+        boot_timeout = int(os.environ.get("SANDBOX_BOOT_TIMEOUT_SECS", "120"))
         booted = False
         start_time = time.time()
-        logger.info("[sandbox] waiting for boot completion (75s timeout)...")
-        while time.time() - start_time < 75:
-            # First wait for device to show up as online in adb
+        logger.info(f"[sandbox] waiting for boot completion ({boot_timeout}s timeout)...")
+        while time.time() - start_time < boot_timeout:
             if is_emulator_online_adb():
-                # Check boot completed property
-                res = subprocess.run([ADB_PATH, "shell", "getprop sys.boot_completed"], capture_output=True, text=True, timeout=20)
-                if "1" in res.stdout:
+                try:
+                    _adb_run(["shell", "wm", "dismiss-keyguard"], timeout=10)
+                except Exception:
+                    pass
+                res = _adb_run(["shell", "getprop", "sys.boot_completed"])
+                if "1" in res.stdout or is_package_manager_responsive():
                     booted = True
                     break
             time.sleep(3)
-            
+
         if not booted:
-            logger.error("[sandbox] emulator boot timed out after 75 seconds.")
+            logger.error("[sandbox] emulator boot timed out.")
             update_status("ERROR", emu_already_running, is_emulator_online_adb(), False, "Emulator boot timed out")
             return
-        
+
         logger.info("[sandbox] emulator booted successfully.")
-        emu_run = True
-        adb_conn = True
+        _adb_run(["root"], timeout=10)
+        _adb_run(["shell", "setenforce", "0"], timeout=10)
 
-        # 3. Check and start Frida Server
-        frida_running = check_frida_server_running()
-        if not frida_running:
-            frida_running = start_frida_server()
-            
+        # Loop and verify package manager is fully responsive before launching Frida or reporting READY
+        pm_ready = False
+        logger.info("[sandbox] verifying package manager service is responsive...")
+        for _ in range(15):
+            if is_package_manager_responsive():
+                pm_ready = True
+                break
+            time.sleep(2)
+        if not pm_ready:
+            logger.error("[sandbox] Package manager service did not become responsive after boot.")
+            update_status("ERROR", True, True, False, "Package manager unresponsive")
+            return
+
+        frida_running = check_frida_server_running() or start_frida_server()
+
         if frida_running:
-            logger.info("[sandbox] frida-server-16 is running.")
+            # Kill high-CPU bloatware GMS services so the guest has headroom for
+            # APK install and Frida injection. These restart automatically later.
+            _kill_bloatware_services()
             logger.info("[sandbox] dynamic sandbox READY.")
-            update_status("READY", emu_run, adb_conn, True, None)
+            update_status("READY", True, True, True, None)
         else:
-            logger.error("[sandbox] frida-server-16 failed to start.")
-            update_status("ERROR", emu_run, adb_conn, False, "Frida server failed to start")
+            logger.error("[sandbox] frida-server failed to start.")
+            update_status("ERROR", True, True, False, "Frida server failed to start")
 
-    except Exception as e:
-        logger.error(f"[sandbox] Bootstrap crashed: {e}")
-        update_status("ERROR", False, False, False, str(e))
+    except Exception as exc:
+        logger.error(f"[sandbox] Bootstrap crashed: {exc}")
+        update_status("ERROR", False, False, False, str(exc))
+
+
+# Packages that hammer the CPU on fresh boots — disable them before APK install.
+_BLOATWARE_PKGS = [
+    "com.google.android.googlequicksearchbox",
+    "com.google.android.apps.messaging",
+    "com.google.android.as",          # Android System Intelligence (AI services)
+    "com.google.android.apps.nexuslauncher",
+]
+
+def _kill_bloatware_services():
+    """Force-stop the known CPU-hungry GMS packages so the guest has free cycles."""
+    for pkg in _BLOATWARE_PKGS:
+        try:
+            _adb_run(["shell", "am", "force-stop", pkg], timeout=10)
+            logger.info(f"[sandbox] force-stopped bloatware: {pkg}")
+        except Exception as e:
+            logger.debug(f"[sandbox] could not stop {pkg}: {e}")
+
 
 def start_bootstrap_async():
-    t = threading.Thread(target=bootstrap_worker, daemon=True)
-    t.start()
+    global _bootstrap_started
+    with status_lock:
+        if _bootstrap_started:
+            return
+        _bootstrap_started = True
+    threading.Thread(target=bootstrap_worker, daemon=True).start()

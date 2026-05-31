@@ -47,3 +47,13 @@ export async function sendChat(analysisId: string, message: string): Promise<str
   if (!res.ok) throw new Error(data.detail || 'Chat failed');
   return data.answer as string;
 }
+
+export async function triggerDynamicAnalysis(analysisId: string, uid: string): Promise<any> {
+  const res = await apiFetch(`/api/analysis/${analysisId}/dynamic`, {
+    method: 'POST',
+    body: JSON.stringify({ uid }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Dynamic analysis failed to start.');
+  return data;
+}
