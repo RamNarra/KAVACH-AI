@@ -57,3 +57,37 @@ export async function triggerDynamicAnalysis(analysisId: string, uid: string): P
   if (!res.ok) throw new Error(data.detail || 'Dynamic analysis failed to start.');
   return data;
 }
+
+export const isLocalAPI = !API || API.includes('localhost') || API.includes('127.0.0.1');
+
+export async function uploadApkDirect(
+  file: File,
+  email: string | null,
+  uid: string | null,
+  onProgress?: (pct: number) => void
+): Promise<any> {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (email) formData.append('email', email);
+  if (uid) formData.append('uid', uid);
+
+  if (onProgress) onProgress(30);
+  const user = auth.currentUser;
+  const headers = new Headers();
+  if (user) {
+    const token = await user.getIdToken();
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  
+  if (onProgress) onProgress(70);
+  const url = `${API}/api/analyze/upload?background=true`;
+  const res = await fetch(url, {
+    method: 'POST',
+    body: formData,
+    headers,
+  });
+  if (onProgress) onProgress(100);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Direct upload analysis failed.');
+  return data;
+}

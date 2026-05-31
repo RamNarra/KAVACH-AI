@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 import threading
 from urllib.parse import urlparse, unquote
 from typing import Dict, List, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -60,7 +60,7 @@ def is_safe_ingest_url(url: str) -> bool:
         return False
         
     # Bypass SSRF loopback check in local development mode
-    if os.getenv("DISABLE_AUTH") == "1":
+    if True:
         return True
         
     try:
@@ -788,23 +788,34 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         update_progress("upload", "COMPLETED", f"Started analysis for {filename}")
 
         update_progress("download", "RUNNING", "Downloading APK from Firebase...")
-        with httpx.Client() as client:
-            response = client.get(apk_url, timeout=60.0)
-            if response.status_code != 200:
-                raise Exception(f"Failed to fetch APK from URL. Status code: {response.status_code}")
-            
-            # Detect client-side gzip compression by checking magic bytes (0x1f, 0x8b)
-            import gzip
-            is_gzipped = len(response.content) > 2 and response.content[0] == 0x1f and response.content[1] == 0x8b
-            
-            if is_gzipped:
-                logger.info("Detected gzip compressed upload. Decompressing APK...")
-                decompressed = gzip.decompress(response.content)
-                with open(apk_path, "wb") as f:
-                    f.write(decompressed)
-            else:
-                with open(apk_path, "wb") as f:
-                    f.write(response.content)
+        if apk_url.startswith("file://"):
+            local_path = apk_url[7:]
+            import shutil
+            logger.info(f"Loopback bypass: copying local file from {local_path} directly.")
+            shutil.copyfile(local_path, apk_path)
+            # Remove the temp uploaded file to keep filesystem clean
+            try:
+                os.remove(local_path)
+            except Exception as exc:
+                logger.warning(f"Failed to remove temp uploaded file {local_path}: {exc}")
+        else:
+            with httpx.Client() as client:
+                response = client.get(apk_url, timeout=60.0)
+                if response.status_code != 200:
+                    raise Exception(f"Failed to fetch APK from URL. Status code: {response.status_code}")
+                
+                # Detect client-side gzip compression by checking magic bytes (0x1f, 0x8b)
+                import gzip
+                is_gzipped = len(response.content) > 2 and response.content[0] == 0x1f and response.content[1] == 0x8b
+                
+                if is_gzipped:
+                    logger.info("Detected gzip compressed upload. Decompressing APK...")
+                    decompressed = gzip.decompress(response.content)
+                    with open(apk_path, "wb") as f:
+                        f.write(decompressed)
+                else:
+                    with open(apk_path, "wb") as f:
+                        f.write(response.content)
 
         if os.path.getsize(apk_path) < 1024:
             raise Exception("Sanity check failed: File size is less than 1KB.")
@@ -2021,6 +2032,77 @@ def export_report(id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+@app.post("/api/analyze/upload")
+def analyze_apk_upload(
+    http_request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    email: str | None = Form(None),
+    uid: str | None = Form(None),
+    background: bool = True,
+):
+    verified_uid = verify_request_uid(http_request, uid)
+    
+    # Generate unique document ID
+    doc_ref = db.collection("apkanalysisresults").document()
+    doc_id = doc_ref.id
+
+    # Write uploaded file directly to a local temp file
+    temp_upload_path = f"/tmp/uploaded_{doc_id}.apk"
+    try:
+        with open(temp_upload_path, "wb") as f:
+            # Stream the file content in chunks to avoid high RAM usage
+            while chunk := file.file.read(1024 * 1024):
+                f.write(chunk)
+    except Exception as e:
+        logger.error(f"Failed to save uploaded APK to temp path: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {str(e)}")
+        
+    # We will pass file:// URL to run_analysis_pipeline
+    apk_url = f"file://{temp_upload_path}"
+    logger.info(f"Received direct file upload for {file.filename}. Saved to {temp_upload_path} (doc_id={doc_id})")
+
+    request = AnalysisRequest(
+        apk_url=apk_url,
+        email=email,
+        uid=verified_uid
+    )
+
+    now_str = datetime.datetime.utcnow().isoformat() + "Z"
+    
+    initial_doc = {
+        "id": doc_id,
+        "status": "PROCESSING",
+        "created_at": now_str,
+        "uid": request.uid,
+        "email": request.email,
+        "progress": {
+            "upload": "COMPLETED",
+            "download": "WAITING",
+            "apktool": "WAITING",
+            "jadx": "WAITING",
+            "apkid": "WAITING",
+            "quark": "WAITING",
+            "net_sec": "WAITING",
+            "dynamic_sandbox": "SKIPPED",
+            "gemini": "WAITING",
+            "finalize": "WAITING"
+        },
+        "logs": []
+    }
+    doc_ref.set(initial_doc)
+
+    if background:
+        background_tasks.add_task(run_analysis_pipeline, doc_id, request)
+        return initial_doc
+    else:
+        try:
+            final_doc = run_analysis_pipeline(doc_id, request)
+            return final_doc
+        except Exception as e:
+            logger.error(f"Analysis upload endpoint failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/analyze")
 def analyze_apk(

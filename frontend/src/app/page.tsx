@@ -11,7 +11,7 @@ import {
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { collection, doc, onSnapshot, query, where, orderBy } from 'firebase/firestore';
 import { auth, googleProvider, storage, db } from '../lib/firebase';
-import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis } from '../lib/api';
+import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, isLocalAPI, uploadApkDirect } from '../lib/api';
 import { DEMO_ANALYSIS } from '../lib/demo';
 import type { AnalysisDoc, ThreatLevel } from '../lib/types';
 import {
@@ -92,21 +92,27 @@ export default function Home() {
     setIsDemo(false);
 
     try {
-      const storageRef = ref(storage, `apks/${user.uid}/${Date.now()}_${file.name}`);
-      const url = await new Promise<string>((resolve, reject) => {
-        uploadBytesResumable(storageRef, file).on(
-          'state_changed',
-          (s) => setUploadPct(Math.round((s.bytesTransferred / s.totalBytes) * 100)),
-          reject,
-          async () => resolve(await getDownloadURL(storageRef))
-        );
-      });
-      const res = await apiFetch('/api/analyze?background=true', {
-        method: 'POST',
-        body: JSON.stringify({ apk_url: url, uid: user.uid, email: user.email }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Analysis failed to start.');
+      let data;
+      if (isLocalAPI) {
+        // Direct local loopback file bypass (completed in <0.1s!)
+        data = await uploadApkDirect(file, user.email, user.uid, setUploadPct);
+      } else {
+        const storageRef = ref(storage, `apks/${user.uid}/${Date.now()}_${file.name}`);
+        const url = await new Promise<string>((resolve, reject) => {
+          uploadBytesResumable(storageRef, file).on(
+            'state_changed',
+            (s) => setUploadPct(Math.round((s.bytesTransferred / s.totalBytes) * 100)),
+            reject,
+            async () => resolve(await getDownloadURL(storageRef))
+          );
+        });
+        const res = await apiFetch('/api/analyze?background=true', {
+          method: 'POST',
+          body: JSON.stringify({ apk_url: url, uid: user.uid, email: user.email }),
+        });
+        data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Analysis failed to start.');
+      }
       setActiveId(data.id);
       setFile(null);
     } catch (e) {
