@@ -1545,7 +1545,7 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
         update_progress("gemini", "RUNNING", "Re-synthesizing analysis report with dynamic traces...")
         
         evidentiary_details = ""
-        for cat in ["permissions", "exported_components", "dangerous_manifest_flags", "network_indicators", "data_storage_issues", "crypto_issues", "hardcoded_secrets", "reflection_dynamic_loading", "obfuscation_signals", "malware_rule_hits"]:
+        for cat in ["permissions", "exported_components", "dangerous_manifest_flags", "network_indicators", "data_storage_issues", "crypto_issues", "hardcoded_secrets", "suspicious_urls", "reflection_dynamic_loading", "obfuscation_signals", "malware_rule_hits"]:
             for item in static_evidence.get(cat, []):
                 evidentiary_details += f"- {item.get('description', 'Finding')}\n"
 

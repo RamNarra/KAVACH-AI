@@ -111,6 +111,7 @@ def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
     }
     
     matched_patterns = set()
+    pattern_counts = {}
 
     for path, code in jadx_sources.items():
         # Match code patterns
@@ -119,11 +120,17 @@ def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
                 pattern_key = f"{path}:{desc}"
                 if pattern_key not in matched_patterns:
                     matched_patterns.add(pattern_key)
-                    findings["score"] += sc
+                    pattern_counts[desc] = pattern_counts.get(desc, 0) + 1
+                    
+                    # Deduplicate: Only add to the risk score for the first 2 occurrences of this pattern across the app
+                    is_scored = pattern_counts[desc] <= 2
+                    if is_scored:
+                        findings["score"] += sc
+                        
                     findings[category].append({
                         "type": desc,
                         "file": path,
-                        "risk_score": sc,
+                        "risk_score": sc if is_scored else 0,
                         "description": f"Found {desc} inside source file."
                     })
         
@@ -435,6 +442,12 @@ _DANGEROUS_API_CHAINS = [
     ("onAccessibilityEvent","performGlobalAction","Accessibility Abuse (Overlay/Spy)",   30),
     ("loadUrl",             "evaluateJavascript", "WebView JS Injection",                15),
     ("PackageInstaller",    "install",            "Silently Installs Packages",          25),
+    ("getSubscriberId",     "openConnection",     "IMSI/Carrier Exfiltration to Network",25),
+    ("getRunningAppProcesses","openConnection",    "Dynamic Process Tracking & Exfil",    20),
+    ("loadLibrary",         "exec",               "Native Bytecode Execution / Shell",   30),
+    ("getLine1Number",      "openConnection",     "Phone Number Exfiltration to Net",    25),
+    ("SimTelephoneManager", "sendMultipartTextMessage", "Multipart SMS Evasion Risk",     25),
+    ("getNetworkOperator",  "openConnection",     "Network Carrier Info Exfiltration",   15),
 ]
 
 _RISKY_SUPERCLASSES = [
@@ -478,6 +491,9 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
         (r"https?://[a-zA-Z0-9-]+\.onion",                                  "Tor .onion C2 URL",       30),
         (r"https?://[a-zA-Z0-9]+\.ngrok\.io",                               "ngrok Tunnel URL",        20),
         (r"(?:[A-Za-z0-9+/]{4}){10,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", "Long Base64 Blob", 8),
+        (r"127\.0\.0\.1",                                                    "Loopback Listener Reference", 10),
+        (r"/system/bin/sh|/system/xbin/su|/bin/sh",                          "Shell Command Binary Reference", 25),
+        (r"\.dex|\.jar|\.so",                                                "Dynamic Executable File Target", 15),
     ]
     try:
         for d in (d_list if isinstance(d_list, list) else [d_list]):
@@ -559,9 +575,18 @@ def calculate_deterministic_score(
     # Engine 5: Androguard DEX bytecode analysis
     ag_res = analyze_androguard(apk_path) if apk_path else {"suspicious_strings": [], "dangerous_api_chains": [], "risky_classes": [], "score": 0}
 
+    # Apply capped category weights to balance the threat scoring
+    manifest_capped = min(m_res["score"], 25)
+    jadx_capped = min(j_res["score"], 20)
+    apkid_capped = min(a_res["score"], 25)
+    quark_capped = min(q_res["score"], 25)
+    net_capped = min(net_res["score"], 20)
+    secrets_capped = min(sec_res["score"], 20)
+    androguard_capped = min(ag_res["score"], 25)
+
     total_score = (
-        m_res["score"] + j_res["score"] + a_res["score"] + q_res["score"]
-        + net_res["score"] + sec_res["score"] + ag_res["score"]
+        manifest_capped + jadx_capped + apkid_capped + quark_capped
+        + net_capped + secrets_capped + androguard_capped
     )
 
     # Use asymptotic scoring so it scales naturally up to 100
@@ -600,10 +625,12 @@ def calculate_deterministic_score(
     manifest_details += [f"- {f['description']}" for f in evidence["dangerous_manifest_flags"]]
 
     jadx_details = []
-    for cat in ["network_indicators", "data_storage_issues", "crypto_issues", "hardcoded_secrets", "reflection_dynamic_loading", "obfuscation_signals"]:
+    # Make sure we scan all relevant code/secret/URL categories for the prompt context
+    for cat in ["network_indicators", "data_storage_issues", "crypto_issues", "hardcoded_secrets", "suspicious_urls", "reflection_dynamic_loading", "obfuscation_signals"]:
         for item in evidence[cat]:
             file_str = f" in {item.get('file')}" if item.get('file') else ""
-            jadx_details.append(f"- {item.get('type', item.get('class', 'Finding'))}{file_str} ({item.get('description', '')})")
+            finding_type = item.get('type', item.get('class', item.get('url', item.get('value', 'Finding'))))
+            jadx_details.append(f"- {finding_type}{file_str} ({item.get('description', '')})")
 
     evasion_details = [f"- {hit['description']}" for hit in evidence["malware_rule_hits"]]
 

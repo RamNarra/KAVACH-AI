@@ -56,6 +56,7 @@ export default function Home() {
   const [chatBusy, setChatBusy] = useState(false);
   const [scanTick, setScanTick] = useState(0);
   const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const [staticTab, setStaticTab] = useState<'manifest' | 'apkid' | 'quark' | 'androguard' | 'secrets' | 'network'>('manifest');
 
   useEffect(() => onAuthStateChanged(auth, (u) => { setUser(u); setAuthReady(true); }), []);
 
@@ -410,6 +411,289 @@ export default function Home() {
                       )}
                     </section>
                   )}
+
+                  {/* Static Engines Telemetry Explorer */}
+                  <section className="rounded-3xl bg-[var(--surface)] p-6 space-y-4 border border-[var(--border)]">
+                    <div>
+                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] mb-1 font-semibold tracking-wider">Static Engines Telemetry</p>
+                      <p className="text-[13px] text-[var(--muted)]">Inspect raw security engine findings across each decompiled layer.</p>
+                    </div>
+
+                    <div className="flex gap-1 overflow-x-auto pb-2 border-b border-[var(--border)] -mx-6 px-6 no-scrollbar">
+                      {(['manifest', 'apkid', 'quark', 'androguard', 'secrets', 'network'] as const).map((tab) => (
+                        <button
+                          key={tab}
+                          type="button"
+                          onClick={() => setStaticTab(tab)}
+                          className={`px-4 py-2 text-[13px] font-semibold whitespace-nowrap rounded-full cursor-pointer transition-all border-0 ${
+                            staticTab === tab
+                              ? 'bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/30'
+                              : 'bg-transparent text-[var(--muted)] hover:text-[var(--text)]'
+                          }`}
+                        >
+                          {tab === 'manifest' && 'Manifest'}
+                          {tab === 'apkid' && 'APKiD VM'}
+                          {tab === 'quark' && 'Quark Behavioral'}
+                          {tab === 'androguard' && 'Androguard DEX'}
+                          {tab === 'secrets' && 'Deep Secrets'}
+                          {tab === 'network' && 'Network Config'}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="pt-2">
+                      {staticTab === 'manifest' && (
+                        <div className="space-y-4 animate-fadeIn">
+                          {current.evidence?.permissions && current.evidence.permissions.length > 0 ? (
+                            <div className="space-y-2">
+                              <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Dangerous Permissions</p>
+                              {current.evidence.permissions.map((p, i) => (
+                                <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                  <div>
+                                    <p className="text-[14px] font-mono text-[var(--text)] break-all">{p.name}</p>
+                                    {p.description && <p className="text-[12px] text-[var(--muted)] mt-0.5">{p.description}</p>}
+                                  </div>
+                                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{p.risk_score}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-[13px] text-[var(--muted)]">No dangerous permissions requested.</p>
+                          )}
+
+                          {current.evidence?.exported_components && current.evidence.exported_components.length > 0 && (
+                            <div className="space-y-2 pt-2 border-t border-[var(--border)]">
+                              <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Exported Components</p>
+                              {current.evidence.exported_components.map((ec, i) => (
+                                <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                  <div className="flex justify-between items-start gap-3">
+                                    <p className="text-[13px] font-mono break-all font-semibold">{ec.name}</p>
+                                    <span className="text-[11px] uppercase px-2 py-0.5 rounded bg-[var(--surface)] text-[var(--muted)] border border-[var(--border)] shrink-0 font-semibold">{ec.type}</span>
+                                  </div>
+                                  <p className="text-[12px] text-[var(--muted)] mt-1">{ec.description}</p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {current.evidence?.dangerous_manifest_flags && current.evidence.dangerous_manifest_flags.length > 0 && (
+                            <div className="space-y-2 pt-2 border-t border-[var(--border)]">
+                              <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Dangerous Manifest Flags</p>
+                              {current.evidence.dangerous_manifest_flags.map((f, i) => (
+                                <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                  <div>
+                                    <p className="text-[13px] font-mono font-semibold">{f.flag}</p>
+                                    <p className="text-[12px] text-[var(--muted)] mt-0.5">{f.description}</p>
+                                  </div>
+                                  <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{f.risk_score}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {staticTab === 'apkid' && (
+                        <div className="space-y-4 animate-fadeIn">
+                          {(() => {
+                            const avm = current.evidence?.malware_rule_hits?.filter(x => x.type === "Anti-VM Check") || [];
+                            const obf = current.evidence?.obfuscation_signals?.filter(x => x.type === "Obfuscator" || x.type === "Packer" || x.type === "Manipulator") || [];
+                            if (avm.length === 0 && obf.length === 0) {
+                              return <p className="text-[13px] text-[var(--muted)]">No packer, compiler manipulation, or VM evasion signatures detected.</p>;
+                            }
+                            return (
+                              <div className="space-y-4">
+                                {avm.length > 0 && (
+                                  <div className="space-y-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Anti-VM & VM Evasion Rules</p>
+                                    {avm.map((a, i) => (
+                                      <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                        <div>
+                                          <p className="text-[14px] font-semibold">{a.match || "Anti-VM Indicator"}</p>
+                                          <p className="text-[12px] text-[var(--muted)] mt-0.5">{a.description}</p>
+                                        </div>
+                                        <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)]">+{a.risk_score}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {obf.length > 0 && (
+                                  <div className="space-y-2 border-t border-[var(--border)] pt-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Packers & Obfuscators</p>
+                                    {obf.map((o, i) => (
+                                      <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                        <div>
+                                          <p className="text-[14px] font-semibold">{o.match || "Obfuscated Target"}</p>
+                                          <p className="text-[12px] text-[var(--muted)] mt-0.5">{o.description}</p>
+                                        </div>
+                                        <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)]">+{o.risk_score}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+
+                      {staticTab === 'quark' && (
+                        <div className="space-y-4 animate-fadeIn">
+                          {(() => {
+                            const quarkHits = current.evidence?.malware_rule_hits?.filter(x => x.rule) || [];
+                            if (quarkHits.length === 0) {
+                              return <p className="text-[13px] text-[var(--muted)]">No high-confidence Quark behavioral rules triggered.</p>;
+                            }
+                            return (
+                              <div className="space-y-3">
+                                {quarkHits.map((q, i) => (
+                                  <div key={i} className="py-3 px-4 bg-[var(--surface-2)] rounded-2xl border border-[var(--border)] space-y-1.5">
+                                    <div className="flex justify-between items-start gap-3">
+                                      <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/20 font-semibold">{q.rule}</span>
+                                      <span className="text-[11px] px-2 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)] font-medium">Confidence: {q.confidence}</span>
+                                    </div>
+                                    <p className="text-[14px] font-semibold leading-snug">{q.description}</p>
+                                    <div className="flex justify-between items-center text-[12px] text-[var(--muted)] pt-1 border-t border-[var(--border)]/30">
+                                      <span>Severity: {q.severity}</span>
+                                      <span className="text-[var(--red)] font-semibold">+{q.risk_score} pts</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+
+                      {staticTab === 'androguard' && (
+                        <div className="space-y-4 animate-fadeIn">
+                          {(() => {
+                            const chains = current.evidence?.reflection_dynamic_loading?.filter(x => x.type && x.description?.includes("API chain")) || [];
+                            const superclasses = current.evidence?.obfuscation_signals?.filter(x => x.class) || [];
+                            const strings = current.evidence?.suspicious_urls?.filter(x => x.type && !x.url) || [];
+                            if (chains.length === 0 && superclasses.length === 0 && strings.length === 0) {
+                              return <p className="text-[13px] text-[var(--muted)]">No suspicious static bytecode call chains or extensions matched.</p>;
+                            }
+                            return (
+                              <div className="space-y-4">
+                                {chains.length > 0 && (
+                                  <div className="space-y-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Dangerous API Call Chains</p>
+                                    {chains.map((c, i) => (
+                                      <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)] flex justify-between items-center gap-3">
+                                        <div>
+                                          <p className="text-[14px] font-semibold">{c.type}</p>
+                                          <p className="text-[12px] text-[var(--muted)] mt-0.5">{c.description}</p>
+                                        </div>
+                                        <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{c.risk_score}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {superclasses.length > 0 && (
+                                  <div className="space-y-2 border-t border-[var(--border)] pt-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Risky Extended Superclasses</p>
+                                    {superclasses.map((s, i) => (
+                                      <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                        <div className="flex justify-between items-start gap-3">
+                                          <p className="text-[13px] font-mono break-all font-semibold">{s.class}</p>
+                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] shrink-0">+{s.risk_score}</span>
+                                        </div>
+                                        <p className="text-[12px] text-[var(--muted)] mt-1">{s.description}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {strings.length > 0 && (
+                                  <div className="space-y-2 border-t border-[var(--border)] pt-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Constant Bytecode Pattern Detections</p>
+                                    {strings.map((str, i) => (
+                                      <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)] flex justify-between items-start gap-3">
+                                        <div>
+                                          <p className="text-[13px] font-semibold">{str.type}</p>
+                                          <p className="text-[12px] font-mono text-[var(--muted)] break-all mt-0.5">{str.value}</p>
+                                        </div>
+                                        <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{str.risk_score}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+
+                      {staticTab === 'secrets' && (
+                        <div className="space-y-4 animate-fadeIn">
+                          {(() => {
+                            const secrets = current.evidence?.hardcoded_secrets || [];
+                            if (secrets.length === 0) {
+                              return <p className="text-[13px] text-[var(--muted)]">No credentials, keys, or hardcoded tokens leaked.</p>;
+                            }
+                            return (
+                              <div className="space-y-3">
+                                {secrets.map((s, i) => (
+                                  <div key={i} className="py-3 px-4 bg-[var(--surface-2)] rounded-2xl border border-[var(--border)] space-y-1.5">
+                                    <div className="flex justify-between items-start gap-3">
+                                      <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20">{s.severity}</span>
+                                      <span className="text-[12px] font-semibold text-[var(--red)]">+{s.risk_score} pts</span>
+                                    </div>
+                                    <p className="text-[14px] font-semibold">{s.type}</p>
+                                    {s.file && <p className="text-[11px] font-mono text-[var(--muted)] break-all bg-[var(--surface)] py-1 px-2 rounded">{s.file}</p>}
+                                    <p className="text-[13px] text-[var(--muted)] pt-0.5 leading-relaxed">{s.description}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+
+                      {staticTab === 'network' && (
+                        <div className="space-y-4 animate-fadeIn">
+                          {(() => {
+                            const cleartextUrls = current.evidence?.suspicious_urls?.filter(x => x.url) || [];
+                            const configIssues = current.evidence?.network_indicators?.filter(x => x.description?.includes("HTTP traffic") || x.description?.includes("certificates")) || [];
+                            if (cleartextUrls.length === 0 && configIssues.length === 0) {
+                              return <p className="text-[13px] text-[var(--muted)]">No cleartext HTTP permissions or domain indicators reported.</p>;
+                            }
+                            return (
+                              <div className="space-y-4">
+                                {configIssues.length > 0 && (
+                                  <div className="space-y-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Network Security XML Config</p>
+                                    {configIssues.map((c, i) => (
+                                      <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)] flex justify-between items-center gap-3">
+                                        <div>
+                                          <p className="text-[14px] font-semibold">{c.type}</p>
+                                          <p className="text-[12px] text-[var(--muted)] mt-0.5">{c.description}</p>
+                                        </div>
+                                        <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{c.risk_score}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {cleartextUrls.length > 0 && (
+                                  <div className="space-y-2 border-t border-[var(--border)] pt-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Suspicious & Decoupled URLs (JADX)</p>
+                                    <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1">
+                                      {cleartextUrls.map((url, i) => (
+                                        <div key={i} className="py-2 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                          <p className="text-[13px] font-mono break-all text-[var(--text)] font-semibold">{url.url}</p>
+                                          {url.file && <p className="text-[11px] font-mono text-[var(--muted)] break-all mt-1 bg-[var(--surface)] py-0.5 px-1.5 rounded inline-block">{url.file}</p>}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+                    </div>
+                  </section>
 
                   {current.attack_techniques && current.attack_techniques.length > 0 && (
                     <section className="space-y-3">

@@ -58,6 +58,16 @@ export interface AnalysisDoc {
   };
   evidence?: {
     permissions?: { name?: string; description?: string; risk_score?: number }[];
+    exported_components?: { name?: string; type?: string; risk_score?: number; description?: string }[];
+    dangerous_manifest_flags?: { flag?: string; risk_score?: number; description?: string }[];
+    network_indicators?: { type?: string; risk_score?: number; description?: string; file?: string }[];
+    data_storage_issues?: { type?: string; risk_score?: number; description?: string; file?: string }[];
+    crypto_issues?: { type?: string; risk_score?: number; description?: string; file?: string }[];
+    hardcoded_secrets?: { type?: string; risk_score?: number; description?: string; file?: string; severity?: string }[];
+    suspicious_urls?: { url?: string; file?: string; type?: string; value?: string; risk_score?: number; severity?: string; description?: string }[];
+    reflection_dynamic_loading?: { type?: string; risk_score?: number; description?: string; file?: string; severity?: string }[];
+    obfuscation_signals?: { type?: string; risk_score?: number; description?: string; file?: string; match?: string; class?: string; severity?: string }[];
+    malware_rule_hits?: { rule?: string; description?: string; severity?: string; confidence?: string; risk_score?: number; type?: string; match?: string }[];
     dynamic_analysis?: {
       status?: string;
       runtime_findings?: { id?: string; title?: string; summary?: string; severity?: string }[];
