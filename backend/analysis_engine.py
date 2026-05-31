@@ -580,13 +580,13 @@ def calculate_deterministic_score(
     ag_res = analyze_androguard(apk_path) if apk_path else {"suspicious_strings": [], "dangerous_api_chains": [], "risky_classes": [], "score": 0}
 
     # Apply capped category weights to balance the threat scoring
-    manifest_capped = min(m_res["score"], 25)
-    jadx_capped = min(j_res["score"], 20)
-    apkid_capped = min(a_res["score"], 25)
-    quark_capped = min(q_res["score"], 25)
-    net_capped = min(net_res["score"], 20)
-    secrets_capped = min(sec_res["score"], 20)
-    androguard_capped = min(ag_res["score"], 25)
+    manifest_capped = min(m_res["score"], 15)
+    jadx_capped = min(j_res["score"], 30)
+    apkid_capped = min(a_res["score"], 10)
+    quark_capped = min(q_res["score"], 35)
+    net_capped = min(net_res["score"], 15)
+    secrets_capped = min(sec_res["score"], 30)
+    androguard_capped = min(ag_res["score"], 35)
 
     total_score = (
         manifest_capped + jadx_capped + apkid_capped + quark_capped
@@ -594,7 +594,7 @@ def calculate_deterministic_score(
     )
 
     # Use asymptotic scoring so it scales naturally up to 100
-    clamped_score = int(100 * (1 - math.exp(-total_score / 35.0)))
+    clamped_score = int(100 * (1 - math.exp(-total_score / 40.0)))
     if total_score == 0:
         clamped_score = 0
 
