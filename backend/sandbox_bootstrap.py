@@ -316,6 +316,7 @@ _BLOATWARE_PKGS = [
     "com.google.android.music",                 # Play Music
     "com.google.android.videos",                # Play Movies
     "com.google.android.settings.intelligence", # Settings Search Indexer
+    "com.google.android.inputmethod.latin",     # Gboard keyboard
 ]
 
 def _kill_bloatware_services():
