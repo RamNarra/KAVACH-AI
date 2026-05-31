@@ -56,7 +56,7 @@ export default function Home() {
   const [chatBusy, setChatBusy] = useState(false);
   const [scanTick, setScanTick] = useState(0);
   const [summaryExpanded, setSummaryExpanded] = useState(false);
-  const [staticTab, setStaticTab] = useState<'manifest' | 'apkid' | 'quark' | 'androguard' | 'secrets' | 'network'>('manifest');
+  const [staticTab, setStaticTab] = useState<'manifest' | 'apkid' | 'quark' | 'androguard' | 'secrets' | 'network' | 'compliance'>('manifest');
 
   useEffect(() => onAuthStateChanged(auth, (u) => { setUser(u); setAuthReady(true); }), []);
 
@@ -431,7 +431,7 @@ export default function Home() {
                     </div>
 
                     <div className="flex gap-1 overflow-x-auto pb-2 border-b border-[var(--border)] -mx-6 px-6 no-scrollbar">
-                      {(['manifest', 'apkid', 'quark', 'androguard', 'secrets', 'network'] as const).map((tab) => (
+                      {(['manifest', 'apkid', 'quark', 'androguard', 'secrets', 'network', 'compliance'] as const).map((tab) => (
                         <button
                           key={tab}
                           type="button"
@@ -448,6 +448,7 @@ export default function Home() {
                           {tab === 'androguard' && 'Androguard DEX'}
                           {tab === 'secrets' && 'Deep Secrets'}
                           {tab === 'network' && 'Network Config'}
+                          {tab === 'compliance' && 'OWASP & AST'}
                         </button>
                       ))}
                     </div>
@@ -551,7 +552,7 @@ export default function Home() {
                       {staticTab === 'quark' && (
                         <div className="space-y-4 animate-fadeIn">
                           {(() => {
-                            const quarkHits = current.evidence?.malware_rule_hits?.filter(x => x.rule) || [];
+                            const quarkHits = current.evidence?.malware_rule_hits?.filter(x => x.rule && !x.rule.includes("MobSF") && !x.rule.includes("semgrep")) || [];
                             if (quarkHits.length === 0) {
                               return <p className="text-[13px] text-[var(--muted)]">No high-confidence Quark behavioral rules triggered.</p>;
                             }
@@ -580,6 +581,56 @@ export default function Home() {
                                     </div>
                                   </div>
                                 ))}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+
+                      {staticTab === 'compliance' && (
+                        <div className="space-y-4 animate-fadeIn">
+                          {(() => {
+                            const semgrepHits = current.evidence?.malware_rule_hits?.filter(x => x.rule?.includes("semgrep")) || [];
+                            const cryptoSemgrep = current.evidence?.crypto_issues?.filter(x => x.type === "semgrep") || [];
+                            const mobsfHits = current.evidence?.malware_rule_hits?.filter(x => x.rule?.includes("MobSF")) || [];
+                            const totalSemgrep = [...semgrepHits, ...cryptoSemgrep];
+                            
+                            if (totalSemgrep.length === 0 && mobsfHits.length === 0) {
+                              return <p className="text-[13px] text-[var(--muted)]">No Semgrep AST violations or MobSF compliance scorecard entries found.</p>;
+                            }
+                            return (
+                              <div className="space-y-4">
+                                {mobsfHits.length > 0 && (
+                                  <div className="space-y-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">MobSF OWASP Top 10 Compliance</p>
+                                    {mobsfHits.map((m, i) => (
+                                      <div key={i} className="py-3 px-4 bg-[var(--surface-2)] rounded-2xl border border-[var(--border)] space-y-1.5">
+                                        <div className="flex justify-between items-start gap-3">
+                                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/20 font-semibold">{m.rule}</span>
+                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{m.risk_score || 5} pts</span>
+                                        </div>
+                                        <p className="text-[13px] text-[var(--muted)] leading-relaxed mt-1">{m.description}</p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                
+                                {totalSemgrep.length > 0 && (
+                                  <div className="space-y-2 border-t border-[var(--border)] pt-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Semgrep MASTG AST Violations</p>
+                                    {totalSemgrep.map((s, i) => (
+                                      <div key={i} className="py-3 px-4 bg-[var(--surface-2)] rounded-2xl border border-[var(--border)] space-y-1.5">
+                                        <div className="flex justify-between items-start gap-3">
+                                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20 shrink-0">{(s as any).severity || "HIGH"}</span>
+                                          <span className="text-[12px] font-semibold text-[var(--red)] shrink-0">+{s.risk_score || 10} pts</span>
+                                        </div>
+                                        <p className="text-[14px] font-semibold">{s.description || (s as any).rule}</p>
+                                        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                                        {(s as any).file && <p className="text-[11px] font-mono text-[var(--muted)] break-all bg-[var(--surface)] py-1 px-2 rounded">{(s as any).file}</p>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
                             );
                           })()}

@@ -674,7 +674,8 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
                         "description": msg,
                         "file": rel,
                         "severity": sev,
-                        "risk_score": 10 if sev == "ERROR" else 5
+                        "risk_score": 10 if sev == "ERROR" else 5,
+                        "type": "semgrep"
                     })
                     findings["score"] += 10 if sev == "ERROR" else 5
                 return findings
@@ -719,7 +720,8 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
                             "description": f"AST Match: {desc}",
                             "file": rel,
                             "severity": sev,
-                            "risk_score": score
+                            "risk_score": score,
+                            "type": "semgrep"
                         })
                         findings["score"] += score
     return findings
