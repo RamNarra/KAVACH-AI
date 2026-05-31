@@ -72,9 +72,7 @@ def is_emulator_online_adb() -> bool:
 def is_package_manager_responsive() -> bool:
     try:
         res = _adb_run(["shell", "pm", "path", "android"], timeout=5)
-        if "Can't find service" in res.stdout or "Broken pipe" in res.stdout or "Can't find service" in res.stderr:
-            return False
-        return "package:" in res.stdout or res.returncode == 0
+        return "package:" in res.stdout
     except Exception:
         return False
 
@@ -147,50 +145,43 @@ def start_frida_server() -> bool:
 
 
 def ensure_sandbox_ready(force_bootstrap: bool = False) -> Dict[str, Any]:
-    """Best-effort heal: promote to READY when emulator + frida are actually up."""
+    """Quick, non-blocking state check to return sandbox status. Defer boots to background thread."""
     global _bootstrap_started
     online = is_emulator_online_adb()
     
-    if online:
-        _adb_run(["shell", "setenforce", "0"], timeout=5)
-        try:
-            _adb_run(["shell", "wm", "dismiss-keyguard"], timeout=10)
-        except Exception:
-            pass
-        boot_res = _adb_run(["shell", "getprop", "sys.boot_completed"], timeout=5)
-        is_booted = "1" in boot_res.stdout or is_package_manager_responsive()
-        if is_booted:
-            pm_ready = False
-            for _ in range(30):
-                if is_package_manager_responsive():
-                    pm_ready = True
-                    break
-                time.sleep(2)
-            if not pm_ready:
-                logger.warning("[sandbox] Emulator is online and booted but package manager is unresponsive after 60s. Force-killing to heal...")
-                kill_stale_emulator()
-                online = False
-                _bootstrap_started = False
-            
-    frida = check_frida_server_running() if online else False
+    if not online:
+        # If the emulator is offline, reset bootstrap state and trigger boot asynchronously if requested
+        with status_lock:
+            global sandbox_status
+            if sandbox_status == "READY":
+                sandbox_status = "UNAVAILABLE"
+        _bootstrap_started = False
+        if force_bootstrap:
+            start_bootstrap_async()
+        return get_status_dict()
 
-    if online and frida:
+    # If the emulator is online, verify if zygote and package manager are responsive yet
+    pm_responsive = is_package_manager_responsive()
+    if not pm_responsive:
+        # Still booting. Let the background thread handle the cold boot wait.
+        # Do NOT block the request handler or run any force-kill loops here!
+        return get_status_dict()
+            
+    # If package manager is responsive, check if Frida is running
+    frida = check_frida_server_running()
+
+    if frida:
         update_status("READY", True, True, True, None)
         return get_status_dict()
 
-    if online and not frida:
-        if start_frida_server():
-            update_status("READY", True, True, True, None)
-            return get_status_dict()
+    # Try to start Frida server (returns True if it was successfully started/verified)
+    if start_frida_server():
+        # Clean up known heavy background services to optimize memory and CPU
+        _kill_bloatware_services()
+        update_status("READY", True, True, True, None)
+    else:
         update_status("ERROR", True, True, False, "Frida server failed to start")
-        return get_status_dict()
 
-    # Self-healing: if emulator is offline, reset bootstrap state to allow launching it
-    if not online:
-        _bootstrap_started = False
-
-    if force_bootstrap and not _bootstrap_started:
-        start_bootstrap_async()
     return get_status_dict()
 
 
