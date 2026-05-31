@@ -253,8 +253,8 @@ def run_and_stream_cmd(cmd: List[str], label: str, doc_ref, timeout: float = Non
                 log_line = f"[{label}] {stripped}"
                 logger.info(log_line)
                 
-                # Throttle JADX progress percent logs to 10% increments (avoid Firestore clutter)
-                if label == "JADX" and "%" in stripped:
+                # Throttle progress percent logs to 10% increments (avoid Firestore clutter)
+                if label in ("JADX", "Quark") and "%" in stripped:
                     import re
                     pct_match = re.search(r'(\d+)%', stripped)
                     if pct_match:
@@ -287,8 +287,8 @@ def run_and_stream_cmd(cmd: List[str], label: str, doc_ref, timeout: float = Non
             log_line = f"[{label}] {stripped}"
             logger.info(log_line)
             
-            # Throttle trailing JADX progress percent logs to 10% increments
-            if label == "JADX" and "%" in stripped:
+            # Throttle trailing progress percent logs to 10% increments
+            if label in ("JADX", "Quark") and "%" in stripped:
                 import re
                 pct_match = re.search(r'(\d+)%', stripped)
                 if pct_match:
@@ -848,7 +848,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         def run_apktool():
             nonlocal package_name, launcher_activity, manifest_content, apktool_error
             try:
-                apktool_cmd = maybe_nice([*APKTOOL_CMD, "d", "-s", "-f", "-o", apktool_out, apk_path])
+                apktool_cmd = [*APKTOOL_CMD, "d", "-s", "-f", "-o", apktool_out, apk_path]
                 process = run_and_stream_cmd(apktool_cmd, "APKTool", doc_ref)
                 if process.returncode != 0:
                     raise Exception("APKTool decoding failed")
@@ -872,7 +872,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             try:
                 # Limit JVM memory usage to 1GB to prevent host RAM exhaustion and OOM kills
                 os.environ["JADX_OPTS"] = "-Xmx1024m -XX:+UseSerialGC"
-                jadx_cmd = maybe_nice([
+                jadx_cmd = [
                     JADX_BIN,
                     "--no-res",
                     "--no-imports",
@@ -881,10 +881,9 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
                     "--comments-level", "none",
                     "--decompilation-mode", "simple",
                     "--quiet",
-                    "--exclude-packages", "android.support:androidx:com.google:kotlin:kotlinx:okio:okhttp3:okhttp:retrofit2:retrofit:org.jetbrains:com.facebook:com.google.android.gms",
                     "-d", jadx_out,
                     apk_path,
-                ])
+                ]
                 rc = run_jadx_decompile(jadx_cmd, doc_ref, JADX_TIMEOUT_SECS)
                 if rc != 0:
                     logger.warning(f"JADX decompilation returned non-zero: {rc}")
@@ -901,7 +900,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         def run_apkid():
             nonlocal apkid_error
             try:
-                apkid_cmd = maybe_nice([*resolve_apkid(), "-j", apk_path])
+                apkid_cmd = [*resolve_apkid(), "-j", apk_path]
                 logger.info(f"Running APKiD command: {' '.join(apkid_cmd)}")
                 proc = subprocess.run(apkid_cmd, capture_output=True, text=True, timeout=60)
                 if proc.returncode == 0:
@@ -928,36 +927,18 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
                 
                 venv_quark = os.path.join(_BACKEND_DIR, "venv", "bin", "quark")
                 quark_bin = venv_quark if os.path.isfile(venv_quark) else "quark"
-                quark_cmd = maybe_nice([quark_bin, "-a", apk_path, "-o", quark_json_path])
+                quark_cmd = [quark_bin, "-a", apk_path, "-o", quark_json_path, "--auto-fix-checksum"]
                 logger.info(f"Running Quark command: {' '.join(quark_cmd)}")
                 
-                # Start a background log progress ticker to update the analyst in real-time
-                import time as ttime
-                stop_ticker = threading.Event()
-                def log_ticker():
-                    start_t = ttime.time()
-                    while not stop_ticker.wait(15.0):
-                        elapsed_t = int(ttime.time() - start_t)
-                        doc_ref.update({"logs": firestore.ArrayUnion([
-                            f"[Quark-Engine] Scanning Dalvik bytecode signatures for MITRE ATT&CK patterns ({elapsed_t}s elapsed)…"
-                        ])})
-                
-                ticker_thread = threading.Thread(target=log_ticker, daemon=True)
-                ticker_thread.start()
-                
-                try:
-                    # Execute Quark with 180s timeout to easily accommodate 10mb files on single-threaded CPUs
-                    proc = subprocess.run(quark_cmd, capture_output=True, text=True, timeout=180)
-                    if proc.returncode == 0 or os.path.exists(quark_json_path):
-                        update_progress("quark", "COMPLETED", "Quark-Engine behavioral analysis complete.")
-                        doc_ref.update({"logs": firestore.ArrayUnion([
-                            "[Quark-Engine] Successfully resolved and matched bytecode relations to MITRE ATT&CK Crimes."
-                        ])})
-                    else:
-                        raise Exception(f"Quark failed with code {proc.returncode}: {proc.stderr}")
-                finally:
-                    stop_ticker.set()
-                    ticker_thread.join(timeout=2)
+                # Execute Quark with 180s timeout and stream stdout/stderr line-by-line to Firestore logs
+                proc = run_and_stream_cmd(quark_cmd, "Quark", doc_ref, timeout=180)
+                if proc.returncode == 0 or os.path.exists(quark_json_path):
+                    update_progress("quark", "COMPLETED", "Quark-Engine behavioral analysis complete.")
+                    doc_ref.update({"logs": firestore.ArrayUnion([
+                        "[Quark] Successfully resolved and matched bytecode relations to MITRE ATT&CK Crimes."
+                    ])})
+                else:
+                    raise Exception(f"Quark failed with code {proc.returncode}")
             except Exception as e:
                 quark_error = e
                 logger.warning(f"Quark analysis failed: {e}")

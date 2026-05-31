@@ -15,7 +15,7 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-download_url = "http://127.0.0.1:8000/InsecureBankv2.apk"
+download_url = "http://127.0.0.1:8000/allsafe.apk"
 print(f"Using local server URL: {download_url}")
 
 # Step 1: Trigger Local FastAPI Backend Analysis
