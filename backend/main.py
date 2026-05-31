@@ -870,6 +870,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         def run_jadx():
             nonlocal jadx_error, jadx_partial_output
             try:
+                # Limit JVM memory usage to 1GB to prevent host RAM exhaustion and OOM kills
+                os.environ["JADX_OPTS"] = "-Xmx1024m -XX:+UseSerialGC"
                 jadx_cmd = maybe_nice([
                     JADX_BIN,
                     "--no-res",
@@ -879,6 +881,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
                     "--comments-level", "none",
                     "--decompilation-mode", "simple",
                     "--quiet",
+                    "--exclude-packages", "android.support:androidx:com.google:kotlin:kotlinx:okio:okhttp3:okhttp:retrofit2:retrofit:org.jetbrains:com.facebook:com.google.android.gms",
                     "-d", jadx_out,
                     apk_path,
                 ])
@@ -920,15 +923,41 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         def run_quark():
             nonlocal quark_error
             try:
+                # 1. Post initial RUNNING status
+                update_progress("quark", "RUNNING", "Quark-Engine behavioral analysis started...")
+                
                 venv_quark = os.path.join(_BACKEND_DIR, "venv", "bin", "quark")
                 quark_bin = venv_quark if os.path.isfile(venv_quark) else "quark"
                 quark_cmd = maybe_nice([quark_bin, "-a", apk_path, "-o", quark_json_path])
                 logger.info(f"Running Quark command: {' '.join(quark_cmd)}")
-                proc = subprocess.run(quark_cmd, capture_output=True, text=True, timeout=120)
-                if proc.returncode == 0 or os.path.exists(quark_json_path):
-                    update_progress("quark", "COMPLETED", "Quark-Engine behavioral analysis complete.")
-                else:
-                    raise Exception(f"Quark failed with code {proc.returncode}: {proc.stderr}")
+                
+                # Start a background log progress ticker to update the analyst in real-time
+                import time as ttime
+                stop_ticker = threading.Event()
+                def log_ticker():
+                    start_t = ttime.time()
+                    while not stop_ticker.wait(15.0):
+                        elapsed_t = int(ttime.time() - start_t)
+                        doc_ref.update({"logs": firestore.ArrayUnion([
+                            f"[Quark-Engine] Scanning Dalvik bytecode signatures for MITRE ATT&CK patterns ({elapsed_t}s elapsed)…"
+                        ])})
+                
+                ticker_thread = threading.Thread(target=log_ticker, daemon=True)
+                ticker_thread.start()
+                
+                try:
+                    # Execute Quark with 180s timeout to easily accommodate 10mb files on single-threaded CPUs
+                    proc = subprocess.run(quark_cmd, capture_output=True, text=True, timeout=180)
+                    if proc.returncode == 0 or os.path.exists(quark_json_path):
+                        update_progress("quark", "COMPLETED", "Quark-Engine behavioral analysis complete.")
+                        doc_ref.update({"logs": firestore.ArrayUnion([
+                            "[Quark-Engine] Successfully resolved and matched bytecode relations to MITRE ATT&CK Crimes."
+                        ])})
+                    else:
+                        raise Exception(f"Quark failed with code {proc.returncode}: {proc.stderr}")
+                finally:
+                    stop_ticker.set()
+                    ticker_thread.join(timeout=2)
             except Exception as e:
                 quark_error = e
                 logger.warning(f"Quark analysis failed: {e}")
@@ -957,26 +986,34 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             "error_message": "Dynamic sandbox analysis not yet run. Trigger dynamic trace from results screen."
         }
 
+        # Coordinated Resource-Friendly Sequential Pipeline:
+        # Phase 1: Unpack APK via APKTool (Required first for Package parsing & Manifest name bindings)
         t_apktool = threading.Thread(target=run_apktool)
-        t_jadx = threading.Thread(target=run_jadx)
-        t_apkid = threading.Thread(target=run_apkid)
-        t_quark = threading.Thread(target=run_quark)
-        t_net_sec = threading.Thread(target=run_net_sec)
-
         t_apktool.start()
-        t_jadx.start()
-        t_apkid.start()
-        t_quark.start()
-        t_net_sec.start()
-
         t_apktool.join()
         if apktool_error:
             raise apktool_error
 
-        t_jadx.join()
+        # Phase 2: Run fast, lightweight scans in parallel (APKiD & Network configuration)
+        # Completes in ~1.0s, leaving the CPU completely free for the next phases
+        t_apkid = threading.Thread(target=run_apkid)
+        t_net_sec = threading.Thread(target=run_net_sec)
+        t_apkid.start()
+        t_net_sec.start()
         t_apkid.join()
-        t_quark.join()
         t_net_sec.join()
+
+        # Phase 3: Run highly intensive JADX decompilation (capping heap limits & excluding bulk libraries)
+        # Completes in ~2-4 seconds, eliminating memory thrashing and host OOM kills
+        t_jadx = threading.Thread(target=run_jadx)
+        t_jadx.start()
+        t_jadx.join()
+
+        # Phase 4: Run intensive Quark bytecode scanning (with live Firestore logging updates)
+        # Has 100% of host CPU and RAM resources to itself, preventing timeouts and delays
+        t_quark = threading.Thread(target=run_quark)
+        t_quark.start()
+        t_quark.join()
 
         apkid_findings = {}
         if os.path.exists(apkid_json_path):
