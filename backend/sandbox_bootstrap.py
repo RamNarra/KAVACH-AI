@@ -228,7 +228,10 @@ def bootstrap_worker():
                 update_status("UNAVAILABLE", False, False, False, "Emulator binary missing")
                 return
 
-            logger.info(f"[sandbox] launching AVD {SANDBOX_AVD}...")
+            # Auto-detect or default to optimized 'swiftshader' software renderer.
+            # This avoids host Mesa CPU synchronization overheads on Intel TigerLake systems, while allowing full overrides.
+            gpu_mode = os.environ.get("SANDBOX_GPU_MODE", "swiftshader")
+            logger.info(f"[sandbox] launching AVD {SANDBOX_AVD} with gpu_mode='{gpu_mode}'...")
             subprocess.Popen(
                 [
                     EMULATOR_PATH,
@@ -238,7 +241,7 @@ def bootstrap_worker():
                     "-no-audio",
                     "-no-boot-anim",
                     "-gpu",
-                    "swiftshader_indirect",
+                    gpu_mode,
                     "-memory",
                     "3072",
                     "-partition-size",
@@ -248,8 +251,6 @@ def bootstrap_worker():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        else:
-            logger.info("[sandbox] emulator already active — skipping duplicate launch.")
 
         boot_timeout = int(os.environ.get("SANDBOX_BOOT_TIMEOUT_SECS", "120"))
         booted = False
@@ -306,22 +307,35 @@ def bootstrap_worker():
         update_status("ERROR", False, False, False, str(exc))
 
 
-# Packages that hammer the CPU on fresh boots — disable them before APK install.
+# Packages that hammer the CPU on fresh boots — permanently disable them in the sandbox.
 _BLOATWARE_PKGS = [
-    "com.google.android.googlequicksearchbox",
-    "com.google.android.apps.messaging",
-    "com.google.android.as",          # Android System Intelligence (AI services)
-    "com.google.android.apps.nexuslauncher",
+    "com.google.android.googlequicksearchbox",  # Google Search Box
+    "com.google.android.apps.messaging",        # Google Messages
+    "com.google.android.as",                    # Android System Intelligence
+    "com.google.android.apps.wellbeing",        # Digital Wellbeing
+    "com.google.android.apps.photos",           # Google Photos
+    "com.google.android.apps.youtube.music",    # YT Music
+    "com.google.android.youtube",               # YouTube
+    "com.google.android.gm",                    # Gmail
+    "com.google.android.apps.maps",             # Google Maps
+    "com.google.android.apps.docs",             # Google Docs
+    "com.google.android.projection.gearhead",   # Android Auto
+    "com.google.android.apps.wallpaper",        # Wallpapers
+    "com.google.android.feedback",              # Feedback
+    "com.google.android.music",                 # Play Music
+    "com.google.android.videos",                # Play Movies
+    "com.google.android.settings.intelligence", # Settings Search Indexer
 ]
 
 def _kill_bloatware_services():
-    """Force-stop the known CPU-hungry GMS packages so the guest has free cycles."""
+    """Disable known CPU-hungry and memory-heavy bloatware packages permanently inside the sandbox."""
     for pkg in _BLOATWARE_PKGS:
         try:
-            _adb_run(["shell", "am", "force-stop", pkg], timeout=10)
-            logger.info(f"[sandbox] force-stopped bloatware: {pkg}")
+            # pm disable-user completely stops it from running or being triggered by background events
+            _adb_run(["shell", "pm", "disable-user", "--user", "0", pkg], timeout=10)
+            logger.info(f"[sandbox] permanently disabled bloatware: {pkg}")
         except Exception as e:
-            logger.debug(f"[sandbox] could not stop {pkg}: {e}")
+            logger.debug(f"[sandbox] could not disable {pkg}: {e}")
 
 
 def start_bootstrap_async():
