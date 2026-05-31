@@ -1431,22 +1431,11 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
         package_name = doc_data.get("package_name")
         filename = doc_data.get("filename", "target.apk")
         
-        # Parse fast metadata as fallback if package_name missing
+        # Always resolve package name and launcher activity directly from APK metadata
+        fast_pkg, fast_launcher = parse_apk_metadata_fast(apk_path)
         if not package_name:
-            fast_pkg, fast_launcher = parse_apk_metadata_fast(apk_path)
             package_name = fast_pkg
-            launcher_activity = fast_launcher
-        else:
-            launcher_activity = ""
-            # Find launcher from static config
-            manifest_content = doc_data.get("evidence", {}).get("manifest_content", "")
-            if not manifest_content:
-                try:
-                    import zipfile
-                    with zipfile.ZipFile(apk_path, 'r') as z:
-                        manifest_content = z.read("AndroidManifest.xml").decode("utf-8", errors="ignore")
-                except Exception:
-                    pass
+        launcher_activity = fast_launcher
 
         # 3. Dynamic Analysis Setup
         dynamic_result = {

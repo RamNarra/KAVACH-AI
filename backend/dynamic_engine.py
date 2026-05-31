@@ -322,6 +322,13 @@ def run_behavioral_trace(
         # Frida attach
         log_event("Initializing Frida USB binding...")
         device = frida.get_usb_device(timeout=20)
+        
+        # Defensive force-stop to reset the app package and Zygote hooks before spawning
+        try:
+            subprocess.run([ADB_PATH, "shell", "am", "force-stop", package_name], capture_output=True, timeout=15)
+        except Exception:
+            pass
+
         log_event(f"Spawning sandbox package: {package_name}...")
         
         session = None
@@ -348,28 +355,35 @@ def run_behavioral_trace(
                     [ADB_PATH, "shell", f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
                 )
-            time.sleep(2.5)
             
-            # Query running process PID
-            try:
-                pid_res = subprocess.run([ADB_PATH, "shell", "pidof", package_name], capture_output=True, text=True, timeout=10)
-                pid_str = pid_res.stdout.strip()
-                if pid_str:
-                    pid = int(pid_str.split()[0])
-            except Exception as pe:
-                log_event(f"Could not query PID via ADB: {pe}", is_warn=True)
+            # Robust retry loop to locate the PID while the process boots (up to 6 attempts, sleeping 2s between checks)
+            for check_attempt in range(6):
+                time.sleep(2.0)
+                try:
+                    pid_res = subprocess.run([ADB_PATH, "shell", "pidof", package_name], capture_output=True, text=True, timeout=10)
+                    pid_str = pid_res.stdout.strip()
+                    if pid_str:
+                        pid = int(pid_str.split()[0])
+                        log_event(f"Successfully located PID {pid} via ADB on attempt {check_attempt+1}.")
+                        break
+                except Exception as pe:
+                    log_event(f"Query PID attempt {check_attempt+1} failed: {pe}", is_warn=True)
                 
-            if not pid:
+                # Secondary lookup via Frida process enumeration
                 try:
                     for p in device.enumerate_processes():
                         if p.name == package_name:
                             pid = p.pid
+                            log_event(f"Successfully located PID {pid} via Frida enumeration on attempt {check_attempt+1}.")
                             break
-                except Exception as fe:
-                    log_event(f"Could not enumerate processes via Frida: {fe}", is_warn=True)
+                except Exception:
+                    pass
+                
+                if pid:
+                    break
                     
             if not pid:
-                raise Exception(f"Failed to locate running process PID for package {package_name}")
+                raise Exception(f"Failed to locate running process PID for package {package_name} after manual launch wait.")
                 
             log_event(f"Successfully located running process. Attaching to PID: {pid}")
             session = device.attach(pid)
