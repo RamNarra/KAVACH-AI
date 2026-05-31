@@ -354,7 +354,18 @@ export default function Home() {
                     <p className="text-[80px] font-semibold tabular-nums leading-none" style={{ color: accent }}>{score}</p>
                     <p className="text-[13px] uppercase tracking-[0.15em] font-medium" style={{ color: accent }}>{level}</p>
                     {fraudScore != null && (
-                      <p className="text-[14px] text-[var(--muted)]">Fraud score <span className="text-[var(--text)] tabular-nums">{fraudScore}</span></p>
+                      <div className="flex items-center justify-center gap-1.5 text-[14px] text-[var(--muted)]">
+                        <span>Fraud score</span>
+                        <div className="relative group/fraud">
+                          <span className="text-[var(--text)] font-semibold tabular-nums cursor-help border-b border-dashed border-[var(--muted)]/50 pb-0.5">
+                            {fraudScore}
+                          </span>
+                          <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-64 p-2.5 bg-zinc-900/95 text-[11px] text-zinc-300 rounded-lg shadow-xl border border-zinc-800 hidden group-hover/fraud:block z-50 text-center leading-relaxed font-normal normal-case pointer-events-none">
+                            <strong>Banking Fraud Heuristics (0-100)</strong>
+                            <p className="mt-1">Calculates likelihood of targeted financial abuse: overlay alerts, automated SMS interception hooks, and contact harvesting patterns targeting retail banking users.</p>
+                          </div>
+                        </div>
+                      </div>
                     )}
                     <p className="text-[14px] text-[var(--muted)]">{current.filename}</p>
                   </div>
@@ -550,7 +561,17 @@ export default function Home() {
                                   <div key={i} className="py-3 px-4 bg-[var(--surface-2)] rounded-2xl border border-[var(--border)] space-y-1.5">
                                     <div className="flex justify-between items-start gap-3">
                                       <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/20 font-semibold">{q.rule}</span>
-                                      <span className="text-[11px] px-2 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)] font-medium">Confidence: {q.confidence}</span>
+                                      <div className="relative group/tooltip">
+                                        <span className="text-[11px] px-2 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)] font-medium cursor-help hover:text-[var(--text)] transition-colors">
+                                          Confidence: {q.confidence}
+                                        </span>
+                                        <div className="absolute right-0 bottom-full mb-2 w-64 p-2.5 bg-zinc-900/95 text-[11px] text-zinc-300 rounded-lg shadow-xl border border-zinc-800 hidden group-hover/tooltip:block z-50 leading-relaxed font-normal normal-case pointer-events-none">
+                                          {q.confidence === '100%'
+                                            ? '100% Confidence: The exact bytecode call sequences, parameters, and instruction orders are fully matched and resolved statically.'
+                                            : `Confidence: ${q.confidence}. The static bytecode heuristic matched the API combination flow, but some optional classes/methods were unresolved.`
+                                          }
+                                        </div>
+                                      </div>
                                     </div>
                                     <p className="text-[14px] font-semibold leading-snug">{q.description}</p>
                                     <div className="flex justify-between items-center text-[12px] text-[var(--muted)] pt-1 border-t border-[var(--border)]/30">
@@ -654,8 +675,9 @@ export default function Home() {
                         <div className="space-y-4 animate-fadeIn">
                           {(() => {
                             const cleartextUrls = current.evidence?.suspicious_urls?.filter(x => x.url) || [];
-                            const configIssues = current.evidence?.network_indicators?.filter(x => x.description?.includes("HTTP traffic") || x.description?.includes("certificates")) || [];
-                            if (cleartextUrls.length === 0 && configIssues.length === 0) {
+                            const configIssues = current.evidence?.network_indicators?.filter(x => x.source === "xml") || [];
+                            const codeHttpIssues = current.evidence?.network_indicators?.filter(x => x.source === "jadx") || [];
+                            if (cleartextUrls.length === 0 && configIssues.length === 0 && codeHttpIssues.length === 0) {
                               return <p className="text-[13px] text-[var(--muted)]">No cleartext HTTP permissions or domain indicators reported.</p>;
                             }
                             return (
@@ -672,6 +694,22 @@ export default function Home() {
                                         <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{c.risk_score}</span>
                                       </div>
                                     ))}
+                                  </div>
+                                )}
+                                {codeHttpIssues.length > 0 && (
+                                  <div className="space-y-2 border-t border-[var(--border)] pt-2">
+                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)]">Hardcoded Cleartext HTTP Protocols in Code</p>
+                                    <div className="max-h-[250px] overflow-y-auto space-y-2 pr-1">
+                                      {codeHttpIssues.map((c, i) => (
+                                        <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)] rounded-xl border border-[var(--border)]">
+                                          <div className="flex justify-between items-center gap-3">
+                                            <p className="text-[14px] font-semibold">{c.type}</p>
+                                            <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{c.risk_score}</span>
+                                          </div>
+                                          {c.file && <p className="text-[11px] font-mono text-[var(--muted)] break-all mt-1 bg-[var(--surface)] py-0.5 px-1.5 rounded inline-block">{c.file}</p>}
+                                        </div>
+                                      ))}
+                                    </div>
                                   </div>
                                 )}
                                 {cleartextUrls.length > 0 && (

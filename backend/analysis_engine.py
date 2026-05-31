@@ -131,7 +131,8 @@ def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
                         "type": desc,
                         "file": path,
                         "risk_score": sc if is_scored else 0,
-                        "description": f"Found {desc} inside source file."
+                        "description": f"Found {desc} inside source file.",
+                        "source": "jadx"
                     })
         
         # Extract URLs
@@ -318,7 +319,8 @@ def analyze_network_security_config(apktool_out: str, manifest_content: str) -> 
                 findings["issues"].append({
                     "type": "Insecure Cleartext Permission",
                     "risk_score": 10,
-                    "description": f"Cleartext (HTTP) traffic explicitly permitted for: {domains_str}"
+                    "description": f"Cleartext (HTTP) traffic explicitly permitted for: {domains_str}",
+                    "source": "xml"
                 })
 
         # Check trust-anchors (trusting user certificates)
@@ -335,14 +337,16 @@ def analyze_network_security_config(apktool_out: str, manifest_content: str) -> 
                         findings["issues"].append({
                             "type": "Insecure Trust Anchor (User Certs)",
                             "risk_score": 20,
-                            "description": "App trusts user-installed certificates in release builds (vulnerable to MitM)."
+                            "description": "App trusts user-installed certificates in release builds (vulnerable to MitM).",
+                            "source": "xml"
                         })
                     elif src == "all":
                         findings["score"] += 25
                         findings["issues"].append({
                             "type": "Insecure Trust Anchor (All Certs)",
                             "risk_score": 25,
-                            "description": "App trusts ALL certificates (disables TLS verification completely)."
+                            "description": "App trusts ALL certificates (disables TLS verification completely).",
+                            "source": "xml"
                         })
     except Exception:
         pass

@@ -60,7 +60,7 @@ export interface AnalysisDoc {
     permissions?: { name?: string; description?: string; risk_score?: number }[];
     exported_components?: { name?: string; type?: string; risk_score?: number; description?: string }[];
     dangerous_manifest_flags?: { flag?: string; risk_score?: number; description?: string }[];
-    network_indicators?: { type?: string; risk_score?: number; description?: string; file?: string }[];
+    network_indicators?: { type?: string; risk_score?: number; description?: string; file?: string; source?: string }[];
     data_storage_issues?: { type?: string; risk_score?: number; description?: string; file?: string }[];
     crypto_issues?: { type?: string; risk_score?: number; description?: string; file?: string }[];
     hardcoded_secrets?: { type?: string; risk_score?: number; description?: string; file?: string; severity?: string }[];
