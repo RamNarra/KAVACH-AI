@@ -34,6 +34,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download and bake Quark-Engine detection rules into the container
+RUN freshquark
+
 # Copy backend source code
 COPY . .
 
