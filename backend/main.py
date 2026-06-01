@@ -143,14 +143,19 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# Initialize Google Gen AI client (Vertex AI backend)
+# Initialize Google Gen AI client (Dynamic AI Studio / Vertex AI backend)
 try:
-    genai_client = genai.Client(
-        vertexai=True,
-        project=PROJECT_ID,
-        location=LOCATION,
-    )
-    logger.info(f"Google Gen AI client (Vertex AI) initialized — project={PROJECT_ID}, location={LOCATION}")
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        genai_client = genai.Client(api_key=api_key)
+        logger.info("Google Gen AI client initialized using AI Studio API Key (100% FREE developer tier)")
+    else:
+        genai_client = genai.Client(
+            vertexai=True,
+            project=PROJECT_ID,
+            location=LOCATION,
+        )
+        logger.info(f"Google Gen AI client (Vertex AI) initialized — project={PROJECT_ID}, location={LOCATION}")
 except Exception as e:
     logger.error(f"Error initializing Google Gen AI client: {e}")
     genai_client = None
@@ -2185,3 +2190,57 @@ def analyze_apk(
         except Exception as e:
             logger.error(f"Analysis endpoint failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/analyze/init")
+def init_analysis(
+    request: AnalysisRequest,
+    http_request: Request,
+):
+    verified_uid = verify_request_uid(http_request, request.uid)
+    request.uid = verified_uid
+    
+    doc_ref = db.collection("apkanalysisresults").document()
+    doc_id = doc_ref.id
+
+    now_str = datetime.datetime.utcnow().isoformat() + "Z"
+    
+    initial_doc = {
+        "id": doc_id,
+        "status": "PROCESSING",
+        "created_at": now_str,
+        "uid": request.uid,
+        "email": request.email,
+        "progress": {
+            "upload": "COMPLETED",
+            "download": "WAITING",
+            "apktool": "WAITING",
+            "jadx": "WAITING",
+            "apkid": "WAITING",
+            "quark": "WAITING",
+            "net_sec": "WAITING",
+            "dynamic_sandbox": "SKIPPED",
+            "gemini": "WAITING",
+            "finalize": "WAITING"
+        },
+        "logs": []
+    }
+    doc_ref.set(initial_doc)
+    logger.info(f"Initialized analysis document {doc_id} for user {request.uid}")
+    return initial_doc
+
+@app.post("/api/analyze/{id}/run")
+def run_analysis(
+    id: str,
+    request: AnalysisRequest,
+    http_request: Request,
+):
+    verified_uid = verify_request_uid(http_request, request.uid)
+    request.uid = verified_uid
+    logger.info(f"Running analysis pipeline synchronously for document {id}")
+    try:
+        final_doc = run_analysis_pipeline(id, request)
+        return final_doc
+    except Exception as e:
+        logger.error(f"Analysis run endpoint failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+

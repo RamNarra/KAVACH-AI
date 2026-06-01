@@ -48,6 +48,7 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [uploadPct, setUploadPct] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sandboxOk, setSandboxOk] = useState<boolean | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -99,6 +100,7 @@ export default function Home() {
     if (!file || !user || busy) return;
     setError(null);
     setBusy(true);
+    setUploading(true);
     setUploadPct(0);
     setActiveId(null);
     setIsDemo(false);
@@ -108,6 +110,7 @@ export default function Home() {
       if (isLocalAPI) {
         // Direct local loopback file bypass (completed in <0.1s!)
         data = await uploadApkDirect(file, user.email, user.uid, setUploadPct);
+        setUploading(false);
       } else {
         const storageRef = ref(storage, `apks/${user.uid}/${Date.now()}_${file.name}`);
         const url = await new Promise<string>((resolve, reject) => {
@@ -118,6 +121,9 @@ export default function Home() {
             async () => resolve(await getDownloadURL(storageRef))
           );
         });
+        
+        setUploading(false);
+        
         const initRes = await apiFetch('/api/analyze/init', {
           method: 'POST',
           body: JSON.stringify({ apk_url: url, uid: user.uid, email: user.email }),
@@ -140,6 +146,7 @@ export default function Home() {
       setError(e instanceof Error ? e.message : 'Upload failed.');
     } finally {
       setBusy(false);
+      setUploading(false);
       setUploadPct(0);
     }
   };
@@ -187,10 +194,10 @@ export default function Home() {
       }
       return 'scan'; // Show scanner loader only for initial static decompiler runs
     }
-    if (busy) return 'scan';
+    if (busy || uploading) return 'scan';
     if (current?.status === 'COMPLETED' || current?.status === 'FAILED') return 'result';
     return 'home';
-  }, [user, current, busy]);
+  }, [user, current, busy, uploading]);
 
   useEffect(() => {
     if (view !== 'scan') return;
@@ -387,17 +394,17 @@ export default function Home() {
           {view === 'scan' && (
             <motion.div key="scan" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-center space-y-8 py-16 w-full max-w-lg mx-auto">
               <div className="space-y-3">
-                <p className="text-[20px] font-medium">{busy ? `Uploading ${uploadPct}%` : 'Analyzing'}</p>
+                <p className="text-[20px] font-medium">{uploading ? `Uploading ${uploadPct}%` : 'Analyzing'}</p>
                 <AnimatePresence mode="wait">
                   <motion.p
-                    key={busy ? `upload-${uploadPct}` : scanHeadline}
+                    key={uploading ? `upload-${uploadPct}` : scanHeadline}
                     initial={{ opacity: 0, y: 6 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -6 }}
                     transition={{ duration: 0.25 }}
                     className="text-[15px] text-[var(--muted)] leading-relaxed min-h-[48px]"
                   >
-                    {busy ? `Securely uploading ${file?.name ?? 'APK'}…` : scanHeadline}
+                    {uploading ? `Securely uploading ${file?.name ?? 'APK'}…` : scanHeadline}
                   </motion.p>
                 </AnimatePresence>
               </div>
