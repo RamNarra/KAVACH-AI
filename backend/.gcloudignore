@@ -21,7 +21,7 @@ __pycache__/
 .pytest_cache/
 
 # System / IDE artifacts
-.git
+.git/
 .gitignore
 .env
 .vscode/
