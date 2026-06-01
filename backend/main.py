@@ -790,7 +790,6 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         update_progress("download", "RUNNING", "Downloading APK from Firebase...")
         if apk_url.startswith("file://"):
             local_path = apk_url[7:]
-            import shutil
             logger.info(f"Loopback bypass: copying local file from {local_path} directly.")
             shutil.copyfile(local_path, apk_path)
         else:
@@ -1450,7 +1449,6 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
         update_progress("download", "RUNNING", "Downloading APK for dynamic trace...")
         if apk_url.startswith("file://"):
             local_path = apk_url[7:]
-            import shutil
             logger.info(f"Loopback bypass (dynamic): copying local file from {local_path} directly.")
             if not os.path.exists(local_path):
                 raise Exception(f"Local file does not exist: {local_path}")
