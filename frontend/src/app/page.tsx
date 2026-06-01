@@ -118,12 +118,21 @@ export default function Home() {
             async () => resolve(await getDownloadURL(storageRef))
           );
         });
-        const res = await apiFetch('/api/analyze?background=false', {
+        const initRes = await apiFetch('/api/analyze/init', {
           method: 'POST',
           body: JSON.stringify({ apk_url: url, uid: user.uid, email: user.email }),
         });
-        data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Analysis failed to start.');
+        const initData = await initRes.json();
+        if (!initRes.ok) throw new Error(initData.detail || 'Initialization failed.');
+        
+        setActiveId(initData.id);
+        
+        const runRes = await apiFetch(`/api/analyze/${initData.id}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ apk_url: url, uid: user.uid, email: user.email }),
+        });
+        data = await runRes.json();
+        if (!runRes.ok) throw new Error(data.detail || 'Decompilation/Analysis failed.');
       }
       setActiveId(data.id);
       setFile(null);
