@@ -940,7 +940,23 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
                 
                 venv_quark = os.path.join(_BACKEND_DIR, "venv", "bin", "quark")
                 quark_bin = venv_quark if os.path.isfile(venv_quark) else "quark"
+                
+                # Dynamic rules path lookup for local venv, global root, or container
+                rules_dir = None
+                if os.path.isdir("/app/.quark-engine/quark-rules/rules"):
+                    rules_dir = "/app/.quark-engine/quark-rules/rules"
+                elif os.path.isdir("/root/.quark-engine/quark-rules/rules"):
+                    rules_dir = "/root/.quark-engine/quark-rules/rules"
+                elif os.path.isdir(os.path.expanduser("~/.quark-engine/quark-rules/rules")):
+                    rules_dir = os.path.expanduser("~/.quark-engine/quark-rules/rules")
+                
                 quark_cmd = [quark_bin, "-a", apk_path, "-o", quark_json_path, "--auto-fix-checksum"]
+                if rules_dir:
+                    quark_cmd.extend(["-r", rules_dir])
+                    logger.info(f"Using Quark rules directory: {rules_dir}")
+                else:
+                    logger.warning("Quark rules directory not found, falling back to default lookup.")
+                    
                 logger.info(f"Running Quark command: {' '.join(quark_cmd)}")
                 
                 # Execute Quark with 180s timeout and stream stdout/stderr line-by-line to Firestore logs
@@ -1034,6 +1050,11 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         key_sources, all_source_files = select_key_java_files(jadx_out, package_name)
         update_progress("jadx", "COMPLETED", f"JADX analysis complete. Selected {len(key_sources)} key files.")
 
+        # Define progress callback to stream sub-engine status & logs live to Firestore
+        def progress_callback(engine: str, status: str, details: str):
+            update_progress(engine, status, details)
+            doc_ref.update({"logs": firestore.ArrayUnion([f"[Pipeline] {details}"])})
+
         # Calculate deterministic score & structured evidence
         deterministic_result = calculate_deterministic_score(
             manifest_content,
@@ -1043,6 +1064,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             apktool_out=apktool_out,
             jadx_out=jadx_out,
             apk_path=apk_path,
+            progress_callback=progress_callback,
         )
         det_score = deterministic_result["risk_score"]
         det_threat = deterministic_result["threat_level"]

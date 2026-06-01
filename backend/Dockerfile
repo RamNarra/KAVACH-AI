@@ -35,7 +35,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Download and bake Quark-Engine detection rules into the container
-RUN freshquark
+RUN freshquark && cp -r /root/.quark-engine /app/.quark-engine && chmod -R 777 /app/.quark-engine
 
 # Copy backend source code
 COPY . .

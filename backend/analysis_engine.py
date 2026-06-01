@@ -667,25 +667,26 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
         try:
             cmd = [semgrep_bin, "--config", "p/android", "--json", jadx_out]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
-            if res.returncode == 0 or res.stdout:
+            if res.returncode == 0 and res.stdout:
                 data = json.loads(res.stdout)
-                findings["semgrep_scan"] = True
-                for result in data.get("results", []):
-                    path = result.get("path", "")
-                    rel = os.path.relpath(path, jadx_out) if jadx_out in path else path
-                    extra = result.get("extra", {})
-                    msg = extra.get("message", "Semgrep security warning")
-                    sev = extra.get("severity", "warning").upper()
-                    findings["violations"].append({
-                        "rule": result.get("check_id", "semgrep-rule"),
-                        "description": msg,
-                        "file": rel,
-                        "severity": sev,
-                        "risk_score": 10 if sev == "ERROR" else 5,
-                        "type": "semgrep"
-                    })
-                    findings["score"] += 10 if sev == "ERROR" else 5
-                return findings
+                if data.get("results"):
+                    findings["semgrep_scan"] = True
+                    for result in data.get("results", []):
+                        path = result.get("path", "")
+                        rel = os.path.relpath(path, jadx_out) if jadx_out in path else path
+                        extra = result.get("extra", {})
+                        msg = extra.get("message", "Semgrep security warning")
+                        sev = extra.get("severity", "warning").upper()
+                        findings["violations"].append({
+                            "rule": result.get("check_id", "semgrep-rule"),
+                            "description": msg,
+                            "file": rel,
+                            "severity": sev,
+                            "risk_score": 10 if sev == "ERROR" else 5,
+                            "type": "semgrep"
+                        })
+                        findings["score"] += 10 if sev == "ERROR" else 5
+                    return findings
         except Exception:
             pass
 
@@ -844,6 +845,7 @@ def calculate_deterministic_score(
     apktool_out: str = None,
     jadx_out: str = None,
     apk_path: str = None,
+    progress_callback = None,
 ) -> Dict[str, Any]:
     import math
     m_res = analyze_manifest(manifest_content)
@@ -851,13 +853,30 @@ def calculate_deterministic_score(
     a_res = analyze_apkid(apkid_json_path) if apkid_json_path else {"anti_vm": [], "obfuscator_packer": [], "compiler_manipulator": [], "score": 0}
     q_res = analyze_quark(quark_json_path) if quark_json_path else {"rule_hits": [], "score": 0}
     net_res = analyze_network_security_config(apktool_out, manifest_content) if apktool_out else {"issues": [], "score": 0}
+    
+    if progress_callback:
+        progress_callback("secrets", "RUNNING", "Scanning decompiled sources for hardcoded credentials/secrets...")
     sec_res = analyze_secrets(jadx_out) if jadx_out else {"credential_leaks": [], "score": 0}
+    
+    if progress_callback:
+        progress_callback("androguard", "RUNNING", "Androguard deep DEX bytecode structural analysis firing...")
     ag_res = analyze_androguard(apk_path) if apk_path else {"suspicious_strings": [], "dangerous_api_chains": [], "risky_classes": [], "score": 0}
     
     # Run the new advanced static compliance tools
+    if progress_callback:
+        progress_callback("mobsf", "RUNNING", "Generating local OWASP Mobile Top 10 compliance scorecard...")
     mobsf_res = analyze_mobsf(apk_path) if apk_path else {"scorecard": [], "score": 0}
+    
+    if progress_callback:
+        progress_callback("semgrep", "RUNNING", "Semgrep AST static analysis checking security patterns...")
     semgrep_res = analyze_semgrep(jadx_out) if jadx_out else {"violations": [], "score": 0}
+    
+    if progress_callback:
+        progress_callback("trufflehog", "RUNNING", "TruffleHog deep filesystem high-entropy credential audit running...")
     truffle_res = analyze_trufflehog(jadx_out) if jadx_out else {"secrets": [], "score": 0}
+    
+    if progress_callback:
+        progress_callback("trufflehog", "COMPLETED", "All deep static security engines successfully completed.")
 
     # Apply capped category weights to balance the threat scoring
     manifest_capped = min(m_res["score"], 15)
