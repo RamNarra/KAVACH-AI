@@ -35,6 +35,25 @@ export interface AnalysisDoc {
   threat_level?: ThreatLevel;
   error_message?: string;
   created_at?: string;
+  static_analysis?: {
+    risk_score?: number;
+    threat_level?: ThreatLevel;
+    banking_fraud?: {
+      fraud_score?: number;
+      badges?: FraudBadge[];
+      recommended_actions?: string[];
+      indicator_count?: number;
+    };
+    risk_decomposition?: RiskDecomposition;
+    attack_techniques?: AttackTechnique[];
+    investigation_report?: {
+      summary?: string;
+      executive_verdict?: string;
+      suspicious_activities?: { title: string; description: string; severity?: string }[];
+      code_vulnerabilities?: { title: string; description: string; severity?: string }[];
+      recommendations?: string[];
+    };
+  };
   progress?: Record<string, string>;
   logs?: string[];
   banking_fraud?: {

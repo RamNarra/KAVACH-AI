@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kavach-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - PROJECT_ID=${PROJECT_ID:-kavach-ai-497708}
+      - LOCATION=${LOCATION:-asia-south1}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
+      - DYNAMIC_DURATION_SECS=${DYNAMIC_DURATION_SECS:-25}
+      - SANDBOX_GPU_MODE=${SANDBOX_GPU_MODE:-swiftshader}
+    volumes:
+      # Mounts local service-account.json for GCP / Firebase authentication if available
+      - ./backend/service-account.json:/app/service-account.json:ro
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: kavach-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NEXT_TELEMETRY_DISABLED=1
+    depends_on:
+      - backend
+    restart: always

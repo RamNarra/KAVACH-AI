@@ -26,6 +26,8 @@ Kavach AI is an automated, AI-driven malware analysis system for Android applica
 - 📄 **Report Export**: Text executive report download (`GET /api/analysis/{id}/report`).
 - 📦 **Automated Decompilation**: Uses `apktool` and `jadx` to extract `.class` and `.dex` bytecode right inside the Cloud Run environment.
 - ⚡ **Real-Time Next.js Frontend**: Sleek dashboard featuring fake-terminal progress loaders, AI synthesis panels, findings grids, and historical run sidebars powered by Firebase Firestore.
+- 🧪 **MobSF, Semgrep & TruffleHog Static Scans**: Fully operational native integration for standard vulnerability auditing and OWASP Top 10 compliance scoring.
+- 📑 **Segmented Dual-Story Results View**: Sleek, glassmorphic segment controllers allowing security operators to toggle between the **🔎 Static Audit Story** (baseline decompiled class audits and telemetry logs explorer) and the **⚡ Dynamic Execution Story** (unified executive verdict, live Frida runtime intercepts, QEMU console trace).
 - 🔐 **Robust Security Gating**: Enforces Google Cloud Storage lifecycle hygiene and strict Firebase security rules for authenticated-only access.
 - 🚀 **Serverless Scalability**: Dockerized FastAPI container carefully tuned for high-memory JVM tasks, deployed to GCP Cloud Run.
 
@@ -49,6 +51,27 @@ gcloud services enable aiplatform.googleapis.com \
                         cloudbuild.googleapis.com \
                         artifactregistry.googleapis.com
 ```
+
+---
+
+## 🐳 Developer Self-Hosting (Docker Compose)
+
+The entire Kavach AI system (Next.js + FastAPI decompiler backend) is fully containerized and can be spun up locally using Docker Compose in a single command. This is highly recommended for easy testing and evaluation.
+
+### Prerequisites
+- Docker and Docker Compose installed on your host system.
+- Your Vertex AI / Gemini API Key.
+
+### Execution
+1. Create a `.env` file in the root directory and add your Vertex AI / Gemini API Key:
+   ```text
+   GEMINI_API_KEY=your_gemini_api_key_here
+   ```
+2. Build and start the containers:
+   ```bash
+   docker compose up --build
+   ```
+3. Open [http://localhost:3000](http://localhost:3000) to view the Kavach AI frontend. The backend will automatically bind and serve traffic on [http://localhost:8080](http://localhost:8080).
 
 ---
 

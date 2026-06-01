@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Activity,
   Clock3,
@@ -103,7 +104,13 @@ function formatTelemetryTimestamp(ts?: string) {
 }
 
 export function TriggerTimeline({ transcript }: { transcript: TriggerTranscriptStep[] }) {
+  const [expanded, setExpanded] = useState(false);
   if (!transcript || transcript.length === 0) return null;
+
+  const showLimit = 4;
+  const hasMore = transcript.length > showLimit;
+  const visibleItems = (hasMore && !expanded) ? transcript.slice(0, showLimit) : transcript;
+  const remainingCount = transcript.length - showLimit;
 
   return (
     <section className="space-y-3 opacity-90" aria-label="Trigger playbook timeline">
@@ -116,8 +123,8 @@ export function TriggerTimeline({ transcript }: { transcript: TriggerTranscriptS
           {transcript.length} steps
         </span>
       </div>
-      <div className="relative border-l border-indigo-500/25 ml-2.5 space-y-2.5 pl-5 max-h-52 overflow-y-auto scrollbar-thin dynamic-reveal">
-        {transcript.map((step, idx) => {
+      <div className="relative border-l border-indigo-500/25 ml-2.5 space-y-2.5 pl-5 max-h-96 overflow-y-auto scrollbar-thin dynamic-reveal">
+        {visibleItems.map((step, idx) => {
           const isSuccess = step.result === 'succeeded';
           const isFailed = step.result === 'failed';
 
@@ -155,12 +162,27 @@ export function TriggerTimeline({ transcript }: { transcript: TriggerTranscriptS
           );
         })}
       </div>
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="w-full py-2.5 rounded-xl border border-zinc-800 bg-zinc-950/40 backdrop-blur-md text-[11px] text-indigo-400 font-semibold cursor-pointer hover:bg-indigo-500/10 hover:border-indigo-500/30 transition-all duration-200 flex items-center justify-center gap-1.5"
+        >
+          {expanded ? 'Show less ↑' : `Read (${remainingCount} more) ↓`}
+        </button>
+      )}
     </section>
   );
 }
 
 export function TelemetryStream({ events }: { events: DynamicEvent[] }) {
+  const [expanded, setExpanded] = useState(false);
   if (!events || events.length === 0) return null;
+
+  const showLimit = 4;
+  const hasMore = events.length > showLimit;
+  const visibleItems = (hasMore && !expanded) ? events.slice(0, showLimit) : events;
+  const remainingCount = events.length - showLimit;
 
   return (
     <section className="space-y-3 opacity-90" aria-label="Live telemetry intercepts">
@@ -175,8 +197,8 @@ export function TelemetryStream({ events }: { events: DynamicEvent[] }) {
           {events.length} signals
         </span>
       </div>
-      <div className="max-h-64 overflow-y-auto scrollbar-thin space-y-2 flex flex-col dynamic-reveal">
-        {events.map((ev, idx) => {
+      <div className="max-h-96 overflow-y-auto scrollbar-thin space-y-2 flex flex-col dynamic-reveal">
+        {visibleItems.map((ev, idx) => {
           const isHigh = ev.severity_hint === 'high';
           const isCritical = ev.severity_hint === 'critical';
           const severityClasses = isCritical
@@ -219,6 +241,15 @@ export function TelemetryStream({ events }: { events: DynamicEvent[] }) {
           );
         })}
       </div>
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="w-full py-2.5 rounded-xl border border-zinc-800 bg-zinc-950/40 backdrop-blur-md text-[11px] text-amber-500 font-semibold cursor-pointer hover:bg-amber-500/10 hover:border-amber-500/30 transition-all duration-200 flex items-center justify-center gap-1.5"
+        >
+          {expanded ? 'Show less ↑' : `Read (${remainingCount} more) ↓`}
+        </button>
+      )}
     </section>
   );
 }

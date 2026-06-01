@@ -656,6 +656,13 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
         return findings
         
     semgrep_bin = shutil.which("semgrep")
+    if not semgrep_bin:
+        import sys
+        venv_bin = os.path.dirname(sys.executable)
+        candidate = os.path.join(venv_bin, "semgrep")
+        if os.path.exists(candidate):
+            semgrep_bin = candidate
+            
     if semgrep_bin:
         try:
             cmd = [semgrep_bin, "--config", "p/android", "--json", jadx_out]

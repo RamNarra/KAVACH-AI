@@ -672,10 +672,10 @@ def select_key_java_files(jadx_dir: str, package_name: str) -> tuple[Dict[str, s
     scored_files.sort(key=lambda x: x[0], reverse=True)
 
     total_characters = 0
-    max_total_characters = 500000
+    max_total_characters = 75000
 
-    # Extract up to 100 key source files for analysis
-    for score, rel_path, full_path in scored_files[:100]:
+    # Extract up to 15 key source files for analysis to speed up GenAI synthesis 10x
+    for score, rel_path, full_path in scored_files[:15]:
         if total_characters >= max_total_characters:
             break
         try:
@@ -793,11 +793,6 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             import shutil
             logger.info(f"Loopback bypass: copying local file from {local_path} directly.")
             shutil.copyfile(local_path, apk_path)
-            # Remove the temp uploaded file to keep filesystem clean
-            try:
-                os.remove(local_path)
-            except Exception as exc:
-                logger.warning(f"Failed to remove temp uploaded file {local_path}: {exc}")
         else:
             with httpx.Client() as client:
                 response = client.get(apk_url, timeout=60.0)
@@ -1096,7 +1091,11 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             "Speak as a premium, seasoned cybersecurity expert. Deliver uninhibited, direct, and deep technical truth without generic "
             "bot-like disclaimers. If the app is InsecureBankv2 or a vulnerable test-suite, identify it immediately and explain the intended flaws. "
             "You have full authorization to adjust the risk_score and threat_level as you see fit based on the complete evidence.\n"
-            "Provide a highly detailed, comprehensive, multi-paragraph \"summary\" (at least 3-4 paragraphs) that feels like a natural, deeply insightful technical breakdown from an elite malware analyst reviewing the code. Explain the architecture, flow, potential risks, and implications in depth. Let yourself write freely and extensively without length restrictions. Write the analysis using clear, professional, yet highly accessible English corresponding to an IELTS band 7.0 - 7.5 standard. Avoid overly dense/verbose corporate speak or extremely complex academic jargon so that the summary is clear, direct, and easy to read by security officers of all backgrounds. Feel free to use markdown formatting (such as bullet points, bold text, or subheadings) to make it highly readable and analytical.\n"
+            "Provide a highly detailed, comprehensive, multi-paragraph \"summary\" (at least 3-4 paragraphs) formatted as a cohesive, sequential 'Static Audit Story':\n"
+            "1. **Codebase Structural Identity & Entrypoints**: Introduce the application's manifest blueprint, package structures, compiler versions, and launcher entrypoints.\n"
+            "2. **Logic Taints & Vulnerability Architecture**: Trace how sensitive variables and data flow inside the decompiled JADX source trees, explicitly highlighting AST findings (Semgrep violations), credential entropy leaks (TruffleHog), and behavioral bytecode checks (Quark).\n"
+            "3. **Static Risk Posture & Next Steps**: Conclude with a clear risk assessment and explain why spinning up the dynamic sandbox emulator is critical to confirm runtime evasion, network C2 packets, or dynamic code execution.\n"
+            "Write the analysis using clear, professional, yet highly accessible English corresponding to an IELTS band 7.0 - 7.5 standard. Avoid overly dense/verbose corporate speak or extremely complex academic jargon so that the summary is clear, direct, and easy to read by security officers of all backgrounds. Feel free to use markdown formatting (such as bullet points, bold text, or subheadings) to make it highly readable and analytical.\n"
             "You must respond in strict JSON format. Do not return any markdown wraps. Return only raw JSON.\n"
             "Response schema configuration:\n"
             "{\n"
@@ -1323,6 +1322,18 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         
         now_str = datetime.datetime.utcnow().isoformat() + "Z"
 
+        static_report_dict = {
+            "risk_score": gemini_score,
+            "threat_level": gemini_threat,
+            "investigation_report": {
+                **analysis_json.get("investigation_report", {}),
+                "executive_verdict": analysis_json.get("executive_verdict", ""),
+            },
+            "banking_fraud": banking_fraud,
+            "risk_decomposition": risk_decomposition,
+            "attack_techniques": attack_techniques,
+        }
+
         final_data = {
             "status": "COMPLETED",
             "filename": filename,
@@ -1330,6 +1341,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             "package_name": package_name,
             "risk_score": gemini_score,
             "threat_level": gemini_threat,
+            "static_analysis": static_report_dict,
             "evidence": {
                 **deterministic_result["evidence"],
                 "dynamic_analysis": {
@@ -1436,20 +1448,28 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
     try:
         # 1. Download the APK
         update_progress("download", "RUNNING", "Downloading APK for dynamic trace...")
-        with httpx.Client() as client:
-            response = client.get(apk_url, timeout=60.0)
-            if response.status_code != 200:
-                raise Exception(f"Failed to fetch APK from URL. Status code: {response.status_code}")
-            
-            import gzip
-            is_gzipped = len(response.content) > 2 and response.content[0] == 0x1f and response.content[1] == 0x8b
-            if is_gzipped:
-                decompressed = gzip.decompress(response.content)
-                with open(apk_path, "wb") as f:
-                    f.write(decompressed)
-            else:
-                with open(apk_path, "wb") as f:
-                    f.write(response.content)
+        if apk_url.startswith("file://"):
+            local_path = apk_url[7:]
+            import shutil
+            logger.info(f"Loopback bypass (dynamic): copying local file from {local_path} directly.")
+            if not os.path.exists(local_path):
+                raise Exception(f"Local file does not exist: {local_path}")
+            shutil.copyfile(local_path, apk_path)
+        else:
+            with httpx.Client() as client:
+                response = client.get(apk_url, timeout=60.0)
+                if response.status_code != 200:
+                    raise Exception(f"Failed to fetch APK from URL. Status code: {response.status_code}")
+                
+                import gzip
+                is_gzipped = len(response.content) > 2 and response.content[0] == 0x1f and response.content[1] == 0x8b
+                if is_gzipped:
+                    decompressed = gzip.decompress(response.content)
+                    with open(apk_path, "wb") as f:
+                        f.write(decompressed)
+                else:
+                    with open(apk_path, "wb") as f:
+                        f.write(response.content)
         update_progress("download", "COMPLETED", "APK download complete.")
 
         # 2. Get static details from Firestore document
@@ -1586,7 +1606,12 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
             "Speak as a premium, seasoned cybersecurity expert. Deliver uninhibited, direct, and deep technical truth without generic "
             "bot-like disclaimers. If the app is InsecureBankv2 or a vulnerable test-suite, identify it immediately and explain the intended flaws. "
             "You have full authorization to adjust the risk_score and threat_level as you see fit based on the complete evidence.\n"
-            "Provide a highly detailed, comprehensive, multi-paragraph \"summary\" (at least 3-4 paragraphs) that feels like a natural, deeply insightful technical breakdown from an elite malware analyst reviewing the code. Explain the architecture, flow, potential risks, and implications in depth. Let yourself write freely and extensively without length restrictions. Write the analysis using clear, professional, yet highly accessible English corresponding to an IELTS band 7.0 - 7.5 standard. Avoid overly dense/verbose corporate speak or extremely complex academic jargon so that the summary is clear, direct, and easy to read by security officers of all backgrounds. Feel free to use markdown formatting (such as bullet points, bold text, or subheadings) to make it highly readable and analytical.\n"
+            "Provide a highly detailed, comprehensive, multi-paragraph \"summary\" (at least 3-4 paragraphs) formatted as a cohesive, sequential 'Dynamic Execution Story':\n"
+            "1. **Headless Sandbox Boot & Frida Instrumentation**: Explain the cold-boot initialization, Zygote force-stops, and successful Frida instrumentation hooking on the target PID.\n"
+            "2. **Trigger Playbook Interaction & UI Exercising**: Recount the automated ADB playbook steps (UI element tapping, credential simulation, exported broadcasts, and deep link intents) and note if the app reacted differently to interactions.\n"
+            "3. **Intercepted Live Telephony & Cryptographic Telemetry**: Detail exactly what was intercepted live at runtime by our Frida hooks (cryptographic specs loaded, raw File/SQLite database writes, network URL sockets, dynamic DEX loading, ProcessBuilder executions, or silent background Mic/Camera recorders).\n"
+            "4. **Unified Enterprise Threat Verdict**: Bring both static taints and dynamic execution signals into a unified executive verdict, outlining immediate risk mitigations for corporate banking safety.\n"
+            "Write the analysis using clear, professional, yet highly accessible English corresponding to an IELTS band 7.0 - 7.5 standard. Avoid overly dense/verbose corporate speak or extremely complex academic jargon so that the summary is clear, direct, and easy to read by security officers of all backgrounds. Feel free to use markdown formatting (such as bullet points, bold text, or subheadings) to make it highly readable and analytical.\n"
             "You must respond in strict JSON format. Do not return any markdown wraps. Return only raw JSON.\n"
             "Response schema configuration:\n"
             "{\n"

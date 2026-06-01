@@ -458,25 +458,185 @@ try {
 """
 
 # --------------------------------------------------------------------------- #
+# Pack: sms_telephony
+# --------------------------------------------------------------------------- #
+_PACK_SMS_TELEPHONY = """
+// ── SMS & Telephony hooks ────────────────────────────────────────────────────
+try {
+    var _SmsM = Java.use("android.telephony.SmsManager");
+    _SmsM.sendTextMessage.overload(
+        "java.lang.String", "java.lang.String", "java.lang.String",
+        "android.app.PendingIntent", "android.app.PendingIntent"
+    ).implementation = function(dest, sc, text, sent, deliv) {
+        _emit("telephony.sms", "send", "critical",
+              "android.telephony.SmsManager", "sendTextMessage",
+              { destination: _trunc(dest, 40), text_length: text ? text.length : 0 },
+              "Outgoing SMS intercepted to dest=" + _trunc(dest, 30) + " text=" + _trunc(text, 80));
+        return this.sendTextMessage(dest, sc, text, sent, deliv);
+    };
+} catch(e) {}
+
+try {
+    var _TelephonyM = Java.use("android.telephony.TelephonyManager");
+    _TelephonyM.getDeviceId.overload().implementation = function() {
+        var r = this.getDeviceId();
+        _emit("spy.device", "get_device_id", "high",
+              "android.telephony.TelephonyManager", "getDeviceId",
+              {},
+              "Device hardware ID exfiltrated (IMEI/MEID)");
+        return r;
+    };
+    _TelephonyM.getSubscriberId.overload().implementation = function() {
+        var r = this.getSubscriberId();
+        _emit("spy.device", "get_subscriber_id", "high",
+              "android.telephony.TelephonyManager", "getSubscriberId",
+              {},
+              "Subscriber IMSI code exfiltrated");
+        return r;
+    };
+    _TelephonyM.getLine1Number.overload().implementation = function() {
+        var r = this.getLine1Number();
+        _emit("spy.device", "get_line1_number", "critical",
+              "android.telephony.TelephonyManager", "getLine1Number",
+              {},
+              "Sim card telephone number exfiltrated");
+        return r;
+    };
+} catch(e) {}
+"""
+
+# --------------------------------------------------------------------------- #
+# Pack: location_gps
+# --------------------------------------------------------------------------- #
+_PACK_LOCATION_GPS = """
+// ── Location & GPS hooks ─────────────────────────────────────────────────────
+try {
+    var _LocM = Java.use("android.location.LocationManager");
+    _LocM.getLastKnownLocation.overload("java.lang.String").implementation = function(provider) {
+        var r = this.getLastKnownLocation(provider);
+        _emit("spy.location", "get_last_location", "medium",
+              "android.location.LocationManager", "getLastKnownLocation",
+              { provider: provider },
+              "GPS location exfiltrated using provider=" + provider);
+        return r;
+    };
+} catch(e) {}
+"""
+
+# --------------------------------------------------------------------------- #
+# Pack: media_recorder
+# --------------------------------------------------------------------------- #
+_PACK_MEDIA_RECORDER = """
+// ── Media Recorder hooks ─────────────────────────────────────────────────────
+try {
+    var _MR = Java.use("android.media.MediaRecorder");
+    _MR.prepare.implementation = function() {
+        _emit("spy.media", "record_prepare", "high",
+              "android.media.MediaRecorder", "prepare",
+              {},
+              "Media recorder initialization detected (mic/camera tracing)");
+        return this.prepare();
+    };
+    _MR.start.implementation = function() {
+        _emit("spy.media", "record_start", "critical",
+              "android.media.MediaRecorder", "start",
+              {},
+              "Background audio/video recording started active capture");
+        return this.start();
+    };
+} catch(e) {}
+"""
+
+# --------------------------------------------------------------------------- #
+# Pack: dynamic_loading
+# --------------------------------------------------------------------------- #
+_PACK_DYNAMIC_LOADING = """
+// ── Dynamic Code Loading hooks ───────────────────────────────────────────────
+try {
+    var _DexCL = Java.use("dalvik.system.DexClassLoader");
+    _DexCL.$init.implementation = function(dexPath, optPath, libPath, parent) {
+        _emit("evasion.dynamic_load", "load_dex", "critical",
+              "dalvik.system.DexClassLoader", "<init>",
+              { path: _trunc(dexPath, 150) },
+              "Dynamic DEX bytecode payload loaded: " + _trunc(dexPath, 100));
+        this.$init(dexPath, optPath, libPath, parent);
+    };
+} catch(e) {}
+
+try {
+    var _PathCL = Java.use("dalvik.system.PathClassLoader");
+    _PathCL.$init.overload("java.lang.String", "java.lang.ClassLoader").implementation = function(path, parent) {
+        _emit("evasion.dynamic_load", "load_path_dex", "high",
+              "dalvik.system.PathClassLoader", "<init>",
+              { path: _trunc(path, 150) },
+              "PathClassLoader loaded dex/apk resource: " + _trunc(path, 100));
+        this.$init(path, parent);
+    };
+} catch(e) {}
+"""
+
+# --------------------------------------------------------------------------- #
+# Pack: process_builder
+# --------------------------------------------------------------------------- #
+_PACK_PROCESS_BUILDER = """
+// ── Process Builder shell execution hooks ────────────────────────────────────
+try {
+    var _PB = Java.use("java.lang.ProcessBuilder");
+    _PB.start.implementation = function() {
+        var cmd = this.command().toString();
+        _emit("process.exec", "process_builder_start", "critical",
+              "java.lang.ProcessBuilder", "start",
+              { command: _trunc(cmd, 200) },
+              "ProcessBuilder shell command executed: " + _trunc(cmd, 120));
+        return this.start();
+    };
+} catch(e) {}
+"""
+
+# --------------------------------------------------------------------------- #
+# Pack: app_listing
+# --------------------------------------------------------------------------- #
+_PACK_APP_LISTING = """
+// ── Package Enumeration hooks ────────────────────────────────────────────────
+try {
+    var _PM = Java.use("android.app.ApplicationPackageManager");
+    _PM.getInstalledPackages.overload("int").implementation = function(flags) {
+        _emit("spy.app_list", "get_installed_packages", "medium",
+              "android.app.ApplicationPackageManager", "getInstalledPackages",
+              { flags: flags },
+              "Malware application enumerating installed device packages (target checklist scan)");
+        return this.getInstalledPackages(flags);
+    };
+} catch(e) {}
+"""
+
+# --------------------------------------------------------------------------- #
 # Registry and assembler
 # --------------------------------------------------------------------------- #
 ALL_PACKS: dict = {
-    "shared_prefs": _PACK_SHARED_PREFS,
-    "file_io":      _PACK_FILE_IO,
-    "sqlite":       _PACK_SQLITE,
-    "network":      _PACK_NETWORK,
-    "webview":      _PACK_WEBVIEW,
-    "intents":      _PACK_INTENTS,
-    "crypto":       _PACK_CRYPTO,
-    "native":       _PACK_NATIVE,
-    "evasion":      _PACK_EVASION,
-    "clipboard":    _PACK_CLIPBOARD,
-    "permissions":  _PACK_PERMISSIONS,
+    "shared_prefs":    _PACK_SHARED_PREFS,
+    "file_io":         _PACK_FILE_IO,
+    "sqlite":          _PACK_SQLITE,
+    "network":         _PACK_NETWORK,
+    "webview":         _PACK_WEBVIEW,
+    "intents":         _PACK_INTENTS,
+    "crypto":          _PACK_CRYPTO,
+    "native":          _PACK_NATIVE,
+    "evasion":         _PACK_EVASION,
+    "clipboard":       _PACK_CLIPBOARD,
+    "permissions":     _PACK_PERMISSIONS,
+    "sms_telephony":   _PACK_SMS_TELEPHONY,
+    "location_gps":    _PACK_LOCATION_GPS,
+    "media_recorder":  _PACK_MEDIA_RECORDER,
+    "dynamic_loading": _PACK_DYNAMIC_LOADING,
+    "process_builder": _PACK_PROCESS_BUILDER,
+    "app_listing":     _PACK_APP_LISTING,
 }
 
 # Core packs always loaded — lightweight, high signal
 DEFAULT_PACKS: List[str] = [
-    "shared_prefs", "network", "crypto", "native", "clipboard", "permissions"
+    "shared_prefs", "network", "crypto", "native", "clipboard", "permissions",
+    "sms_telephony", "location_gps", "media_recorder", "dynamic_loading", "process_builder", "app_listing"
 ]
 
 
