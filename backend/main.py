@@ -1519,7 +1519,10 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
                 curr_status = status_dict["sandbox_status"]
                 if curr_status == "READY":
                     break
-                if curr_status not in ("BOOTING", "UNAVAILABLE") or (time.time() - wait_start > boot_timeout):
+                if curr_status == "UNAVAILABLE":
+                    logger.warning("Dynamic sandbox is unavailable (emulator or ADB missing). Skipping wait.")
+                    break
+                if curr_status != "BOOTING" or (time.time() - wait_start > boot_timeout):
                     logger.warning(f"Dynamic sandbox not ready (status={curr_status}). Proceeding with best effort.")
                     break
                 time.sleep(2)
