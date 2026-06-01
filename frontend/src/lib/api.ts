@@ -80,7 +80,7 @@ export async function uploadApkDirect(
   }
   
   if (onProgress) onProgress(70);
-  const url = `${API}/api/analyze/upload?background=true`;
+  const url = `${API}/api/analyze/upload?background=false`;
   const res = await fetch(url, {
     method: 'POST',
     body: formData,

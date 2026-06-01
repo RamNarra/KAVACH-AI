@@ -118,7 +118,7 @@ export default function Home() {
             async () => resolve(await getDownloadURL(storageRef))
           );
         });
-        const res = await apiFetch('/api/analyze?background=true', {
+        const res = await apiFetch('/api/analyze?background=false', {
           method: 'POST',
           body: JSON.stringify({ apk_url: url, uid: user.uid, email: user.email }),
         });
