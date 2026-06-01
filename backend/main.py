@@ -105,7 +105,10 @@ if os.path.isdir(tools_dir):
 # Load environment configurations
 PROJECT_ID = os.environ.get("PROJECT_ID", "kavach-ai-497708")
 LOCATION = os.environ.get("LOCATION", "global")
-MODEL_NAME = "gemini-3.5-flash"  # Exactly gemini-3.5-flash as required
+STATIC_MODEL = "gemini-3.5-flash"
+DYNAMIC_MODEL = "gemini-3.1-pro"
+CHAT_MODEL = "gemini-3.5-flash"
+MODEL_NAME = STATIC_MODEL
 
 # Configure JADX thread count via env variable with auto-detected default (cpu_count - 2, min 1, max 4)
 JADX_THREADS_ENV = os.environ.get("JADX_THREADS")
@@ -677,7 +680,7 @@ def select_key_java_files(jadx_dir: str, package_name: str) -> tuple[Dict[str, s
     scored_files.sort(key=lambda x: x[0], reverse=True)
 
     total_characters = 0
-    max_total_characters = 75000
+    max_total_characters = 300000
 
     # Extract up to 15 key source files for analysis to speed up GenAI synthesis 10x
     for score, rel_path, full_path in scored_files[:15]:
@@ -1154,7 +1157,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             if not genai_client:
                 raise Exception("GenAI client is not initialized")
             ai_response = genai_client.models.generate_content(
-                model=MODEL_NAME,
+                model=STATIC_MODEL,
                 contents=prompt,
                 config=gen_config,
             )
@@ -1664,7 +1667,7 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
             if not genai_client:
                 raise Exception("GenAI client is not initialized")
             ai_response = genai_client.models.generate_content(
-                model=MODEL_NAME,
+                model=DYNAMIC_MODEL,
                 contents=prompt,
                 config=gen_config,
             )
@@ -1950,7 +1953,7 @@ Answer clearly for a bank fraud analyst. Use markdown. Be concise. Cite evidence
             if not genai_client:
                 raise Exception("GenAI client is not initialized")
             ai_response = genai_client.models.generate_content(
-                model=MODEL_NAME,
+                model=CHAT_MODEL,
                 contents=prompt,
             )
             return {"answer": ai_response.text}
