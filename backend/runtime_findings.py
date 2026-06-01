@@ -481,7 +481,7 @@ def build_runtime_summary_for_gemini(
     lines = [
         "--- DYNAMIC SANDBOX ANALYSIS BUNDLE ---",
         f"Sandbox status     : {status}",
-        f"ABI compatibility  : {'\u2713 compatible' if abi_ok else '\u2717 mismatch \u2014 dynamic skipped'}",
+        f"ABI compatibility  : {'✓ compatible' if abi_ok else '✗ mismatch — dynamic skipped'}",
         f"Runtime confidence : {confidence.upper()}",
         f"Hook packs loaded  : {packs or 'none'}",
         f"Trigger steps      : {steps_succeeded}/{steps_attempted} succeeded",
