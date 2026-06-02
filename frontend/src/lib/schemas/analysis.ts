@@ -26,6 +26,8 @@ export type CodeVulnerability = z.infer<typeof CodeVulnerabilitySchema>;
 export const InvestigationReportSchema = z.object({
   summary: z.string().optional(),
   executive_verdict: z.string().optional(),
+  dynamic_summary: z.string().optional(),
+  final_report: z.string().optional(),
   runtime_findings_interpretation: z.string().optional(),
   static_confirmed_at_runtime: z.array(z.string()).optional(),
   runtime_only_findings: z.array(z.string()).optional(),
@@ -113,6 +115,7 @@ export const AnalysisResultSchema = z.object({
   status: z.enum(['PROCESSING', 'COMPLETED', 'FAILED']).optional(),
   risk_score: z.number().optional(),
   threat_level: z.enum(['SAFE', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']).optional(),
+  absolute_threat_score: z.number().optional(),
   evidence: EvidenceModelSchema.optional(),
   investigation_report: InvestigationReportSchema.optional(),
   error_message: z.string().optional(),

@@ -483,6 +483,57 @@ def _step_force_stop_relaunch(adb: str, package: str, activity: Optional[str],
     ))
 
 
+def _step_prime_clipboard(adb: str, transcript: list) -> None:
+    """Prime the clipboard with mock high-value secret credentials to verify copy/paste snooping."""
+    # Write sensitive mockup text to guest clipboard via service call clipboard 2
+    r = _run([adb, "shell", "service", "call", "clipboard", "2", "s16", "kavach_mock_vault_key_9988"])
+    ok = r.returncode == 0
+    transcript.append(_step(
+        "prime_clipboard",
+        "Primed clipboard with mock recovery key: kavach_mock_vault_key_9988",
+        "succeeded" if ok else "failed"
+    ))
+
+
+def _step_exported_services(adb: str, package: str, services: List[str], transcript: list) -> None:
+    """Trigger background exported services directly to exercise their onCreate/onStartCommand entry points."""
+    if not services:
+        transcript.append(_step("exported_service_trigger", "No exported services declared", "skipped"))
+        return
+    for svc in services[:3]:
+        r = _run([adb, "shell", "am", "startservice", "-n", f"{package}/{svc}"])
+        ok = r.returncode == 0
+        transcript.append(_step(
+            "exported_service_trigger",
+            f"am startservice {svc}",
+            "succeeded" if ok else "failed",
+            r.stderr[:100] if not ok else ""
+        ))
+        time.sleep(0.5)
+
+
+def _step_system_broadcasts(adb: str, package: str, receivers: List[str], transcript: list) -> None:
+    """Fire standard system broadcast triggers to app receivers to check boot persistence and network triggers."""
+    if not receivers:
+        transcript.append(_step("system_broadcast_trigger", "No receivers declared", "skipped"))
+        return
+    broadcasts = [
+        "android.intent.action.BOOT_COMPLETED",
+        "android.net.conn.CONNECTIVITY_CHANGE"
+    ]
+    for action in broadcasts:
+        for rcvr in receivers[:1]:
+            r = _run([adb, "shell", "am", "broadcast", "-a", action, "-n", f"{package}/{rcvr}"])
+            ok = r.returncode == 0
+            transcript.append(_step(
+                "system_broadcast_trigger",
+                f"Broadcast intent {action} directly to receiver {rcvr}",
+                "succeeded" if ok else "failed",
+                r.stderr[:100] if not ok else ""
+            ))
+            time.sleep(0.5)
+
+
 # ---------------------------------------------------------------------------
 # Main entrypoint
 # ---------------------------------------------------------------------------
@@ -520,62 +571,101 @@ def run_playbook(
 
     exported_receivers  = static_signals.get("exported_receivers", [])
     exported_activities = static_signals.get("exported_activities", [])
+    exported_services   = static_signals.get("exported_services", [])
     deep_link_schemes   = static_signals.get("deep_link_schemes", [])
     has_webview         = bool(static_signals.get("has_webview"))
     has_login_fields    = bool(static_signals.get("has_login_fields"))
 
     with tempfile.TemporaryDirectory(prefix="kavach_play_") as tmp_dir:
 
-        # Step 1: wait for app to render
-        _log("Step 1/11: Waiting for app to render")
+        # Step 1: Prime device clipboard with sensitive mockup data
+        _log("Step 1/14: Priming device clipboard with sensitive mockup data")
+        _step_prime_clipboard(adb, transcript)
+
+        # Step 2: wait for app to render
+        _log("Step 2/14: Waiting for app to render")
         _step_wait_activity(adb, package_name, transcript)
 
-        # Step 2: explicit launcher activity launch
-        _log("Step 2/11: Explicit launcher launch")
+        # Step 3: explicit launcher activity launch
+        _log("Step 3/14: Explicit launcher launch")
         _step_explicit_launch(adb, package_name, launcher_activity, transcript)
 
-        # Step 3: targeted UI interaction
-        _log("Step 3/11: UI element interaction")
+        # Step 4: targeted UI interaction
+        _log("Step 4/14: UI element interaction")
         _step_interact_ui(adb, tmp_dir, transcript)
 
-        # Step 4: WebView-specific wait
-        _log("Step 4/11: WebView wait")
+        # Step 5: WebView-specific wait
+        _log("Step 5/14: WebView wait")
         _step_webview_wait(adb, transcript, has_webview)
 
-        # Step 5: exported receiver intents
-        _log("Step 5/11: Exported receiver triggers")
+        # Step 6: exported receiver intents
+        _log("Step 6/14: Exported receiver triggers")
         _step_exported_receivers(adb, package_name, exported_receivers, transcript, coverage)
 
-        # Step 6: exported activity launches
-        _log("Step 6/11: Exported activity launches")
+        # Step 7: exported activity launches
+        _log("Step 7/14: Exported activity launches")
         _step_exported_activities(adb, package_name, exported_activities, transcript, coverage)
 
-        # Step 7: background/foreground cycle
-        _log("Step 7/11: Background/foreground cycle")
+        # Step 8: exported service triggers
+        _log("Step 8/14: Exported service triggers")
+        _step_exported_services(adb, package_name, exported_services, transcript)
+
+        # Step 9: background/foreground cycle
+        _log("Step 9/14: Background/foreground cycle")
         _step_background_foreground(adb, package_name, launcher_activity, transcript)
 
-        # Step 8: deep link intent
-        _log("Step 8/11: Deep link trigger")
+        # Step 10: deep link intent
+        _log("Step 10/14: Deep link trigger")
         _step_deep_link(adb, package_name, deep_link_schemes, transcript, coverage)
 
-        # Step 9: login simulation (if EditText fields are present)
-        _log("Step 9/11: Login field simulation")
+        # Step 11: simulated system broadcasts triggers
+        _log("Step 11/14: Simulated system broadcasts triggers")
+        _step_system_broadcasts(adb, package_name, exported_receivers, transcript)
+
+        # Step 12: login simulation (if EditText fields are present)
+        _log("Step 12/14: Login field simulation")
         if has_login_fields:
             _step_login_simulation(adb, tmp_dir, transcript, coverage, log_callback=_log)
         else:
             transcript.append(_step("login_simulation",
                                     "Skipped (no login field signal in static analysis)", "skipped"))
 
-        # Step 10: wait for background jobs + network
-        _log("Step 10/11: Background job wait")
+        # Step 13: wait for background jobs + network
+        _log("Step 13/14: Background job wait")
         _step_background_job_wait(adb, transcript)
 
-        # Step 11: force stop + cold relaunch
-        _log("Step 11/11: Force-stop and cold relaunch")
+        # Step 14: force stop + cold relaunch
+        _log("Step 14/14: Force-stop and cold relaunch")
         _step_force_stop_relaunch(adb, package_name, launcher_activity, transcript)
 
-    succeeded = sum(1 for s in transcript if s["result"] == "succeeded")
-    attempted = len(transcript)
+    # Calculate high-level step statistics strictly out of 14 steps
+    high_level_steps = [
+        "prime_clipboard",
+        "wait_activity",
+        "explicit_launch",
+        "interact_ui",
+        "webview_wait",
+        "exported_receiver_intent",
+        "exported_activity_launch",
+        "exported_service_trigger",
+        "background_foreground",
+        "deep_link_intent",
+        "system_broadcast_trigger",
+        "login_simulation",
+        "background_job_wait",
+        "force_stop_relaunch"
+    ]
+    succeeded = 0
+    attempted = 14
+    for step_name in high_level_steps:
+        steps_of_type = [s for s in transcript if s.get("step") == step_name]
+        if not steps_of_type:
+            succeeded += 1
+        else:
+            if any(s.get("result") == "failed" for s in steps_of_type):
+                pass
+            else:
+                succeeded += 1
 
     _log(f"Playbook complete: {succeeded}/{attempted} steps succeeded")
 

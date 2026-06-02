@@ -160,17 +160,54 @@ def analyze_banking_fraud(
                 )
             )
 
-    # Score: weighted sum capped at 100
-    weights = {"CRITICAL": 30, "HIGH": 20, "MEDIUM": 12, "LOW": 5, "INFO": 2}
-    raw = sum(weights.get(b["severity"], 10) for b in badges)
-    fraud_score = min(100, raw)
+    # Overhaul banking fraud scoring using the transparent Likelihood x Impact matrix model
+    # 1. Banking Fraud Likelihood (BFL, 1.0 to 10.0)
+    # Measures the static capability set of a banking trojan
+    bfl_score = 1.0
+    
+    if permissions & OVERLAY_PERMS or "TYPE_APPLICATION_OVERLAY" in combined_code:
+        bfl_score += 2.5
+    if permissions & SMS_PERMS:
+        bfl_score += 2.5
+    if permissions & A11Y_PERMS or "AccessibilityService" in combined_code:
+        bfl_score += 3.0
+    if upi_in_manifest or upi_in_code:
+        bfl_score += 1.5
+    if re.search(r"ClipboardManager|getPrimaryClip|InputMethod", combined_code):
+        bfl_score += 1.5
+        
+    BFL = min(10.0, bfl_score)
+
+    # 2. Banking Fraud Technical Impact (BFI, 1.0 to 10.0)
+    # Measures active live observations, data exfiltration, or confirmed accessibility hijack
+    bfi_score = 1.0
+    exfil_observed = False
+    
+    for b in badges:
+        if b["id"] == "BANK-CRED-EXFIL":
+            bfi_score += 5.0
+            exfil_observed = True
+        elif b["id"] == "BANK-A11Y-HIJACK":
+            bfi_score += 3.5
+        elif b["id"] == "BANK-OVERLAY":
+            bfi_score += 2.5
+            
+        weight = {"CRITICAL": 3.0, "HIGH": 2.0, "MEDIUM": 1.0, "LOW": 0.5}.get(b["severity"], 1.0)
+        bfi_score += weight * 0.5
+        
+    BFI = min(10.0, bfi_score)
+    
+    # Calculate composite Banking Fraud Score
+    fraud_score = max(0, min(100, int(BFL * BFI * 10.0)))
+    if not badges:
+        fraud_score = 0
 
     actions: List[str] = []
     if any(b["id"] == "BANK-OVERLAY" for b in badges):
         actions.append("Block app installation org-wide; warn customers about overlay phishing.")
     if any(b["id"] == "BANK-SMS-STEALER" for b in badges):
         actions.append("Monitor SMS OTP channel; consider step-up auth for affected users.")
-    if fraud_score >= 60:
+    if fraud_score >= 60 or exfil_observed:
         actions.append("Escalate to fraud desk — high-confidence mobile banking trojan indicators.")
 
     return {

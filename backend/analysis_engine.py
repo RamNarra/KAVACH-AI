@@ -4,6 +4,12 @@ import os
 import xml.etree.ElementTree as ET
 from typing import Dict, Any, List
 
+_PRUNED_LIBS = {
+    "androidx", "android.support", "kotlin", "kotlinx", "okio", "okhttp3", 
+    "retrofit2", "reactivex", "squareup", "fasterxml", "intellij", "jetbrains",
+    "com.google", "google.protobuf", "com.google.android", "com.google.firebase"
+}
+
 DANGEROUS_PERMISSIONS = {
     "android.permission.SEND_SMS": 20,
     "android.permission.READ_SMS": 20,
@@ -377,7 +383,7 @@ _SECRET_PATTERNS = [
     ("Hardcoded IPv4 C2",     r"(?<![\d.])(?!10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)(?:\d{1,3}\.){3}\d{1,3}(?!\d|\.)(?::[0-9]{2,5})?", 10),
 ]
 
-def analyze_secrets(jadx_out: str) -> Dict[str, Any]:
+def analyze_secrets(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     """
     Walk the JADX decompiled source tree and scan every .java file for
     credential patterns not caught by the basic JADX regex engine.
@@ -392,7 +398,27 @@ def analyze_secrets(jadx_out: str) -> Dict[str, Any]:
     if not os.path.isdir(sources_dir):
         sources_dir = jadx_out
 
-    for root_dir, _, files in os.walk(sources_dir):
+    if package_name:
+        package_dir = os.path.join(sources_dir, *package_name.split("."))
+        if os.path.isdir(package_dir):
+            sources_dir = package_dir
+
+    for root_dir, dirs, files in os.walk(sources_dir):
+        # Prune third-party library paths
+        rel_root = os.path.relpath(root_dir, sources_dir)
+        pruned_dirs = []
+        for d in dirs:
+            sub_rel = os.path.join(rel_root, d) if rel_root != "." else d
+            sub_pkg = sub_rel.replace(os.sep, ".")
+            is_lib = False
+            for p in _PRUNED_LIBS:
+                if sub_pkg.startswith(p) or d == p:
+                    is_lib = True
+                    break
+            if not is_lib:
+                pruned_dirs.append(d)
+        dirs[:] = pruned_dirs
+
         for fname in files:
             if not fname.endswith(".java"):
                 continue
@@ -480,10 +506,15 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
         return findings
 
     try:
-        from androguard.misc import AnalyzeAPK
-        a, d_list, dx = AnalyzeAPK(apk_path)
+        from androguard.core.bytecodes.apk import APK
+        from androguard.core.bytecodes.dvm import DalvikVMFormat
+        
+        a = APK(apk_path)
+        d_list = []
+        for dex in a.get_all_dex():
+            df = DalvikVMFormat(dex)
+            d_list.append(df)
     except ImportError:
-        # androguard not installed — skip silently
         return findings
     except Exception as e:
         return findings
@@ -500,33 +531,54 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
         (r"\.dex|\.jar|\.so",                                                "Dynamic Executable File Target", 15),
     ]
     try:
-        for d in (d_list if isinstance(d_list, list) else [d_list]):
-            for cls in d.get_classes():
-                for method in cls.get_methods():
-                    for _, _, val in method.get_instructions():
-                        if not isinstance(val, str) or len(val) < 12:
-                            continue
-                        for pat, label, sc in _STR_PATTERNS:
-                            if re.search(pat, val) and val not in seen_strings:
-                                seen_strings.add(val)
-                                findings["suspicious_strings"].append({
-                                    "type": label,
-                                    "value": val[:120],
-                                    "risk_score": sc,
-                                    "severity": "HIGH",
-                                    "description": f"{label} found in bytecode constant: {val[:60]}"
-                                })
-                                findings["score"] += sc
-                                break
+        for d in d_list:
+            if len(findings["suspicious_strings"]) >= 100:
+                break
+            for val_raw in d.get_strings():
+                if len(findings["suspicious_strings"]) >= 100:
+                    break
+                if isinstance(val_raw, bytes):
+                    val = val_raw.decode('utf-8', errors='ignore')
+                else:
+                    val = str(val_raw)
+                    
+                if len(val) < 12:
+                    continue
+                    
+                # Quick C-optimized pre-filter to bypass 99% of normal strings without regular expressions
+                if not any(x in val for x in ("://", "127.0.0.1", "/bin/", ".dex", ".jar", ".so", "==", "=")) and len(val) < 40:
+                    continue
+                    
+                for pat, label, sc in _STR_PATTERNS:
+                    if re.search(pat, val) and val not in seen_strings:
+                        seen_strings.add(val)
+                        findings["suspicious_strings"].append({
+                            "type": label,
+                            "value": val[:120],
+                            "risk_score": sc,
+                            "severity": "HIGH",
+                            "description": f"{label} found in bytecode constant: {val[:60]}"
+                        })
+                        findings["score"] += sc
+                        break
     except Exception:
         pass
 
-    # Dangerous API chain detection
+    # Dangerous API chain detection (O(1) exact name lookup using a pre-built set to prevent slow iterative scans)
     try:
+        available_methods = set()
+        for d in d_list:
+            for cls in d.get_classes():
+                for m in cls.get_methods():
+                    m_name = m.name
+                    if isinstance(m_name, bytes):
+                        m_name = m_name.decode('utf-8', errors='ignore')
+                    else:
+                        m_name = str(m_name or "")
+                    available_methods.add(m_name)
+            
         for read_api, write_api, label, score in _DANGEROUS_API_CHAINS:
-            read_refs = list(dx.get_method_analysis_by_name(read_api) or [])
-            write_refs = list(dx.get_method_analysis_by_name(write_api) or [])
-            if read_refs and write_refs:
+            if read_api in available_methods and write_api in available_methods:
                 findings["dangerous_api_chains"].append({
                     "type": label,
                     "risk_score": score,
@@ -539,12 +591,22 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
 
     # Risky superclass detection
     try:
-        for cls in dx.get_classes():
-            supers = [cls.get_superclassname() or ""]
-            for sup in supers:
+        for d in d_list:
+            for cls in d.get_classes():
+                sup_raw = cls.get_superclassname()
+                if isinstance(sup_raw, bytes):
+                    sup = sup_raw.decode('utf-8', errors='ignore')
+                else:
+                    sup = str(sup_raw or "")
+                    
                 for risky_cls, label, score in _RISKY_SUPERCLASSES:
                     if risky_cls in sup:
-                        class_name = cls.get_class_name().replace("/", ".").strip("L;")
+                        cls_name_raw = cls.name
+                        if isinstance(cls_name_raw, bytes):
+                            class_name = cls_name_raw.decode('utf-8', errors='ignore')
+                        else:
+                            class_name = str(cls_name_raw or "")
+                        class_name = class_name.replace("/", ".").strip("L;")
                         findings["risky_classes"].append({
                             "class": class_name,
                             "type": label,
@@ -636,7 +698,7 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
     return findings
 
 
-def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
+def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     """
     Run Semgrep over JADX decompiled java files,
     or execute a local Python-native AST-like pattern matcher.
@@ -665,7 +727,12 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
             
     if semgrep_bin:
         try:
-            cmd = [semgrep_bin, "--config", "p/android", "--json", jadx_out]
+            target_scan_dir = jadx_out
+            if package_name:
+                package_dir = os.path.join(jadx_out, "sources", *package_name.split("."))
+                if os.path.isdir(package_dir):
+                    target_scan_dir = package_dir
+            cmd = [semgrep_bin, "--config", "p/android", "--json", target_scan_dir]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
             if res.returncode == 0 and res.stdout:
                 data = json.loads(res.stdout)
@@ -694,6 +761,11 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
     sources_dir = os.path.join(jadx_out, "sources")
     if not os.path.isdir(sources_dir):
         sources_dir = jadx_out
+
+    if package_name:
+        package_dir = os.path.join(sources_dir, *package_name.split("."))
+        if os.path.isdir(package_dir):
+            sources_dir = package_dir
         
     rules = [
         (r"onReceivedSslError\s*\([^)]*\)\s*\{\s*handler\.proceed\(\)", "SSL Certificate Bypass (MASTG M3)", 15, "CRITICAL"),
@@ -705,7 +777,22 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
     ]
     
     seen = set()
-    for root_dir, _, files in os.walk(sources_dir):
+    for root_dir, dirs, files in os.walk(sources_dir):
+        # Prune third-party library paths
+        rel_root = os.path.relpath(root_dir, sources_dir)
+        pruned_dirs = []
+        for d in dirs:
+            sub_rel = os.path.join(rel_root, d) if rel_root != "." else d
+            sub_pkg = sub_rel.replace(os.sep, ".")
+            is_lib = False
+            for p in _PRUNED_LIBS:
+                if sub_pkg.startswith(p) or d == p:
+                    is_lib = True
+                    break
+            if not is_lib:
+                pruned_dirs.append(d)
+        dirs[:] = pruned_dirs
+
         for fname in files:
             if not fname.endswith(".java"):
                 continue
@@ -735,7 +822,7 @@ def analyze_semgrep(jadx_out: str) -> Dict[str, Any]:
     return findings
 
 
-def analyze_trufflehog(jadx_out: str) -> Dict[str, Any]:
+def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     """
     Run TruffleHog filesystem secret scanner over unpacked directories,
     or execute a local Python-native high-entropy string scanner.
@@ -757,7 +844,12 @@ def analyze_trufflehog(jadx_out: str) -> Dict[str, Any]:
     trufflehog_bin = shutil.which("trufflehog")
     if trufflehog_bin:
         try:
-            cmd = [trufflehog_bin, "filesystem", jadx_out, "--json"]
+            target_scan_dir = jadx_out
+            if package_name:
+                package_dir = os.path.join(jadx_out, "sources", *package_name.split("."))
+                if os.path.isdir(package_dir):
+                    target_scan_dir = package_dir
+            cmd = [trufflehog_bin, "filesystem", target_scan_dir, "--json"]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
             if res.stdout:
                 findings["trufflehog_scan"] = True
@@ -800,9 +892,29 @@ def analyze_trufflehog(jadx_out: str) -> Dict[str, Any]:
     sources_dir = os.path.join(jadx_out, "sources")
     if not os.path.isdir(sources_dir):
         sources_dir = jadx_out
+
+    if package_name:
+        package_dir = os.path.join(sources_dir, *package_name.split("."))
+        if os.path.isdir(package_dir):
+            sources_dir = package_dir
         
     seen = set()
-    for root_dir, _, files in os.walk(sources_dir):
+    for root_dir, dirs, files in os.walk(sources_dir):
+        # Prune third-party library paths
+        rel_root = os.path.relpath(root_dir, sources_dir)
+        pruned_dirs = []
+        for d in dirs:
+            sub_rel = os.path.join(rel_root, d) if rel_root != "." else d
+            sub_pkg = sub_rel.replace(os.sep, ".")
+            is_lib = False
+            for p in _PRUNED_LIBS:
+                if sub_pkg.startswith(p) or d == p:
+                    is_lib = True
+                    break
+            if not is_lib:
+                pruned_dirs.append(d)
+        dirs[:] = pruned_dirs
+
         for fname in files:
             if not fname.endswith(".java"):
                 continue
@@ -846,6 +958,11 @@ def calculate_deterministic_score(
     jadx_out: str = None,
     apk_path: str = None,
     progress_callback = None,
+    androguard_res: Dict[str, Any] = None,
+    sec_res: Dict[str, Any] = None,
+    truffle_res: Dict[str, Any] = None,
+    semgrep_res: Dict[str, Any] = None,
+    package_name: str = "",
 ) -> Dict[str, Any]:
     import math
     m_res = analyze_manifest(manifest_content)
@@ -854,57 +971,269 @@ def calculate_deterministic_score(
     q_res = analyze_quark(quark_json_path) if quark_json_path else {"rule_hits": [], "score": 0}
     net_res = analyze_network_security_config(apktool_out, manifest_content) if apktool_out else {"issues": [], "score": 0}
     
-    if progress_callback:
-        progress_callback("secrets", "RUNNING", "Scanning decompiled sources for hardcoded credentials/secrets...")
-    sec_res = analyze_secrets(jadx_out) if jadx_out else {"credential_leaks": [], "score": 0}
-    
-    if progress_callback:
-        progress_callback("androguard", "RUNNING", "Androguard deep DEX bytecode structural analysis firing...")
-    ag_res = analyze_androguard(apk_path) if apk_path else {"suspicious_strings": [], "dangerous_api_chains": [], "risky_classes": [], "score": 0}
-    
-    # Run the new advanced static compliance tools
-    if progress_callback:
-        progress_callback("mobsf", "RUNNING", "Generating local OWASP Mobile Top 10 compliance scorecard...")
-    mobsf_res = analyze_mobsf(apk_path) if apk_path else {"scorecard": [], "score": 0}
-    
-    if progress_callback:
-        progress_callback("semgrep", "RUNNING", "Semgrep AST static analysis checking security patterns...")
-    semgrep_res = analyze_semgrep(jadx_out) if jadx_out else {"violations": [], "score": 0}
-    
-    if progress_callback:
-        progress_callback("trufflehog", "RUNNING", "TruffleHog deep filesystem high-entropy credential audit running...")
-    truffle_res = analyze_trufflehog(jadx_out) if jadx_out else {"secrets": [], "score": 0}
-    
+    import concurrent.futures
+    import logging
+    logger = logging.getLogger("kavach")
+
+    tasks = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        if sec_res is not None:
+            pass
+        elif jadx_out:
+            if progress_callback:
+                progress_callback("secrets", "RUNNING", "Scanning decompiled sources for hardcoded credentials/secrets...")
+            tasks["secrets"] = executor.submit(analyze_secrets, jadx_out, package_name)
+        else:
+            sec_res = {"credential_leaks": [], "score": 0}
+
+        if androguard_res is not None:
+            ag_res = androguard_res
+        elif apk_path:
+            if progress_callback:
+                progress_callback("androguard", "RUNNING", "Androguard deep DEX bytecode structural analysis firing...")
+            tasks["androguard"] = executor.submit(analyze_androguard, apk_path)
+        else:
+            ag_res = {"suspicious_strings": [], "dangerous_api_chains": [], "risky_classes": [], "score": 0}
+
+        if semgrep_res is not None:
+            pass
+        elif jadx_out:
+            if progress_callback:
+                progress_callback("semgrep", "RUNNING", "Semgrep AST static analysis checking security patterns...")
+            tasks["semgrep"] = executor.submit(analyze_semgrep, jadx_out, package_name)
+        else:
+            semgrep_res = {"violations": [], "score": 0}
+
+        if truffle_res is not None:
+            pass
+        elif jadx_out:
+            if progress_callback:
+                progress_callback("trufflehog", "RUNNING", "TruffleHog deep filesystem high-entropy credential audit running...")
+            tasks["trufflehog"] = executor.submit(analyze_trufflehog, jadx_out, package_name)
+        else:
+            truffle_res = {"secrets": [], "score": 0}
+
+        # Retrieve results safely with individual exception bounds
+        if "secrets" in tasks:
+            try:
+                sec_res = tasks["secrets"].result()
+                if progress_callback:
+                    progress_callback("secrets", "COMPLETED", "Static secrets scan completed.")
+            except Exception as e:
+                logger.error(f"Secrets analysis failed: {e}")
+                sec_res = {"credential_leaks": [], "score": 0}
+
+        if "androguard" in tasks:
+            try:
+                ag_res = tasks["androguard"].result()
+                if progress_callback:
+                    progress_callback("androguard", "COMPLETED", "Androguard DEX analysis completed.")
+            except Exception as e:
+                logger.error(f"Androguard analysis failed: {e}")
+                ag_res = {"suspicious_strings": [], "dangerous_api_chains": [], "risky_classes": [], "score": 0}
+
+        if "semgrep" in tasks:
+            try:
+                semgrep_res = tasks["semgrep"].result()
+                if progress_callback:
+                    progress_callback("semgrep", "COMPLETED", "Semgrep AST scan completed.")
+            except Exception as e:
+                logger.error(f"Semgrep analysis failed: {e}")
+                semgrep_res = {"violations": [], "score": 0}
+
+        if "trufflehog" in tasks:
+            try:
+                truffle_res = tasks["trufflehog"].result()
+                if progress_callback:
+                    progress_callback("trufflehog", "COMPLETED", "TruffleHog credential audit completed.")
+            except Exception as e:
+                logger.error(f"TruffleHog analysis failed: {e}")
+                truffle_res = {"secrets": [], "score": 0}
+
     if progress_callback:
         progress_callback("trufflehog", "COMPLETED", "All deep static security engines successfully completed.")
 
-    # Apply capped category weights to balance the threat scoring
-    manifest_capped = min(m_res["score"], 15)
-    jadx_capped = min(j_res["score"], 30)
-    apkid_capped = min(a_res["score"], 10)
-    quark_capped = min(q_res["score"], 35)
-    net_capped = min(net_res["score"], 15)
+    # -------------------------------------------------------------------------
+    # Unified Multi-Dimensional Vulnerability Accumulation (MVSA) Scoring Engine
+    # -------------------------------------------------------------------------
     
-    # Merge TruffleHog secrets with native secrets scan and cap at 30
-    secrets_total = sec_res["score"] + truffle_res["score"]
-    secrets_capped = min(secrets_total, 30)
+    critical_findings = []
+    high_findings = []
+    medium_findings = []
+    low_findings = []
     
-    androguard_capped = min(ag_res["score"], 35)
-    
-    # Apply caps for new MobSF and Semgrep daemons
-    mobsf_capped = min(mobsf_res["score"], 15)
-    semgrep_capped = min(semgrep_res["score"], 20)
+    # 1. Manifest Permissions and Flags
+    for p in m_res.get("permissions", []):
+        pname = p.get("name", "").upper()
+        if any(x in pname for x in ["DEVICE_ADMIN", "SYSTEM_ALERT_WINDOW", "BIND_ACCESSIBILITY_SERVICE"]):
+            medium_findings.append({"type": "High Privilege Permission", "detail": p.get("name"), "weight": 8, "severity": "MEDIUM"})
+        else:
+            low_findings.append({"type": "Dangerous Permission", "detail": p.get("name"), "weight": 2, "severity": "LOW"})
+            
+    # Exported Components
+    for ec in m_res.get("exported_components", []):
+        comp_type = ec.get("type", "").lower()
+        comp_name = ec.get("name", "")
+        if comp_type in ["service", "provider", "receiver"]:
+            medium_findings.append({"type": "Exported Component", "detail": f"Exported {comp_type}: {comp_name}", "weight": 6, "severity": "MEDIUM"})
+        else:
+            low_findings.append({"type": "Exported Activity", "detail": f"Exported activity: {comp_name}", "weight": 1, "severity": "LOW"})
+            
+    # Manifest Flags
+    for f in m_res.get("dangerous_manifest_flags", []):
+        flag = f.get("flag", "")
+        if "usesCleartextTraffic=true" in flag:
+            high_findings.append({"type": "Unsecured Traffic Allowed", "detail": "usesCleartextTraffic=true", "weight": 15, "severity": "HIGH"})
+        elif "allowBackup=true" in flag:
+            low_findings.append({"type": "Manifest Flag", "detail": "allowBackup=true", "weight": 1, "severity": "LOW"})
+        elif "debuggable=true" in flag:
+            high_findings.append({"type": "Manifest Flag", "detail": "debuggable=true", "weight": 15, "severity": "HIGH"})
+            
+    # 2. Network Security Config
+    for issue in net_res.get("issues", []):
+        desc = str(issue).lower()
+        if "cleartext" in desc or "permitted" in desc:
+            high_findings.append({"type": "Network Security Issue", "detail": "Domain-wide cleartext traffic permitted", "weight": 15, "severity": "HIGH"})
+        else:
+            medium_findings.append({"type": "Network Security Issue", "detail": str(issue), "weight": 8, "severity": "MEDIUM"})
 
-    total_score = (
-        manifest_capped + jadx_capped + apkid_capped + quark_capped
-        + net_capped + secrets_capped + androguard_capped
-        + mobsf_capped + semgrep_capped
-    )
+    # 3. APKiD Anti-VM / Packers
+    for hit in a_res.get("anti_vm", []):
+        high_findings.append({"type": "Anti-VM Evasion", "detail": hit.get("description", "Anti-VM match"), "weight": 20, "severity": "HIGH"})
+    for hit in a_res.get("obfuscator_packer", []):
+        desc = hit.get("description", "").lower()
+        if any(x in desc for x in ["proguard", "r8", "dexguard"]):
+            low_findings.append({"type": "Standard Obfuscator", "detail": hit.get("description"), "weight": 2, "severity": "LOW"})
+        else:
+            high_findings.append({"type": "Commercial Packer Detections", "detail": hit.get("description"), "weight": 15, "severity": "HIGH"})
+    for hit in a_res.get("compiler_manipulator", []):
+        low_findings.append({"type": "Compiler Manipulation", "detail": hit.get("description"), "weight": 2, "severity": "LOW"})
 
-    # Use asymptotic scoring so it scales naturally up to 100 with higher caps
-    clamped_score = int(100 * (1 - math.exp(-total_score / 45.0)))
-    if total_score == 0:
-        clamped_score = 0
+    # 4. Quark Engine Malware hits
+    for hit in q_res.get("rule_hits", []):
+        risk_score = hit.get("risk_score", 0)
+        if risk_score >= 12:
+            high_findings.append({"type": "Malware Behavior Match", "detail": hit.get("rule"), "weight": 15, "severity": "HIGH"})
+        elif risk_score >= 6:
+            medium_findings.append({"type": "Suspicious Code Behavior", "detail": hit.get("rule"), "weight": 6, "severity": "MEDIUM"})
+        else:
+            low_findings.append({"type": "Standard Behavioral Pattern", "detail": hit.get("rule"), "weight": 1, "severity": "LOW"})
+
+    # 5. Secrets and TruffleHog credential leaks
+    secrets_count = len(sec_res.get("credential_leaks", [])) + len(truffle_res.get("secrets", []))
+    for leak in sec_res.get("credential_leaks", []):
+        type_str = leak.get("type", "").lower()
+        if any(x in type_str for x in ["aws", "slack", "private key", "twilio", "github"]):
+            critical_findings.append({"type": "Verified High-Risk Secret Leak", "detail": leak.get("type"), "weight": 35, "severity": "CRITICAL"})
+        else:
+            high_findings.append({"type": "Hardcoded Token Leak", "detail": leak.get("type"), "weight": 20, "severity": "HIGH"})
+    for secret in truffle_res.get("secrets", []):
+        type_str = secret.get("type", "").lower()
+        if any(x in type_str for x in ["aws", "slack", "private key", "twilio", "github"]):
+            critical_findings.append({"type": "Verified High-Risk Secret Leak", "detail": secret.get("type"), "weight": 35, "severity": "CRITICAL"})
+        else:
+            high_findings.append({"type": "Hardcoded Token Leak", "detail": secret.get("type"), "weight": 20, "severity": "HIGH"})
+
+    # 6. Basic JADX source findings
+    for key in j_res.get("hardcoded_secrets", []):
+        medium_findings.append({"type": "Suspicious Hardcoded String", "detail": key.get("type"), "weight": 8, "severity": "MEDIUM"})
+    for key in j_res.get("crypto_issues", []):
+        desc = key.get("type", "").lower()
+        if "master" in desc or "hardcoded" in desc:
+            high_findings.append({"type": "Hardcoded Encryption Key", "detail": key.get("type"), "weight": 20, "severity": "HIGH"})
+        else:
+            medium_findings.append({"type": "Insecure Cryptography Usage", "detail": key.get("type"), "weight": 8, "severity": "MEDIUM"})
+    for key in j_res.get("data_storage_issues", []):
+        medium_findings.append({"type": "Sensitive Data Storage", "detail": key.get("type"), "weight": 6, "severity": "MEDIUM"})
+    for key in j_res.get("reflection_dynamic_loading", []):
+        low_findings.append({"type": "Reflection usage", "detail": key.get("type"), "weight": 2, "severity": "LOW"})
+    for key in j_res.get("obfuscation_signals", []):
+        low_findings.append({"type": "Obfuscation Indicator", "detail": key.get("type"), "weight": 1, "severity": "LOW"})
+
+    # 7. Semgrep AST Violations
+    for violation in semgrep_res.get("violations", []):
+        sev = str(violation.get("severity", "")).upper()
+        rule = violation.get("rule", "").lower()
+        desc = violation.get("description", "").lower()
+        if "disabled" in desc or "bypass" in desc or "trustmanager" in desc or "hostnameverifier" in desc:
+            high_findings.append({"type": "Critical Security Violation", "detail": f"Semgrep: {desc}", "weight": 20, "severity": "HIGH"})
+        elif sev == "ERROR":
+            medium_findings.append({"type": "AST Security Issue", "detail": f"Semgrep: {desc}", "weight": 8, "severity": "MEDIUM"})
+        else:
+            low_findings.append({"type": "AST Code Warning", "detail": f"Semgrep: {desc}", "weight": 2, "severity": "LOW"})
+
+    # 8. Androguard DEX structural analysis
+    ag_res_clean = ag_res if ag_res else {}
+    for hit in ag_res_clean.get("suspicious_strings", []):
+        low_findings.append({"type": "Suspicious DEX String", "detail": hit.get("type"), "weight": 1, "severity": "LOW"})
+    for hit in ag_res_clean.get("dangerous_api_chains", []):
+        medium_findings.append({"type": "Dangerous API Call Chain", "detail": hit.get("type"), "weight": 12, "severity": "MEDIUM"})
+    for hit in ag_res_clean.get("risky_classes", []):
+        medium_findings.append({"type": "Risky Class Marker", "detail": hit.get("type"), "weight": 12, "severity": "MEDIUM"})
+
+    # A. Calculate Base Exposure Score (representing footprint)
+    exposure_sum = 0
+    for f in (low_findings + medium_findings):
+        if f["type"] in ["Dangerous Permission", "High Privilege Permission", "Exported Component", "Exported Activity"]:
+            exposure_sum += f["weight"]
+    base_exposure = min(15.0, exposure_sum)
+    
+    # B. Gather actual security vulnerabilities
+    vulnerabilities = []
+    for f in (critical_findings + high_findings + medium_findings + low_findings):
+        if f["type"] not in ["Dangerous Permission", "High Privilege Permission", "Exported Component", "Exported Activity"]:
+            vulnerabilities.append(f)
+            
+    if not vulnerabilities:
+        clamped_score = int(round(base_exposure))
+    else:
+        # Determine Worst-Finding Base Score (S_max)
+        if critical_findings:
+            s_max = 80.0
+        elif high_findings:
+            s_max = 55.0
+        elif any(v["severity"] == "MEDIUM" for v in vulnerabilities):
+            s_max = 30.0
+        else:
+            s_max = 10.0
+            
+        # Sum other findings weights (excluding worst setting base)
+        has_critical = len(critical_findings) > 0
+        has_high = len(high_findings) > 0
+        has_medium_vuln = any(v["severity"] == "MEDIUM" for v in vulnerabilities)
+        
+        remaining_weights = []
+        worst_found = False
+        
+        for f in vulnerabilities:
+            if not worst_found:
+                if has_critical and f in critical_findings:
+                    worst_found = True
+                    continue
+                elif not has_critical and has_high and f in high_findings:
+                    worst_found = True
+                    continue
+                elif not has_critical and not has_high and has_medium_vuln and f["severity"] == "MEDIUM":
+                    worst_found = True
+                    continue
+                elif not has_critical and not has_high and not has_medium_vuln and f["severity"] == "LOW":
+                    worst_found = True
+                    continue
+            remaining_weights.append(f["weight"])
+            
+        # Exposure contributes slightly to vulnerability scoring
+        for f in (low_findings + medium_findings):
+            if f["type"] in ["Dangerous Permission", "High Privilege Permission", "Exported Component", "Exported Activity"]:
+                remaining_weights.append(f["weight"] * 0.2)
+                
+        w_others = sum(remaining_weights)
+        
+        # Exponential accumulation formula (decreased coefficient to prevent scoring from rushing to 100 too easily)
+        clamped_score = min(100, int(round(s_max + (100.0 - s_max) * (1.0 - math.exp(-0.005 * w_others)))))
+
+    # Normalize backward compatible metrics for Likelihood and Impact
+    likelihood = round(max(1.0, min(10.0, base_exposure * 0.7)), 2)
+    impact = round(max(1.0, min(10.0, clamped_score / 10.0)), 2)
 
     threat_level = "SAFE"
     if clamped_score >= 80:
@@ -916,7 +1245,7 @@ def calculate_deterministic_score(
     elif clamped_score >= 10:
         threat_level = "LOW"
 
-    # Assemble normalized evidence model (engines 4, 5, MobSF, Semgrep, and TruffleHog merged in)
+    # Assemble normalized evidence model (engines 4, 5, Semgrep, and TruffleHog merged in)
     evidence = {
         "permissions": m_res["permissions"],
         "exported_components": m_res["exported_components"],
@@ -931,7 +1260,7 @@ def calculate_deterministic_score(
         "malware_rule_hits": a_res["anti_vm"] + q_res["rule_hits"],
     }
 
-    # Merge Semgrep AST and MobSF compliance scorecard warnings into malware_rule_hits
+    # Merge Semgrep AST warnings into malware_rule_hits
     for v in semgrep_res["violations"]:
         if not ("crypto" in v["rule"] or "ssl" in v["rule"]):
             evidence["malware_rule_hits"].append({
@@ -939,13 +1268,6 @@ def calculate_deterministic_score(
                 "description": f"Semgrep: {v['description']}",
                 "risk_score": v["risk_score"]
             })
-            
-    for card in mobsf_res["scorecard"]:
-        evidence["malware_rule_hits"].append({
-            "rule": card["title"],
-            "description": card["description"],
-            "risk_score": 10 if card["severity"] == "HIGH" else 5
-        })
 
     # Format description summaries for Vertex AI prompt context
     manifest_details = [f"- {p['description']}" for p in evidence["permissions"]]
@@ -965,7 +1287,9 @@ def calculate_deterministic_score(
     return {
         "risk_score": clamped_score,
         "threat_level": threat_level,
-        "raw_score": total_score,
+        "raw_score": clamped_score,
+        "static_likelihood": likelihood,
+        "static_impact": impact,
         "evidence": evidence,
         "details": {
             "manifest": manifest_details,

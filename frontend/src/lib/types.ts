@@ -24,6 +24,7 @@ export interface RiskDecomposition {
   weights?: Record<string, number>;
   weighted_contribution?: Record<string, number>;
   top_contributors?: { label: string; category: string; weight: number }[];
+  absolute_score?: number;
 }
 
 export interface AnalysisDoc {
@@ -33,11 +34,13 @@ export interface AnalysisDoc {
   package_name?: string;
   risk_score?: number;
   threat_level?: ThreatLevel;
+  absolute_threat_score?: number;
   error_message?: string;
   created_at?: string;
   static_analysis?: {
     risk_score?: number;
     threat_level?: ThreatLevel;
+    absolute_threat_score?: number;
     banking_fraud?: {
       fraud_score?: number;
       badges?: FraudBadge[];
@@ -49,6 +52,12 @@ export interface AnalysisDoc {
     investigation_report?: {
       summary?: string;
       executive_verdict?: string;
+      dynamic_summary?: string;
+      final_report?: string;
+      runtime_findings_interpretation?: string;
+      static_confirmed_at_runtime?: string[];
+      runtime_only_findings?: string[];
+      analysis_limitations?: string;
       suspicious_activities?: { title: string; description: string; severity?: string }[];
       code_vulnerabilities?: { title: string; description: string; severity?: string }[];
       recommendations?: string[];
@@ -71,6 +80,12 @@ export interface AnalysisDoc {
   investigation_report?: {
     summary?: string;
     executive_verdict?: string;
+    dynamic_summary?: string;
+    final_report?: string;
+    runtime_findings_interpretation?: string;
+    static_confirmed_at_runtime?: string[];
+    runtime_only_findings?: string[];
+    analysis_limitations?: string;
     suspicious_activities?: { title: string; description: string; severity?: string }[];
     code_vulnerabilities?: { title: string; description: string; severity?: string }[];
     recommendations?: string[];

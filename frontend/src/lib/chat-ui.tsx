@@ -13,7 +13,7 @@ function inlineFormat(text: string): React.ReactNode[] {
     if (tok.startsWith('**')) {
       nodes.push(<strong key={key++} className="font-semibold">{tok.slice(2, -2)}</strong>);
     } else if (tok.startsWith('`')) {
-      nodes.push(<code key={key++} className="px-1.5 py-0.5 rounded bg-[#0b0b0c] text-[13px]">{tok.slice(1, -1)}</code>);
+      nodes.push(<code key={key++} className="font-mono px-1.5 py-0.5 rounded bg-zinc-950 text-[var(--blue)] text-[12.5px] border border-[var(--border)]">{tok.slice(1, -1)}</code>);
     } else if (tok.startsWith('*')) {
       nodes.push(<em key={key++}>{tok.slice(1, -1)}</em>);
     }
@@ -142,7 +142,7 @@ export function ChatBubble({ role, text }: { role: 'user' | 'ai'; text: string }
   if (role === 'user') {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[88%] rounded-2xl rounded-br-md bg-[var(--blue)]/15 border border-[var(--blue)]/25 px-4 py-2.5">
+        <div className="max-w-[88%] rounded-2xl rounded-br-md bg-gradient-to-tr from-[var(--blue)]/20 to-[var(--blue)]/5 border border-[var(--blue)]/25 px-4 py-2.5 shadow-[0_2px_10px_rgba(59,130,246,0.04)]">
           <p className="text-[14px] text-[var(--text)] leading-relaxed">{text}</p>
         </div>
       </div>
@@ -152,14 +152,14 @@ export function ChatBubble({ role, text }: { role: 'user' | 'ai'; text: string }
   return (
     <div className="flex gap-3 items-start">
       <div
-        className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-[var(--surface-2)] border border-[var(--border)]"
+        className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-[var(--surface-2)] border border-[var(--border)] shadow-sm"
         title="Gemini"
       >
         <GeminiMark size={18} />
       </div>
-      <div className="min-w-0 flex-1 rounded-2xl rounded-tl-md bg-[var(--surface-2)] border border-[var(--border)] px-4 py-3">
-        <p className="text-[11px] font-medium text-[var(--muted)] mb-2 tracking-wide">Gemini Analyst</p>
-        <div className="text-[14px] leading-relaxed text-[var(--text)]">
+      <div className="min-w-0 flex-1 rounded-2xl rounded-tl-md bg-zinc-900/65 backdrop-blur-sm border border-[var(--border)] px-4 py-3 shadow-[0_4px_12px_rgba(0,0,0,0.15)]">
+        <p className="text-[11px] font-bold text-[var(--blue)] mb-2 tracking-widest uppercase">Gemini Analyst</p>
+        <div className="text-[14px] leading-relaxed text-zinc-200">
           <MarkdownBody text={text} />
         </div>
       </div>

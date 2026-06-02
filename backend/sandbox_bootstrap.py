@@ -299,25 +299,7 @@ def bootstrap_worker():
 
 
 # Packages that hammer the CPU on fresh boots — permanently disable them in the sandbox.
-_BLOATWARE_PKGS = [
-    "com.google.android.googlequicksearchbox",  # Google Search Box
-    "com.google.android.apps.messaging",        # Google Messages
-    "com.google.android.as",                    # Android System Intelligence
-    "com.google.android.apps.wellbeing",        # Digital Wellbeing
-    "com.google.android.apps.photos",           # Google Photos
-    "com.google.android.apps.youtube.music",    # YT Music
-    "com.google.android.youtube",               # YouTube
-    "com.google.android.gm",                    # Gmail
-    "com.google.android.apps.maps",             # Google Maps
-    "com.google.android.apps.docs",             # Google Docs
-    "com.google.android.projection.gearhead",   # Android Auto
-    "com.google.android.apps.wallpaper",        # Wallpapers
-    "com.google.android.feedback",              # Feedback
-    "com.google.android.music",                 # Play Music
-    "com.google.android.videos",                # Play Movies
-    "com.google.android.settings.intelligence", # Settings Search Indexer
-    "com.google.android.inputmethod.latin",     # Gboard keyboard
-]
+_BLOATWARE_PKGS = []
 
 def _kill_bloatware_services():
     """Disable known CPU-hungry and memory-heavy bloatware packages permanently inside the sandbox."""
