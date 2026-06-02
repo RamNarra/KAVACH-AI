@@ -24,9 +24,10 @@ QUARK_TIMEOUT_SECS = int(os.getenv("QUARK_TIMEOUT_SECS", "600"))
 _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 
 import firebase_admin
-from firebase_admin import credentials, firestore, storage as firebase_storage
+from firebase_admin import credentials, storage as firebase_storage
 from google import genai
 from google.genai import types as genai_types
+from local_db import LocalDB, ArrayUnion as LocalArrayUnion
 
 from analysis_engine import calculate_deterministic_score
 from banking_fraud import analyze_banking_fraud
@@ -138,19 +139,17 @@ except FileNotFoundError as tool_err:
     JADX_BIN = "jadx"
     APKTOOL_CMD = ["apktool"]
 
-# Initialize Firebase Admin SDK
-if not firebase_admin._apps:
-    try:
-        firebase_admin.initialize_app(options={
-            "projectId": PROJECT_ID,
-            "storageBucket": f"{PROJECT_ID}.firebasestorage.app"
-        })
-        logger.info("Firebase Admin initialized successfully.")
-    except Exception as e:
-        logger.error(f"Error initializing Firebase Admin: {e}")
-        firebase_admin.initialize_app()
+# Use local JSON-file storage instead of Firestore (Firebase suspended)
+db = LocalDB()
 
-db = firestore.client()
+# Shim: replace firestore.ArrayUnion with our local equivalent
+class _FirestoreShim:
+    @staticmethod
+    def ArrayUnion(values):
+        return LocalArrayUnion(values)
+
+firestore = _FirestoreShim()
+
 
 # Initialize Google Gen AI client (Dynamic AI Studio / Vertex AI backend)
 try:

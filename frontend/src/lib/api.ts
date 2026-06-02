@@ -1,5 +1,3 @@
-import { auth } from './firebase';
-
 const getApiUrl = (): string => {
   if (typeof window === 'undefined') return '';
 
@@ -24,6 +22,9 @@ const getApiUrl = (): string => {
   }
 
   // 3. Allow build-time env variable override
+  if (process.env.NEXT_PUBLIC_API_BASE_URL) {
+    return process.env.NEXT_PUBLIC_API_BASE_URL;
+  }
   if (process.env.NEXT_PUBLIC_API_URL) {
     return process.env.NEXT_PUBLIC_API_URL;
   }
@@ -34,24 +35,16 @@ const getApiUrl = (): string => {
     return 'http://localhost:8080';
   }
 
-  // 5. Fallback for deployed Firebase Hosting:
-  // Since the backend runs locally in the terminal and frontend runs on Firebase Hosting,
-  // we default to http://localhost:8080. The user can switch back to the Cloud Run backend
-  // at any time by loading the site once with "?local=false".
   return 'http://localhost:8080';
 };
 
 const API = getApiUrl();
 
+// No-auth fetch — Firebase suspended, open access for hackathon demo
 export async function apiFetch(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type') && init.body) {
     headers.set('Content-Type', 'application/json');
-  }
-  const user = auth.currentUser;
-  if (user) {
-    const token = await user.getIdToken();
-    headers.set('Authorization', `Bearer ${token}`);
   }
   const url = path.startsWith('http') ? path : `${API}${path}`;
   return fetch(url, { ...init, headers });
@@ -99,7 +92,7 @@ export async function triggerDynamicAnalysis(analysisId: string, uid: string): P
   return data;
 }
 
-export const isLocalAPI = typeof window !== 'undefined' && 
+export const isLocalAPI = typeof window !== 'undefined' &&
   (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
 export async function uploadApkDirect(
@@ -114,19 +107,12 @@ export async function uploadApkDirect(
   if (uid) formData.append('uid', uid);
 
   if (onProgress) onProgress(30);
-  const user = auth.currentUser;
-  const headers = new Headers();
-  if (user) {
-    const token = await user.getIdToken();
-    headers.set('Authorization', `Bearer ${token}`);
-  }
-  
   if (onProgress) onProgress(70);
+
   const url = `${API}/api/analyze/upload?background=true`;
   const res = await fetch(url, {
     method: 'POST',
     body: formData,
-    headers,
   });
   if (onProgress) onProgress(100);
   const data = await res.json();

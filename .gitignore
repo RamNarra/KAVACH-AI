@@ -22,3 +22,4 @@ backend/androguard_result_test.json
 replace_script.py
 context.txt
 HACKATHON_SUBMISSION.md
+backend/tmp_scans/

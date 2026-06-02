@@ -2,14 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  signInWithPopup,
-  signOut,
-  onAuthStateChanged,
-  type User,
-} from 'firebase/auth';
-import { collection, doc, onSnapshot, query, where, orderBy } from 'firebase/firestore';
-import { auth, googleProvider, db } from '../lib/firebase';
 import { fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect } from '../lib/api';
 import { DEMO_ANALYSIS } from '../lib/demo';
 import type { AnalysisDoc, ThreatLevel } from '../lib/types';
@@ -33,9 +25,7 @@ const threatColor: Record<ThreatLevel, string> = {
 };
 
 export default function Home() {
-  const [user, setUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
-  const [history, setHistory] = useState<AnalysisDoc[]>([]);
+  const [history] = useState<AnalysisDoc[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [active, setActive] = useState<AnalysisDoc | null>(null);
   const [isDemo, setIsDemo] = useState(false);
@@ -58,21 +48,8 @@ export default function Home() {
   const [estSecondsRemaining, setEstSecondsRemaining] = useState(30);
 
   useEffect(() => {
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthReady(true);
-    });
-  }, []);
-
-  useEffect(() => {
     fetchSandboxHealth().then((h) => setSandboxOk(h.sandbox_status === 'READY'));
   }, []);
-
-  useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'apkanalysisresults'), where('uid', '==', user.uid), orderBy('created_at', 'desc'));
-    return onSnapshot(q, (snap) => setHistory(snap.docs.map((d) => ({ id: d.id, ...d.data() } as AnalysisDoc))));
-  }, [user]);
 
   useEffect(() => {
     setSummaryExpanded(false);
@@ -84,21 +61,29 @@ export default function Home() {
     }
   }, [activeId, active?.evidence?.dynamic_analysis?.status]);
 
+  // Poll backend for live analysis status (replaces Firestore real-time listener)
   useEffect(() => {
-    if (isDemo) return;
-    if (!activeId) return;
-    return onSnapshot(doc(db, 'apkanalysisresults', activeId), (snap) => {
-      if (snap.exists()) setActive({ id: snap.id, ...snap.data() } as AnalysisDoc);
-    });
+    if (isDemo || !activeId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080';
+        const res = await fetch(`${API_BASE}/api/analysis/${activeId}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled) setActive({ id: activeId, ...data } as AnalysisDoc);
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    const interval = setInterval(poll, 2500);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [activeId, isDemo]);
 
-  const signIn = async () => {
-    try { await signInWithPopup(auth, googleProvider); }
-    catch { setError('Sign-in failed.'); }
-  };
+
 
   const analyze = async () => {
-    if (!file || !user || busy) return;
+    if (!file || busy) return;
     setError(null);
     setBusy(true);
     setUploading(true);
@@ -110,7 +95,7 @@ export default function Home() {
     setEstSecondsRemaining(initialSeconds);
 
     try {
-      const data = await uploadApkDirect(file, user.email, user.uid, setUploadPct);
+      const data = await uploadApkDirect(file, null, 'anonymous', setUploadPct);
       setUploading(false);
       setActiveId(data.id);
       setFile(null);
@@ -124,11 +109,11 @@ export default function Home() {
   };
 
   const startDynamic = async () => {
-    if (!current || !user || busy) return;
+    if (!current || busy) return;
     setError(null);
     setBusy(true);
     try {
-      await triggerDynamicAnalysis(current.id, user.uid);
+      await triggerDynamicAnalysis(current.id, 'anonymous');
       setActiveId(current.id);
       setStoryTab('dynamic');
     } catch (e) {
@@ -156,10 +141,9 @@ export default function Home() {
   };
 
   const current = isDemo ? active : activeId ? active : null;
-  const displayHistory = user ? history : [];
+  const displayHistory = history;
 
   const view = useMemo(() => {
-    if (!user) return 'auth';
     if (current?.status === 'PROCESSING') {
       if (current?.progress?.dynamic_sandbox === 'RUNNING') {
         return 'result';
@@ -169,7 +153,7 @@ export default function Home() {
     if (busy || uploading) return 'scan';
     if (current?.status === 'COMPLETED' || current?.status === 'FAILED') return 'result';
     return 'home';
-  }, [user, current, busy, uploading]);
+  }, [current, busy, uploading]);
 
   const scanHeadline = livelyScanHeadline(current?.progress, current?.logs, scanTick);
   const scanFeed = recentScanLogs(current?.logs, 8);
@@ -412,32 +396,12 @@ export default function Home() {
               {sandboxOk ? 'Sandbox ready' : 'Sandbox offline'}
             </span>
           )}
-          {user && (
-            <div className="flex items-center gap-3">
-              <span className="text-[13px] text-[var(--muted)] select-none">
-                {user.displayName || user.email}
-              </span>
-              <button type="button" onClick={() => signOut(auth)} className="text-[13px] text-[var(--muted)] hover:text-[var(--text)] bg-transparent border-0 cursor-pointer">
-                Sign out
-              </button>
-            </div>
-          )}
         </div>
       </header>
 
       <main className={`flex-1 flex flex-col items-center px-6 pb-16 mx-auto w-full transition-all duration-500 z-10 ${view === 'result' ? 'max-w-[98%] px-8' : 'max-w-3xl'}`}>
         <AnimatePresence mode="wait">
-          {view === 'auth' && authReady && (
-            <motion.div key="auth" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="text-center space-y-8 w-full py-12">
-              <div className="space-y-3">
-                <h1 className="text-[40px] sm:text-[48px] font-semibold tracking-tight leading-[1.1]">Fraud APK analysis</h1>
-                <p className="text-[17px] text-[var(--muted)] max-w-md mx-auto">AI-powered malware analysis for banking security teams.</p>
-              </div>
-              <button type="button" onClick={signIn} className="h-12 px-8 rounded-full bg-[var(--text)] text-[var(--bg)] text-[15px] font-medium border-0 cursor-pointer">
-                Continue with Google
-              </button>
-            </motion.div>
-          )}
+
 
           {view === 'home' && (
             <motion.div key="home" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="w-full space-y-8 py-4">
