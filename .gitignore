@@ -10,8 +10,14 @@ backend/scratch/
 backend/tools/
 backend/*.log
 frontend/*.log
+*.log
 .firebase/
 .DS_Store
 *.apk
 *.zip
 *.tar.gz
+backend/*_test.json
+backend/test_quark.json
+backend/androguard_result_test.json
+replace_script.py
+context.txt

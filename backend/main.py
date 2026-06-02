@@ -60,8 +60,8 @@ def is_safe_ingest_url(url: str) -> bool:
     if not hostname:
         return False
         
-    # Bypass SSRF loopback check in local development mode
-    if True:
+    # Bypass SSRF loopback check in local development mode if configured
+    if os.getenv("DISABLE_SSRF_CHECK", "0") in ("1", "true", "True"):
         return True
         
     try:
@@ -110,6 +110,7 @@ STATIC_MODEL = "gemini-3.5-flash"
 DYNAMIC_MODEL = "gemini-3.5-flash"
 CHAT_MODEL = "gemini-3.5-flash"
 MODEL_NAME = STATIC_MODEL
+FALLBACK_MODEL = "gemini-3.1-flash-lite"
 
 # Decide where to put temporary extraction files to avoid RAM exhaustion on tmpfs systems
 SCAN_TEMP_DIR = os.environ.get("SCAN_TEMP_DIR", os.path.join(_BACKEND_DIR, "tmp_scans"))
@@ -167,6 +168,44 @@ try:
 except Exception as e:
     logger.error(f"Error initializing Google Gen AI client: {e}")
     genai_client = None
+
+def generate_content_with_fallback(
+    client,
+    model: str,
+    contents: Any,
+    config: Any,
+    fallback_model: str = "gemini-3.1-flash-lite"
+) -> Any:
+    """
+    Executes GenAI content generation using a primary model.
+    Falls back to secondary model if the primary model throws any error (e.g. 15 RPM rate limits).
+    """
+    if not client:
+        raise Exception("GenAI client is not initialized")
+        
+    try:
+        logger.info(f"Generating content using primary model: {model}")
+        return client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Primary model {model} failed: {exc}. "
+            f"Engaging secondary fallback model: {fallback_model}..."
+        )
+        try:
+            return client.models.generate_content(
+                model=fallback_model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as fallback_exc:
+            logger.error(
+                f"Secondary fallback model {fallback_model} also failed: {fallback_exc}."
+            )
+            raise fallback_exc
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -993,7 +1032,10 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
 
         update_progress("download", "RUNNING", "Downloading APK from Firebase...")
         if apk_url.startswith("file://"):
-            local_path = apk_url[7:]
+            local_path = os.path.abspath(apk_url[7:])
+            real_temp_dir = os.path.abspath(SCAN_TEMP_DIR)
+            if not local_path.startswith(real_temp_dir + os.sep):
+                raise Exception("Security check failed: Path traversal blocked. Local files must be strictly inside the temporary scans directory.")
             logger.info(f"Loopback bypass: copying local file from {local_path} directly.")
             shutil.copyfile(local_path, apk_path)
         else:
@@ -1098,7 +1140,6 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
                 jadx_cmd = [
                     JADX_BIN,
                     "--no-res",
-                    "--no-imports",
                     "-j", str(threads),
                     "--no-debug-info",
                     "--comments-level", "none",
@@ -1512,10 +1553,12 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         try:
             if not genai_client:
                 raise Exception("GenAI client is not initialized")
-            ai_response = genai_client.models.generate_content(
+            ai_response = generate_content_with_fallback(
+                client=genai_client,
                 model=STATIC_MODEL,
                 contents=prompt,
                 config=gen_config,
+                fallback_model=FALLBACK_MODEL,
             )
             analysis_json = clean_and_parse_json(ai_response.text)
             update_progress("gemini", "COMPLETED", "Gemini synthesis complete.")
@@ -2140,10 +2183,12 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
         try:
             if not genai_client:
                 raise Exception("GenAI client is not initialized")
-            ai_response = genai_client.models.generate_content(
+            ai_response = generate_content_with_fallback(
+                client=genai_client,
                 model=DYNAMIC_MODEL,
                 contents=prompt,
                 config=gen_config,
+                fallback_model=FALLBACK_MODEL,
             )
             analysis_json = clean_and_parse_json(ai_response.text)
             update_progress("gemini", "COMPLETED", "Gemini synthesis complete.")
@@ -2404,9 +2449,12 @@ Please address the user in high-quality (IELTS 7.5 standard) clear English. Be r
         try:
             if not genai_client:
                 raise Exception("GenAI client is not initialized")
-            ai_response = genai_client.models.generate_content(
+            ai_response = generate_content_with_fallback(
+                client=genai_client,
                 model=CHAT_MODEL,
                 contents=prompt,
+                config=None,
+                fallback_model=FALLBACK_MODEL,
             )
             return {"answer": ai_response.text}
         except Exception as e:
@@ -2700,7 +2748,14 @@ def run_analysis(
 ):
     verified_uid = verify_request_uid(http_request, request.uid)
     request.uid = verified_uid
-    logger.info(f"Running analysis pipeline for document {id} (background={background})")
+    apk_url = request.apk_url
+    logger.info(f"Running analysis pipeline for document {id} (background={background}, url={apk_url})")
+    
+    if not (apk_url.startswith("http://") or apk_url.startswith("https://") or apk_url.startswith("gs://") or apk_url.startswith("file://")):
+        raise HTTPException(status_code=400, detail="Invalid URL format. URL must start with http, https, gs, or file.")
+
+    if not is_safe_ingest_url(apk_url):
+        raise HTTPException(status_code=400, detail="SSRF validation failed: URL points to forbidden address ranges.")
     try:
         doc_ref = db.collection("apkanalysisresults").document(id)
         doc = doc_ref.get()

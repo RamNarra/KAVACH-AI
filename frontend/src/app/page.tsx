@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   signInWithPopup,
@@ -10,15 +10,19 @@ import {
 } from 'firebase/auth';
 import { collection, doc, onSnapshot, query, where, orderBy } from 'firebase/firestore';
 import { auth, googleProvider, db } from '../lib/firebase';
-import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, isLocalAPI, uploadApkDirect } from '../lib/api';
+import { fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect } from '../lib/api';
 import { DEMO_ANALYSIS } from '../lib/demo';
 import type { AnalysisDoc, ThreatLevel } from '../lib/types';
-import {
-  DynamicAnalysisOperatorSmokeView,
-  type AnalysisResultForUi,
-} from '../lib/dynamic-analysis-ui';
 import { livelyScanHeadline, recentScanLogs, runningStepKeys } from '../lib/scan-messages';
-import { ChatBubble, MarkdownBody } from '../lib/chat-ui';
+import { MarkdownBody } from '../lib/chat-ui';
+
+// Import modular components
+import CanvasRain from '../components/CanvasRain';
+import TerminalLogs from '../components/TerminalLogs';
+import { ScoreCard } from '../components/ScoreCard';
+import { AttackMapping } from '../components/AttackMapping';
+import { ChatSidebar } from '../components/ChatSidebar';
+import { TelemetryStream } from '../components/TelemetryStream';
 
 const threatColor: Record<ThreatLevel, string> = {
   SAFE: '#10b981',
@@ -27,15 +31,6 @@ const threatColor: Record<ThreatLevel, string> = {
   HIGH: '#f43f5e',
   CRITICAL: '#f43f5e',
 };
-
-
-function toDynamicUi(doc: AnalysisDoc): AnalysisResultForUi {
-  return {
-    id: doc.id,
-    status: doc.status,
-    evidence: doc.evidence as AnalysisResultForUi['evidence'],
-  };
-}
 
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
@@ -115,7 +110,6 @@ export default function Home() {
     setEstSecondsRemaining(initialSeconds);
 
     try {
-      // Direct file upload endpoint bypasses Firebase Storage for high-speed, robust uploads in both local and production environments
       const data = await uploadApkDirect(file, user.email, user.uid, setUploadPct);
       setUploading(false);
       setActiveId(data.id);
@@ -168,9 +162,9 @@ export default function Home() {
     if (!user) return 'auth';
     if (current?.status === 'PROCESSING') {
       if (current?.progress?.dynamic_sandbox === 'RUNNING') {
-        return 'result'; // Keep user on results dashboard during dynamic sandbox executions
+        return 'result';
       }
-      return 'scan'; // Show scanner loader only for initial static decompiler runs
+      return 'scan';
     }
     if (busy || uploading) return 'scan';
     if (current?.status === 'COMPLETED' || current?.status === 'FAILED') return 'result';
@@ -190,49 +184,78 @@ export default function Home() {
     const stepKeys = ['download', 'apktool', 'jadx', 'apkid', 'quark', 'net_sec', 'androguard', 'secrets', 'semgrep', 'trufflehog', 'gemini', 'finalize'];
     const completedCount = stepKeys.filter(k => current.progress?.[k] === 'COMPLETED').length;
     
-    // Completed count ranges from 0 to 12. Let's map it from 15% to 95%
     const staticPercent = 15 + Math.round((completedCount / stepKeys.length) * 80);
     return Math.min(95, staticPercent);
   }, [uploading, uploadPct, current?.progress]);
 
   const baseEstimate = useMemo(() => {
     if (uploading) {
-      return Math.round((100 - uploadPct) * 0.15) + 35;
+      return Math.round((100 - uploadPct) * 0.15) + 20;
     }
-    if (!current?.progress) return 35;
-    
-    const stepDurations: Record<string, number> = {
-      download: 2,
-      apktool: 4,
-      jadx: file ? Math.round(file.size / (1024 * 1024) * 0.7) + 12 : 20,
-      apkid: 2,
-      quark: 5,
-      net_sec: 2,
-      androguard: 2,
-      secrets: 6,
-      semgrep: 6,
-      trufflehog: 6,
-      gemini: 8,
-      finalize: 2,
-    };
-    
-    const stepKeys = ['download', 'apktool', 'jadx', 'apkid', 'quark', 'net_sec', 'androguard', 'secrets', 'semgrep', 'trufflehog', 'gemini', 'finalize'];
-    
-    let activeIndex = stepKeys.findIndex(k => current.progress?.[k] === 'RUNNING');
-    if (activeIndex === -1) {
-      activeIndex = stepKeys.findIndex(k => current.progress?.[k] !== 'COMPLETED');
-    }
-    if (activeIndex === -1) return 2;
-    
-    let remaining = 0;
-    for (let i = activeIndex; i < stepKeys.length; i++) {
-      const key = stepKeys[i];
-      remaining += stepDurations[key] ?? 3;
-    }
-    return Math.max(3, remaining);
-  }, [uploading, uploadPct, current?.progress, file]);
+    if (!current?.progress) return 20;
 
-  // Sync state with baseEstimate when baseEstimate decreases or jumps
+    const progress = current.progress;
+
+    // Check if pipeline is finalized
+    if (progress.finalize === 'COMPLETED') return 0;
+
+    const serialPre = 2; // download
+    const parallelPhase1 = 18; // apktool, jadx, apkid, quark, androguard (dominated by jadx)
+    const parallelPhase2 = 8; // net_sec, secrets, trufflehog, semgrep (dominated by semgrep/trufflehog)
+    const serialPost = 10; // gemini + finalize
+
+    let est = 0;
+
+    // Download step
+    if (progress.download !== 'COMPLETED') {
+      est += serialPre;
+    }
+
+    // Parallel Phase 1 (apktool, jadx, apkid, quark, androguard)
+    const p1Steps = ['apktool', 'jadx', 'apkid', 'quark', 'androguard'];
+    const p1Done = p1Steps.every(k => progress[k] === 'COMPLETED');
+    if (!p1Done) {
+      if (progress.download !== 'COMPLETED') {
+        est += parallelPhase1;
+      } else {
+        let maxRemaining = 0;
+        if (progress.jadx !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 18);
+        if (progress.apktool !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 4);
+        if (progress.quark !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 5);
+        if (progress.apkid !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 3);
+        if (progress.androguard !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 3);
+        est += maxRemaining;
+      }
+    }
+
+    // Parallel Phase 2 (net_sec, secrets, trufflehog, semgrep)
+    const p2Steps = ['net_sec', 'secrets', 'trufflehog', 'semgrep'];
+    const p2Done = p2Steps.every(k => progress[k] === 'COMPLETED');
+    if (!p2Done) {
+      if (!p1Done) {
+        est += parallelPhase2;
+      } else {
+        let maxRemaining = 0;
+        if (progress.semgrep !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 8);
+        if (progress.trufflehog !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 6);
+        if (progress.secrets !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 6);
+        if (progress.net_sec !== 'COMPLETED') maxRemaining = Math.max(maxRemaining, 2);
+        est += maxRemaining;
+      }
+    }
+
+    // Gemini Synthesis & Finalize
+    if (progress.gemini !== 'COMPLETED') {
+      est += 8;
+    }
+    if (progress.finalize !== 'COMPLETED') {
+      est += 2;
+    }
+
+    return Math.max(2, est);
+  }, [uploading, uploadPct, current?.progress]);
+
+
   useEffect(() => {
     setEstSecondsRemaining((prev) => {
       if (baseEstimate < prev || Math.abs(baseEstimate - prev) > 8) {
@@ -309,16 +332,6 @@ export default function Home() {
     return current?.investigation_report?.final_report ?? current?.investigation_report?.summary ?? '';
   }, [storyTab, current, hasDynamic]);
 
-  const activeInterpret = useMemo(() => {
-    const report = storyTab === 'static' ? (current?.static_analysis?.investigation_report ?? (hasDynamic ? undefined : current?.investigation_report)) : current?.investigation_report;
-    return report?.runtime_findings_interpretation || 'E2E scan complete.';
-  }, [storyTab, current, hasDynamic]);
-
-  const activeLimit = useMemo(() => {
-    const report = storyTab === 'static' ? (current?.static_analysis?.investigation_report ?? (hasDynamic ? undefined : current?.investigation_report)) : current?.investigation_report;
-    return report?.analysis_limitations || 'None.';
-  }, [storyTab, current, hasDynamic]);
-
   const activeBadges = useMemo(() => {
     if (storyTab === 'static') {
       return current?.static_analysis?.banking_fraud?.badges ?? (hasDynamic ? [] : current?.banking_fraud?.badges) ?? [];
@@ -384,8 +397,11 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <header className={`flex items-center justify-between px-6 py-5 mx-auto w-full transition-all duration-500 ${view === 'result' ? 'max-w-7xl' : 'max-w-3xl'}`}>
+    <div className="min-h-screen flex flex-col relative overflow-hidden bg-[#030306]">
+      {/* Dynamic Background Hacker Matrix Rain */}
+      <CanvasRain />
+
+      <header className={`flex items-center justify-between px-6 py-5 mx-auto w-full transition-all duration-500 z-10 ${view === 'result' ? 'max-w-[98%] px-8' : 'max-w-3xl'}`}>
         <button type="button" onClick={reset} className="text-[15px] font-semibold tracking-tight bg-transparent border-0 cursor-pointer text-[var(--text)]">
           Kavach
         </button>
@@ -409,7 +425,7 @@ export default function Home() {
         </div>
       </header>
 
-      <main className={`flex-1 flex flex-col items-center px-6 pb-16 mx-auto w-full transition-all duration-500 ${view === 'result' ? 'max-w-7xl' : 'max-w-3xl'}`}>
+      <main className={`flex-1 flex flex-col items-center px-6 pb-16 mx-auto w-full transition-all duration-500 z-10 ${view === 'result' ? 'max-w-[98%] px-8' : 'max-w-3xl'}`}>
         <AnimatePresence mode="wait">
           {view === 'auth' && authReady && (
             <motion.div key="auth" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="text-center space-y-8 w-full py-12">
@@ -518,7 +534,7 @@ export default function Home() {
                 </AnimatePresence>
               </div>
 
-              {/* Premium Neon Progress Bar & Time Estimate */}
+              {/* Progress Bar & Time Estimate */}
               <div className="space-y-2.5 px-4 pt-2">
                 <div className="flex justify-between items-center text-[12.5px] font-semibold text-[var(--muted)]">
                   <span>Progress Status</span>
@@ -556,26 +572,8 @@ export default function Home() {
                 </div>
               )}
 
-              <div className="relative rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-left space-y-2 min-h-[140px] overflow-hidden">
-                <div className="laser-scanner" />
-                <p className="text-[11px] uppercase tracking-widest text-[var(--muted)] z-10 relative">Live trace</p>
-                {scanFeed.length === 0 ? (
-                  <p className="text-[13px] text-[var(--muted)] animate-pulse z-10 relative">Spinning up decompilers and sandbox hooks…</p>
-                ) : (
-                  <ul className="space-y-1.5 z-10 relative">
-                    {scanFeed.map((line, i) => (
-                      <motion.li
-                        key={`${i}-${line.slice(0, 24)}`}
-                        initial={{ opacity: 0, x: -4 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        className={`text-[13px] leading-snug ${i === scanFeed.length - 1 ? 'text-[var(--text)]' : 'text-[var(--muted)]'}`}
-                      >
-                        {line}
-                      </motion.li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              {/* Live Progress Terminal Logs stream during decompilation analysis */}
+              <TerminalLogs logs={current?.logs || []} />
 
               <div className="flex justify-center gap-1.5 pt-2">
                 {[0, 1, 2].map((i) => (
@@ -595,155 +593,22 @@ export default function Home() {
                 <p className="text-center text-[var(--red)] text-[17px]">{current.error_message || 'Analysis failed.'}</p>
               ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start w-full">
-                  {/* COLUMN 1: Threat Score & Overview (lg:col-span-4) */}
-                  <div className={`space-y-6 lg:sticky lg:top-6 transition-all duration-500 ${chatOpen ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
-
-                    <div className="security-card p-6 flex flex-col items-center text-center space-y-6 relative overflow-hidden">
-                      {/* SVG Gauge */}
-                      <div className="relative flex items-center justify-center w-40 h-40 mx-auto">
-                        <div 
-                          className="absolute inset-0 rounded-full opacity-10 transition-all duration-500" 
-                          style={{ 
-                            background: accent,
-                            filter: 'blur(20px)'
-                          }} 
-                        />
-                        <svg className="w-full h-full transform -rotate-90">
-                          <defs>
-                            <filter id="cyber-neon-glow" x="-20%" y="-20%" width="140%" height="140%">
-                              <feGaussianBlur stdDeviation="4" result="blur" />
-                              <feMerge>
-                                <feMergeNode in="blur" />
-                                <feMergeNode in="SourceGraphic" />
-                              </feMerge>
-                            </filter>
-                          </defs>
-                          <circle
-                            cx="80"
-                            cy="80"
-                            r="68"
-                            fill="transparent"
-                            stroke="rgba(255, 255, 255, 0.03)"
-                            strokeWidth="8"
-                          />
-                          <circle
-                            cx="80"
-                            cy="80"
-                            r="68"
-                            fill="transparent"
-                            stroke={accent}
-                            strokeWidth="8"
-                            strokeDasharray={String(2 * Math.PI * 68)}
-                            strokeDashoffset={String(2 * Math.PI * 68 * (1 - score / 100))}
-                            strokeLinecap="round"
-                            filter="url(#cyber-neon-glow)"
-                            className="transition-all duration-1000 ease-out"
-                            style={{ filter: `drop-shadow(0 0 6px ${accent})` }}
-                          />
-                        </svg>
-                        <div className="absolute flex flex-col items-center justify-center text-center">
-                          <span className="text-[44px] font-bold tracking-tight tabular-nums leading-none" style={{ color: accent }}>{score}</span>
-                          <span className="text-[10px] tracking-[0.12em] font-bold uppercase mt-1 opacity-80" style={{ color: accent }}>{level}</span>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <div>
-                          <p className="text-[13px] text-[var(--muted)] font-medium">Threat Score</p>
-                          <p className="text-[12px] text-[var(--muted)]/75">Combined static and dynamic threat level.</p>
-                        </div>
-                        {absoluteScore !== undefined && (
-                          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-950 border border-[var(--border)] text-[12px] font-semibold text-zinc-300">
-                            <span className="w-2.5 h-2.5 rounded-full bg-[var(--red)] animate-pulse" />
-                            Threat Severity Index: <span className="text-[var(--red)] tabular-nums">{absoluteScore} pts</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {fraudScore != null && (
-                      <div className="security-card p-5 flex items-center justify-between">
-                        <div className="flex flex-col pr-3">
-                          <span className="text-[12px] text-[var(--muted)] font-bold uppercase tracking-wider">Fraud Score</span>
-                          <span className="text-[12px] text-[var(--muted)]/80 mt-1">Overlay & SMS intercept indicators.</span>
-                        </div>
-                        <div className="relative group/fraud shrink-0 flex items-center justify-center w-12 h-12 rounded-2xl bg-zinc-900/50 border border-[var(--border)]">
-                          <span className="text-[17px] font-bold tabular-nums" style={{ color: accent }}>
-                            {fraudScore}
-                          </span>
-                          <div className="absolute right-0 bottom-full mb-2 w-64 p-3 bg-zinc-950/95 text-[11px] text-zinc-300 rounded-xl shadow-xl border border-zinc-800 hidden group-hover/fraud:block z-50 text-center leading-relaxed font-normal normal-case pointer-events-none">
-                            <strong>Fraud Index (0-100)</strong>
-                            <p className="mt-1">Likelihood of overlays, SMS interception, and contact theft targeting banking users.</p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="security-card p-5 space-y-3">
-                      <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
-                        <span className="text-[12px] uppercase tracking-wider font-semibold text-[var(--muted)]">Metadata</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--surface-2)] text-[var(--muted)] border border-[var(--border)]">APK</span>
-                      </div>
-                      <p className="text-[14px] font-medium break-all text-[var(--text)]">{current.filename}</p>
-                      {activeBadges.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 pt-1">
-                          {activeBadges.map((b) => (
-                            <span key={b.id} className="text-[11px] px-2.5 py-1 rounded-full bg-[var(--surface-2)] border border-[var(--border)] text-[var(--muted)]" title={b.summary}>
-                              {b.title}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Live Telemetry Log stream inside Column 1 */}
-                    <div className="security-card p-5 space-y-2.5">
-                      <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
-                        <span className="text-[11px] uppercase tracking-widest text-[var(--muted)] font-semibold">Logs Trace</span>
-                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--green)] animate-pulse" />
-                      </div>
-                      <div className="h-32 overflow-y-auto font-mono text-[11px] text-[var(--muted)] space-y-1.5 pr-1 select-none scrollbar-thin">
-                        {current.logs && current.logs.length > 0 ? (
-                          current.logs.slice(-10).map((log, i) => (
-                            <p key={i} className="break-all leading-tight opacity-75">
-                              <span className="text-[var(--blue)] mr-1">$</span>
-                              {log}
-                            </p>
-                          ))
-                        ) : (
-                          <p className="opacity-50 italic">Logs trace complete.</p>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Primary Action Controls */}
-                    <div className="flex gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setChatOpen(!chatOpen)}
-                        className={`flex-1 h-12 rounded-full border text-[13px] font-semibold cursor-pointer transition-all duration-300 flex items-center justify-center gap-1.5 ${
-                          chatOpen
-                            ? 'bg-[var(--blue)]/15 border-[var(--blue)]/40 text-[var(--blue)]'
-                            : 'bg-transparent border-[var(--border)] text-[var(--text)] hover:bg-[var(--surface-2)]'
-                        }`}
-                      >
-                        💬 Ask AI
-                      </button>
-                      {!isDemo && (
-                        <button
-                          type="button"
-                          onClick={() => downloadReport(current.id)}
-                          className="flex-1 h-12 rounded-full border border-[var(--border)] bg-transparent text-[13px] font-semibold cursor-pointer hover:bg-[var(--surface-2)] transition-all flex items-center justify-center gap-1.5"
-                        >
-                          📥 Export PDF
-                        </button>
-                      )}
-                    </div>
-
-                    <button type="button" onClick={reset} className="w-full h-12 rounded-full border border-[var(--border)] bg-transparent text-[14px] font-semibold cursor-pointer hover:bg-[var(--surface-2)] transition-all">
-                      New Analysis
-                    </button>
-                  </div>
+                  {/* COLUMN 1: Threat Score Gauge & Metadata (lg:col-span-4 or 3) */}
+                  <ScoreCard
+                    score={score}
+                    level={level}
+                    accent={accent}
+                    absoluteScore={absoluteScore}
+                    fraudScore={fraudScore}
+                    filename={current.filename || 'Unknown'}
+                    activeBadges={activeBadges}
+                    logs={current.logs || []}
+                    chatOpen={chatOpen}
+                    setChatOpen={setChatOpen}
+                    downloadReport={() => downloadReport(current.id)}
+                    isDemo={isDemo}
+                    reset={reset}
+                  />
 
                   {/* COLUMN 2: Tabs, Details, Verdicts & Findings (lg:col-span-5 or lg:col-span-8) */}
                   <div className={`space-y-6 transition-all duration-500 ${chatOpen ? 'lg:col-span-6' : 'lg:col-span-8'}`}>
@@ -847,17 +712,19 @@ export default function Home() {
                           <div className="security-card p-6 space-y-4">
                             <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold tracking-wider">Risk Breakdown</p>
                             <div className="space-y-3">
-                              {Object.entries(activeRiskDecomposition.components).map(([key, val]) => (
-                                <div key={key}>
-                                  <div className="flex justify-between text-[13px] mb-1 capitalize">
-                                    <span className="text-[var(--muted)]">{key.replace('_', ' ')}</span>
-                                    <span className="tabular-nums font-semibold" style={{ color: accent }}>{String(val)}/100</span>
+                              {Object.entries(activeRiskDecomposition.components)
+                                .filter(([key]) => key !== "dynamic")
+                                .map(([key, val]) => (
+                                  <div key={key}>
+                                    <div className="flex justify-between text-[13px] mb-1 capitalize">
+                                      <span className="text-[var(--muted)]">{key.replace('_', ' ')}</span>
+                                      <span className="tabular-nums font-semibold" style={{ color: accent }}>{String(val)}/100</span>
+                                    </div>
+                                    <div className="h-1.5 rounded-full bg-[var(--surface-2)] overflow-hidden">
+                                      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(100, Number(val) || 0)}%`, backgroundColor: accent }} />
+                                    </div>
                                   </div>
-                                  <div className="h-1.5 rounded-full bg-[var(--surface-2)] overflow-hidden">
-                                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(100, Number(val) || 0)}%`, backgroundColor: accent }} />
-                                  </div>
-                                </div>
-                              ))}
+                                ))}
                             </div>
                             {activeRiskDecomposition.summary && (
                               <p className="text-[13px] text-[var(--muted)] leading-relaxed pt-2 border-t border-[var(--border)]/30">{activeRiskDecomposition.summary}</p>
@@ -1207,69 +1074,13 @@ export default function Home() {
                           </div>
                         </div>
 
-                        {activeAttackTechniques.length > 0 && (
-                          <div className="space-y-3">
-                            <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold tracking-wider">MITRE ATT&CK Matrix</p>
-                            <div className="space-y-2">
-                              {(() => {
-                                const items = activeAttackTechniques;
-                                const showLimit = 6;
-                                const hasMore = items.length > showLimit;
-                                const visibleItems = (hasMore && !mitreExpanded) ? items.slice(0, showLimit) : items;
-                                const remainingCount = items.length - showLimit;
-
-                                return (
-                                  <>
-                                    {visibleItems.map((t) => {
-                                      const isExpanded = !!expandedTechniques[t.id];
-                                      return (
-                                        <div
-                                          key={t.id}
-                                          onClick={() => setExpandedTechniques(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
-                                          className="rounded-2xl bg-[var(--surface)] border border-[var(--border)] p-4 space-y-1.5 hover:border-[var(--blue)]/40 hover:bg-[var(--surface-2)]/20 cursor-pointer select-none transition-all duration-300"
-                                        >
-                                          <div className="flex items-start justify-between gap-3">
-                                            <div className="flex items-center gap-2 flex-wrap">
-                                              <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/20 font-semibold">{t.id}</span>
-                                              <span className="text-[14px] font-semibold">{t.name}</span>
-                                              {t.sources && t.sources.length > 0 && (
-                                                <span className="text-[11.5px] text-[var(--muted)]">({t.sources.length} detection{t.sources.length > 1 ? 's' : ''})</span>
-                                              )}
-                                            </div>
-                                            <div className="flex items-center gap-2 shrink-0">
-                                              {t.tactic && (
-                                                <span className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--surface-2)] text-[var(--muted)] whitespace-nowrap border border-[var(--border)]">{t.tactic}</span>
-                                              )}
-                                              <span className={`text-[10px] text-[var(--muted)] transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}>▼</span>
-                                            </div>
-                                          </div>
-                                          {isExpanded && t.sources && t.sources.length > 0 && (
-                                            <ul className="space-y-1.5 pt-2.5 border-t border-[var(--border)] mt-2">
-                                              {t.sources.map((s, si) => (
-                                                <li key={si} className="text-[13px] text-[var(--muted)] pl-3 border-l-2 border-[var(--blue)]/30">
-                                                  <span className="text-[var(--text)] font-medium">{String(s.source || '')}</span>{s.detail ? ` — ${String(s.detail)}` : ''}
-                                                </li>
-                                              ))}
-                                            </ul>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                    {hasMore && (
-                                      <button
-                                        type="button"
-                                        onClick={() => setMitreExpanded(!mitreExpanded)}
-                                        className="w-full py-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface)]/40 backdrop-blur-md text-[13px] text-[var(--blue)] font-semibold cursor-pointer hover:bg-[var(--blue)]/10 hover:border-[var(--blue)]/30 transition-all duration-200 flex items-center justify-center gap-2"
-                                      >
-                                        {mitreExpanded ? 'Show less ↑' : `Read (${remainingCount} more) ↓`}
-                                      </button>
-                                    )}
-                                  </>
-                                );
-                              })()}
-                            </div>
-                          </div>
-                        )}
+                        <AttackMapping
+                          activeAttackTechniques={activeAttackTechniques}
+                          expandedTechniques={expandedTechniques}
+                          setExpandedTechniques={setExpandedTechniques}
+                          mitreExpanded={mitreExpanded}
+                          setMitreExpanded={setMitreExpanded}
+                        />
 
                         {(!current.evidence?.dynamic_analysis || current.progress?.dynamic_sandbox === "SKIPPED") && (
                           <div className="security-card p-6 border border-[var(--border)] space-y-4">
@@ -1351,39 +1162,41 @@ export default function Home() {
                         ) : storyTab === 'dynamic' ? (
                           <>
                             {activeSummaryText && (
-                                  <div className="security-card p-6 space-y-3 border border-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.05)]">
-                                    <div className="flex items-center gap-2 mb-1 border-b border-[var(--border)]/50 pb-2 text-indigo-400">
-                                      <span className="text-[14px]">⚡</span>
-                                      <span className="text-[12px] uppercase tracking-wider font-bold">Dynamic Audit</span>
-                                    </div>
-                                    <div className={summaryExpanded ? '' : 'line-clamp-[6] overflow-hidden'}>
-                                      <MarkdownBody text={activeSummaryText} />
-                                    </div>
-                                    <button
-                                      type="button"
-                                      onClick={() => setSummaryExpanded(e => !e)}
-                                      className="text-[13px] text-[var(--blue)] bg-transparent border-0 cursor-pointer p-0 hover:opacity-80 font-semibold"
-                                    >
-                                      {summaryExpanded ? 'Show less ↑' : 'Show more ↓'}
-                                    </button>
-                                  </div>
-                                )}
+                              <div className="security-card p-6 space-y-3 border border-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.05)]">
+                                <div className="flex items-center gap-2 mb-1 border-b border-[var(--border)]/50 pb-2 text-indigo-400">
+                                  <span className="text-[14px]">⚡</span>
+                                  <span className="text-[12px] uppercase tracking-wider font-bold">Dynamic Audit</span>
+                                </div>
+                                <div className={summaryExpanded ? '' : 'line-clamp-[6] overflow-hidden'}>
+                                  <MarkdownBody text={activeSummaryText} />
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setSummaryExpanded(e => !e)}
+                                  className="text-[13px] text-[var(--blue)] bg-transparent border-0 cursor-pointer p-0 hover:opacity-80 font-semibold"
+                                >
+                                  {summaryExpanded ? 'Show less ↑' : 'Show more ↓'}
+                                </button>
+                              </div>
+                            )}
 
-                                {activeRiskDecomposition?.components && (
-                                  <div className="security-card p-6 space-y-4">
-                                    <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold tracking-wider">Risk Breakdown</p>
+                            {activeRiskDecomposition?.components && (
+                              <div className="security-card p-6 space-y-4">
+                                <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold tracking-wider">Risk Breakdown</p>
                                 <div className="space-y-3">
-                                  {Object.entries(activeRiskDecomposition.components).map(([key, val]) => (
-                                    <div key={key}>
-                                      <div className="flex justify-between text-[13px] mb-1 capitalize">
-                                        <span className="text-[var(--muted)]">{key.replace('_', ' ')}</span>
-                                        <span className="tabular-nums font-semibold" style={{ color: accent }}>{String(val)}/100</span>
+                                  {Object.entries(activeRiskDecomposition.components)
+                                    .filter(([key]) => key !== "static")
+                                    .map(([key, val]) => (
+                                      <div key={key}>
+                                        <div className="flex justify-between text-[13px] mb-1 capitalize">
+                                          <span className="text-[var(--muted)]">{key.replace('_', ' ')}</span>
+                                          <span className="tabular-nums font-semibold" style={{ color: accent }}>{String(val)}/100</span>
+                                        </div>
+                                        <div className="h-1.5 rounded-full bg-[var(--surface-2)] overflow-hidden">
+                                          <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(100, Number(val) || 0)}%`, backgroundColor: accent }} />
+                                        </div>
                                       </div>
-                                      <div className="h-1.5 rounded-full bg-[var(--surface-2)] overflow-hidden">
-                                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(100, Number(val) || 0)}%`, backgroundColor: accent }} />
-                                      </div>
-                                    </div>
-                                  ))}
+                                    ))}
                                 </div>
                                 {activeRiskDecomposition.summary && (
                                   <p className="text-[13px] text-[var(--muted)] leading-relaxed pt-2 border-t border-[var(--border)]/30">{activeRiskDecomposition.summary}</p>
@@ -1391,74 +1204,15 @@ export default function Home() {
                               </div>
                             )}
 
-                            <div className="security-card p-6 border border-[var(--border)]">
-                              <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] mb-4 font-semibold tracking-wider">Sandbox Telemetry</p>
-                              <DynamicAnalysisOperatorSmokeView activeResult={toDynamicUi(current)} />
-                            </div>
+                            <TelemetryStream title="Sandbox Telemetry" current={current} />
 
-                            {activeAttackTechniques.length > 0 && (
-                              <div className="space-y-3">
-                                <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold tracking-wider">MITRE ATT&CK Matrix</p>
-                                <div className="space-y-2">
-                                  {(() => {
-                                    const items = activeAttackTechniques;
-                                    const showLimit = 6;
-                                    const hasMore = items.length > showLimit;
-                                    const visibleItems = (hasMore && !mitreExpanded) ? items.slice(0, showLimit) : items;
-                                    const remainingCount = items.length - showLimit;
-
-                                    return (
-                                      <>
-                                        {visibleItems.map((t) => {
-                                          const isExpanded = !!expandedTechniques[t.id];
-                                          return (
-                                            <div
-                                              key={t.id}
-                                              onClick={() => setExpandedTechniques(prev => ({ ...prev, [t.id]: !prev[t.id] }))}
-                                              className="rounded-2xl bg-[var(--surface)] border border-[var(--border)] p-4 space-y-1.5 hover:border-[var(--blue)]/40 hover:bg-[var(--surface-2)]/20 cursor-pointer select-none transition-all duration-300"
-                                            >
-                                              <div className="flex items-start justify-between gap-3">
-                                                <div className="flex items-center gap-2 flex-wrap">
-                                                  <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/20 font-semibold">{t.id}</span>
-                                                  <span className="text-[14px] font-semibold">{t.name}</span>
-                                                  {t.sources && t.sources.length > 0 && (
-                                                    <span className="text-[11.5px] text-[var(--muted)]">({t.sources.length} detection{t.sources.length > 1 ? 's' : ''})</span>
-                                                  )}
-                                                </div>
-                                                <div className="flex items-center gap-2 shrink-0">
-                                                  {t.tactic && (
-                                                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--surface-2)] text-[var(--muted)] whitespace-nowrap border border-[var(--border)]">{t.tactic}</span>
-                                                  )}
-                                                  <span className={`text-[10px] text-[var(--muted)] transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}>▼</span>
-                                                </div>
-                                              </div>
-                                              {isExpanded && t.sources && t.sources.length > 0 && (
-                                                <ul className="space-y-1.5 pt-2.5 border-t border-[var(--border)] mt-2">
-                                                  {t.sources.map((s, si) => (
-                                                    <li key={si} className="text-[13px] text-[var(--muted)] pl-3 border-l-2 border-[var(--blue)]/30">
-                                                      <span className="text-[var(--text)] font-medium">{String(s.source || '')}</span>{s.detail ? ` — ${String(s.detail)}` : ''}
-                                                    </li>
-                                                  ))}
-                                                </ul>
-                                              )}
-                                            </div>
-                                          );
-                                        })}
-                                        {hasMore && (
-                                          <button
-                                            type="button"
-                                            onClick={() => setMitreExpanded(!mitreExpanded)}
-                                            className="w-full py-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface)]/40 backdrop-blur-md text-[13px] text-[var(--blue)] font-semibold cursor-pointer hover:bg-[var(--blue)]/10 hover:border-[var(--blue)]/30 transition-all duration-200 flex items-center justify-center gap-2"
-                                          >
-                                            {mitreExpanded ? 'Show less ↑' : `Read (${remainingCount} more) ↓`}
-                                          </button>
-                                        )}
-                                      </>
-                                    );
-                                  })()}
-                                </div>
-                              </div>
-                            )}
+                            <AttackMapping
+                              activeAttackTechniques={activeAttackTechniques}
+                              expandedTechniques={expandedTechniques}
+                              setExpandedTechniques={setExpandedTechniques}
+                              mitreExpanded={mitreExpanded}
+                              setMitreExpanded={setMitreExpanded}
+                            />
                           </>
                         ) : (
                           <>
@@ -1504,10 +1258,7 @@ export default function Home() {
                               </div>
                             )}
 
-                            <div className="security-card p-6 border border-[var(--border)]">
-                              <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] mb-4 font-semibold tracking-wider">Combined Risk Telemetry Matrix</p>
-                              <DynamicAnalysisOperatorSmokeView activeResult={toDynamicUi(current)} />
-                            </div>
+                            <TelemetryStream title="Combined Risk Telemetry Matrix" current={current} />
                           </>
                         )}
                       </>
@@ -1538,76 +1289,15 @@ export default function Home() {
                   </div>
 
                   {/* COLUMN 3: Sticky AI Analyst Sidebar (lg:col-span-3) */}
-                  {chatOpen && (
-                    <div className="lg:col-span-3 lg:sticky lg:top-6 h-[calc(100vh-140px)] max-h-[680px] flex flex-col security-card p-4 space-y-4 animate-fadeIn">
-                      <div className="flex items-center justify-between border-b border-[var(--border)] pb-2 shrink-0">
-                        <span className="text-[12px] uppercase tracking-wider font-bold text-[var(--blue)]">AI security analyst</span>
-                        <button 
-                          type="button" 
-                          onClick={() => setChatOpen(false)} 
-                          className="text-[11px] text-[var(--muted)] hover:text-[var(--text)] bg-transparent border-0 cursor-pointer"
-                        >
-                          Close
-                        </button>
-                      </div>
-                      
-                      <div className="flex-1 overflow-y-auto space-y-4 pr-1 scrollbar-thin min-h-0 no-scrollbar">
-                        {chatLog.length === 0 && (
-                          <div className="space-y-4 py-8 flex flex-col items-center">
-                            <p className="text-[13px] text-[var(--muted)] text-center leading-relaxed">
-                              Ask about fraud risk, remediation, or evidence — powered by Gemini.
-                            </p>
-                            <div className="w-full space-y-2 px-2 pt-4">
-                              <p className="text-[11px] uppercase tracking-widest text-[var(--muted)] font-semibold mb-1">Suggested Prompts</p>
-                              {[
-                                "Is this APK safe to install?",
-                                "Explain the dynamic C2 network traces",
-                                "Show all high risk banking fraud signals"
-                              ].map((phrase, idx) => (
-                                <button
-                                  key={idx}
-                                  type="button"
-                                  onClick={() => askChat(phrase)}
-                                  className="w-full text-left py-2.5 px-3 bg-[var(--surface-2)]/50 border border-[var(--border)] rounded-xl text-[12.5px] text-zinc-300 hover:text-[var(--blue)] hover:border-[var(--blue)]/40 hover:bg-[var(--surface-2)] transition-all duration-300 cursor-pointer block font-medium"
-                                >
-                                  ✦ {phrase}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        {chatLog.map((m, i) => (
-                          <ChatBubble key={i} role={m.role} text={m.text} />
-                        ))}
-                        {chatBusy && (
-                          <div className="flex gap-2 items-center text-[12px] text-[var(--muted)]">
-                            <span className="w-6 h-6 rounded-full bg-[var(--surface-2)] border border-[var(--border)] flex items-center justify-center animate-pulse">✦</span>
-                            Gemini is thinking…
-                          </div>
-                        )}
-                      </div>
-                      
-                      <div className="space-y-2 shrink-0 pt-2 border-t border-[var(--border)]">
-                        <div className="flex gap-1.5">
-                          <input
-                            value={chatInput}
-                            onChange={(e) => setChatInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && askChat()}
-                            placeholder="Ask a question..."
-                            className="flex-1 h-10 px-3.5 rounded-full bg-[var(--surface-2)] border border-[var(--border)] text-[13px] text-[var(--text)] outline-none focus:border-[var(--blue)]/50 focus:shadow-[0_0_10px_rgba(59,130,246,0.15)] transition-all duration-300"
-                          />
-                          <button 
-                            type="button" 
-                            onClick={() => askChat()} 
-                            disabled={chatBusy} 
-                            className="h-10 px-4 rounded-full bg-[var(--blue)] text-[#0b0b0c] text-[13px] font-bold border-0 cursor-pointer disabled:opacity-50 hover:opacity-90 active:scale-95 transition-all duration-200"
-                          >
-                            Send
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  <ChatSidebar
+                    chatOpen={chatOpen}
+                    setChatOpen={setChatOpen}
+                    chatLog={chatLog}
+                    chatInput={chatInput}
+                    setChatInput={setChatInput}
+                    chatBusy={chatBusy}
+                    askChat={askChat}
+                  />
                 </div>
               )}
             </motion.div>

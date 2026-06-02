@@ -183,6 +183,20 @@ def run_behavioral_trace(
             except Exception as le:
                 logger.error(f"Error invoking log callback: {le}")
 
+    # Sanitize package_name to prevent ADB shell injections
+    import re
+    if not re.match(r"^[a-zA-Z0-9_\.]+$", package_name):
+        log_event(f"Security check failed: Package name '{package_name}' contains invalid characters.", is_error=True)
+        return {
+            "status": "FAILED",
+            "events": [],
+            "normalized_events": [],
+            "trigger_transcript": [],
+            "event_count": 0,
+            "duration_seconds": duration,
+            "error_message": "Invalid package name format. Security validation failed."
+        }
+
     try:
         import sandbox_bootstrap
         sandbox_info = sandbox_bootstrap.ensure_sandbox_ready()
@@ -425,6 +439,7 @@ def run_behavioral_trace(
             log_event(f"Frida spawn failed: {spawn_err}. Engaging manual launch and direct PID attach fallback...", is_warn=True)
             
             # Start process using ADB monkey or am start
+            launched = False
             if launcher_activity:
                 full_act = launcher_activity
                 if launcher_activity.startswith("."):
@@ -432,28 +447,59 @@ def run_behavioral_trace(
                 elif "." not in launcher_activity:
                     full_act = package_name + "." + launcher_activity
                 log_event(f"Launching explicit activity via ADB: {full_act}")
-                subprocess.run([ADB_PATH, "shell", "am", "start", "-n", f"{package_name}/{full_act}"], capture_output=True, timeout=20)
-            else:
+                am_res = subprocess.run([ADB_PATH, "shell", "am", "start", "-n", f"{package_name}/{full_act}"], capture_output=True, text=True, timeout=20)
+                if am_res.returncode == 0 and "Error" not in am_res.stdout:
+                    launched = True
+                else:
+                    log_event(f"Explicit am start reported failure or error: {am_res.stdout.strip() if am_res.stdout else ''}. Falling back to monkey launch...", is_warn=True)
+
+            if not launched:
                 log_event("Launching default launcher activity via monkey...")
                 subprocess.run(
-                    [ADB_PATH, "shell", f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+                    [ADB_PATH, "shell", "monkey", "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1"],
+                    capture_output=True, timeout=20
                 )
             
-            # Robust retry loop to locate the PID while the process boots (up to 6 attempts, sleeping 2s between checks)
-            for check_attempt in range(6):
+            # Robust retry loop to locate the PID while the process boots (up to 15 attempts, sleeping 2s between checks)
+            for check_attempt in range(15):
                 time.sleep(2.0)
+                
+                # 1. Try ADB pidof
                 try:
                     pid_res = subprocess.run([ADB_PATH, "shell", "pidof", package_name], capture_output=True, text=True, timeout=10)
                     pid_str = pid_res.stdout.strip()
                     if pid_str:
                         pid = int(pid_str.split()[0])
-                        log_event(f"Successfully located PID {pid} via ADB on attempt {check_attempt+1}.")
+                        log_event(f"Successfully located PID {pid} via ADB pidof on attempt {check_attempt+1}.")
                         break
                 except Exception as pe:
-                    log_event(f"Query PID attempt {check_attempt+1} failed: {pe}", is_warn=True)
+                    log_event(f"Query pidof attempt {check_attempt+1} failed: {pe}", is_warn=True)
                 
-                # Secondary lookup via Frida process enumeration
+                # 2. Try ADB ps fallback check (highly robust for different Android builds)
+                try:
+                    for ps_cmd in [["ps", "-A"], ["ps"]]:
+                        ps_res = subprocess.run([ADB_PATH, "shell"] + ps_cmd, capture_output=True, text=True, timeout=10)
+                        if ps_res.returncode == 0:
+                            for line in ps_res.stdout.splitlines():
+                                if package_name in line:
+                                    parts = line.split()
+                                    if len(parts) > 1:
+                                        # Standard columns: USER PID PPID VSIZE RSS WCHAN PC NAME
+                                        for part in parts[1:]:
+                                            if part.isdigit():
+                                                pid = int(part)
+                                                log_event(f"Successfully located PID {pid} via ADB {ps_cmd[0]} search on attempt {check_attempt+1}.")
+                                                break
+                                        if pid:
+                                            break
+                            if pid:
+                                break
+                    if pid:
+                        break
+                except Exception as pse:
+                    log_event(f"Query ps attempt {check_attempt+1} failed: {pse}", is_warn=True)
+
+                # 3. Try Frida process enumeration
                 try:
                     for p in device.enumerate_processes():
                         if p.name == package_name:

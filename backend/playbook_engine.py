@@ -32,6 +32,12 @@ _SWIPE_DELAY = 0.3  # seconds between touch events
 
 def _get_genai_client():
     try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            client = genai.Client(api_key=api_key)
+            logger.info("GenAI client initialized in playbook using API key")
+            return client
+        
         project_id = os.environ.get("PROJECT_ID", "kavach-ai-497708")
         location = os.environ.get("LOCATION", "global")
         client = genai.Client(
@@ -39,6 +45,7 @@ def _get_genai_client():
             project=project_id,
             location=location,
         )
+        logger.info(f"GenAI client initialized in playbook using Vertex AI (project={project_id})")
         return client
     except Exception as e:
         logger.warning(f"Failed to initialize GenAI client in playbook: {e}")
@@ -368,14 +375,25 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
             )
             
             _log("Dispatching UI layout to Gemini Flash for input classification...")
-            ai_response = client.models.generate_content(
-                model="gemini-3.5-flash",
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.4,
+            try:
+                ai_response = client.models.generate_content(
+                    model="gemini-3.5-flash",
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.4,
+                    )
                 )
-            )
+            except Exception as exc:
+                _log(f"Primary model gemini-3.5-flash failed in playbook: {exc}. Engaging secondary fallback model gemini-3.1-flash-lite...")
+                ai_response = client.models.generate_content(
+                    model="gemini-3.1-flash-lite",
+                    contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.4,
+                    )
+                )
             
             # Clean and parse response
             import json as py_json

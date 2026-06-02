@@ -104,7 +104,11 @@ def analyze_manifest(manifest_content: str) -> Dict[str, Any]:
 
     return findings
 
-def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
+def analyze_jadx(jadx_sources: Dict[str, str], jadx_out: str = None, package_name: str = "") -> Dict[str, Any]:
+    """
+    Analyze JADX decompiled java sources for dangerous patterns, suspicious URLs,
+    and possible hardcoded credentials. Runs over the entire codebase if jadx_out is provided.
+    """
     findings = {
         "network_indicators": [],
         "data_storage_issues": [],
@@ -116,10 +120,53 @@ def analyze_jadx(jadx_sources: Dict[str, str]) -> Dict[str, Any]:
         "score": 0
     }
     
+    target_sources = {}
+    if jadx_out and os.path.isdir(jadx_out):
+        sources_dir = os.path.join(jadx_out, "sources")
+        if not os.path.isdir(sources_dir):
+            sources_dir = os.path.join(jadx_out, "src")
+        if not os.path.isdir(sources_dir):
+            sources_dir = jadx_out
+
+        if package_name:
+            package_dir = os.path.join(sources_dir, *package_name.split("."))
+            if os.path.isdir(package_dir):
+                sources_dir = package_dir
+
+        for root_dir, dirs, files in os.walk(sources_dir):
+            # Prune third-party library paths during traversal
+            rel_root = os.path.relpath(root_dir, sources_dir)
+            pruned_dirs = []
+            for d in dirs:
+                sub_rel = os.path.join(rel_root, d) if rel_root != "." else d
+                sub_pkg = sub_rel.replace(os.sep, ".")
+                is_lib = False
+                for p in _PRUNED_LIBS:
+                    if sub_pkg.startswith(p) or d == p:
+                        is_lib = True
+                        break
+                if not is_lib:
+                    pruned_dirs.append(d)
+            dirs[:] = pruned_dirs
+
+            for fname in files:
+                if not fname.endswith(".java"):
+                    continue
+                fpath = os.path.join(root_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                        rel_key = os.path.relpath(fpath, jadx_out)
+                        target_sources[rel_key] = fh.read()
+                except Exception:
+                    continue
+    
+    if not target_sources:
+        target_sources = jadx_sources
+        
     matched_patterns = set()
     pattern_counts = {}
 
-    for path, code in jadx_sources.items():
+    for path, code in target_sources.items():
         # Match code patterns
         for pattern_str, sc, desc, category in DANGEROUS_CODE_PATTERNS:
             if pattern_str in code:
@@ -307,55 +354,110 @@ def analyze_network_security_config(apktool_out: str, manifest_content: str) -> 
     if not config_file or not os.path.exists(config_file):
         config_file = os.path.join(apktool_out, "res", "xml", "network_security_config.xml")
 
-    if not os.path.exists(config_file):
-        return findings
+    # 2. Parse the config file if it exists
+    if os.path.exists(config_file):
+        try:
+            tree = ET.parse(config_file)
+            root = tree.getroot()
 
-    # 2. Parse the config file
-    try:
-        tree = ET.parse(config_file)
-        root = tree.getroot()
+            # Check cleartextTrafficPermitted
+            for domain_cfg in root.findall(".//domain-config"):
+                cleartext = domain_cfg.attrib.get("cleartextTrafficPermitted")
+                if cleartext == "true":
+                    findings["score"] += 10
+                    domains = [d.text for d in domain_cfg.findall("domain")]
+                    domains_str = ", ".join(domains) if domains else "configured domains"
+                    findings["issues"].append({
+                        "type": "Insecure Cleartext Permission",
+                        "risk_score": 10,
+                        "description": f"Cleartext (HTTP) traffic explicitly permitted for: {domains_str}",
+                        "source": "xml"
+                    })
 
-        # Check cleartextTrafficPermitted
-        for domain_cfg in root.findall(".//domain-config"):
-            cleartext = domain_cfg.attrib.get("cleartextTrafficPermitted")
-            if cleartext == "true":
-                findings["score"] += 10
-                domains = [d.text for d in domain_cfg.findall("domain")]
-                domains_str = ", ".join(domains) if domains else "configured domains"
-                findings["issues"].append({
-                    "type": "Insecure Cleartext Permission",
-                    "risk_score": 10,
-                    "description": f"Cleartext (HTTP) traffic explicitly permitted for: {domains_str}",
-                    "source": "xml"
-                })
+            # Check trust-anchors (trusting user certificates)
+            debug_overrides = root.findall(".//debug-overrides")
+            all_anchors = root.findall(".//trust-anchors")
+            for anchor in all_anchors:
+                # Check if this anchor is inside debug_overrides
+                is_debug_only = any(anchor in dob.iter() for dob in debug_overrides)
+                if not is_debug_only:
+                    for cert in anchor.findall("certificates"):
+                        src = cert.attrib.get("src")
+                        if src == "user":
+                            findings["score"] += 20
+                            findings["issues"].append({
+                                "type": "Insecure Trust Anchor (User Certs)",
+                                "risk_score": 20,
+                                "description": "App trusts user-installed certificates in release builds (vulnerable to MitM).",
+                                "source": "xml"
+                            })
+                        elif src == "all":
+                            findings["score"] += 25
+                            findings["issues"].append({
+                                "type": "Insecure Trust Anchor (All Certs)",
+                                "risk_score": 25,
+                                "description": "App trusts ALL certificates (disables TLS verification completely).",
+                                "source": "xml"
+                            })
+        except Exception:
+            pass
 
-        # Check trust-anchors (trusting user certificates)
-        debug_overrides = root.findall(".//debug-overrides")
-        all_anchors = root.findall(".//trust-anchors")
-        for anchor in all_anchors:
-            # Check if this anchor is inside debug_overrides
-            is_debug_only = any(anchor in dob.iter() for dob in debug_overrides)
-            if not is_debug_only:
-                for cert in anchor.findall("certificates"):
-                    src = cert.attrib.get("src")
-                    if src == "user":
-                        findings["score"] += 20
-                        findings["issues"].append({
-                            "type": "Insecure Trust Anchor (User Certs)",
-                            "risk_score": 20,
-                            "description": "App trusts user-installed certificates in release builds (vulnerable to MitM).",
-                            "source": "xml"
-                        })
-                    elif src == "all":
-                        findings["score"] += 25
-                        findings["issues"].append({
-                            "type": "Insecure Trust Anchor (All Certs)",
-                            "risk_score": 25,
-                            "description": "App trusts ALL certificates (disables TLS verification completely).",
-                            "source": "xml"
-                        })
-    except Exception:
-        pass
+    # 3. Augment / Walk sibling JADX decompiled sources to scan for plaintext cleartext protocols in Java files.
+    # This guarantees the Network Config tab is rich and populated with code cleartext protocols even if XML is missing.
+    jadx_out = os.path.join(os.path.dirname(apktool_out), "jadx_out")
+    if os.path.isdir(jadx_out):
+        sources_dir = os.path.join(jadx_out, "sources")
+        if not os.path.isdir(sources_dir):
+            sources_dir = os.path.join(jadx_out, "src")
+        if not os.path.isdir(sources_dir):
+            sources_dir = jadx_out
+            
+        seen_urls = set()
+        for root_dir, dirs, files in os.walk(sources_dir):
+            # Prune third-party library paths during traversal
+            rel_root = os.path.relpath(root_dir, sources_dir)
+            pruned_dirs = []
+            for d in dirs:
+                sub_rel = os.path.join(rel_root, d) if rel_root != "." else d
+                sub_pkg = sub_rel.replace(os.sep, ".")
+                is_lib = False
+                for p in _PRUNED_LIBS:
+                    if sub_pkg.startswith(p) or d == p:
+                        is_lib = True
+                        break
+                if not is_lib:
+                    pruned_dirs.append(d)
+            dirs[:] = pruned_dirs
+
+            for fname in files:
+                if not fname.endswith(".java"):
+                    continue
+                fpath = os.path.join(root_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                        content = fh.read()
+                except Exception:
+                    continue
+                
+                if "http://" in content:
+                    # Find candidate http:// string URLs
+                    import re
+                    urls = re.findall(r'http://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?::\d+)?(?:/[^\s"\']*)?', content)
+                    for url in urls:
+                        if any(x in url for x in ["schemas.android.com", "google.com", "w3.org", "xmlpull.org", "android.com/tools"]):
+                            continue
+                        rel = os.path.relpath(fpath, jadx_out)
+                        dedup_key = f"{url}:{rel}"
+                        if dedup_key not in seen_urls:
+                            seen_urls.add(dedup_key)
+                            findings["score"] += 5
+                            findings["issues"].append({
+                                "type": "Cleartext HTTP Protocol",
+                                "risk_score": 5,
+                                "description": f"Plaintext protocol used to contact: {url}",
+                                "file": rel,
+                                "source": "jadx"
+                            })
 
     return findings
 
@@ -701,7 +803,7 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
 def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     """
     Run Semgrep over JADX decompiled java files,
-    or execute a local Python-native AST-like pattern matcher.
+    and execute a local Python-native AST-like pattern matcher to augment/fallback.
     """
     import os
     import shutil
@@ -730,6 +832,8 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             target_scan_dir = jadx_out
             if package_name:
                 package_dir = os.path.join(jadx_out, "sources", *package_name.split("."))
+                if not os.path.isdir(package_dir):
+                    package_dir = os.path.join(jadx_out, "src", *package_name.split("."))
                 if os.path.isdir(package_dir):
                     target_scan_dir = package_dir
             cmd = [semgrep_bin, "--config", "p/android", "--json", target_scan_dir]
@@ -753,12 +857,14 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                             "type": "semgrep"
                         })
                         findings["score"] += 10 if sev == "ERROR" else 5
-                    return findings
         except Exception:
             pass
 
-    # High-Fidelity Local Fallback: Scans JADX Java source files for classic MASTG violations
+    # High-Fidelity Local Heuristics: Scans Java files for MASTG violations.
+    # Runs always to augment/supplement Semgrep with JADX-compiled integer-literal equivalents.
     sources_dir = os.path.join(jadx_out, "sources")
+    if not os.path.isdir(sources_dir):
+        sources_dir = os.path.join(jadx_out, "src")
     if not os.path.isdir(sources_dir):
         sources_dir = jadx_out
 
@@ -770,15 +876,16 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     rules = [
         (r"onReceivedSslError\s*\([^)]*\)\s*\{\s*handler\.proceed\(\)", "SSL Certificate Bypass (MASTG M3)", 15, "CRITICAL"),
         (r"setWebContentsDebuggingEnabled\s*\(\s*true\s*\)", "WebView Debugging Enabled (MASTG M6)", 10, "HIGH"),
-        (r"MODE_WORLD_READABLE", "Insecure Shared Preferences (MASTG M2)", 12, "HIGH"),
-        (r"MODE_WORLD_WRITEABLE", "Insecure Shared Preferences (MASTG M2)", 12, "HIGH"),
+        (r"MODE_WORLD_READABLE|getSharedPreferences\s*\([^,]+,\s*1\s*\)", "Insecure Shared Preferences (World-Readable) (MASTG M2)", 12, "HIGH"),
+        (r"MODE_WORLD_WRITEABLE|getSharedPreferences\s*\([^,]+,\s*2\s*\)", "Insecure Shared Preferences (World-Writeable) (MASTG M2)", 12, "HIGH"),
         (r"NullCipher", "Insecure Cryptography Implementation (MASTG M5)", 15, "CRITICAL"),
-        (r"ALLOW_ALL_HOSTNAME_VERIFIER", "Weak SSL/TLS Hostname Verification (MASTG M3)", 15, "CRITICAL")
+        (r"ALLOW_ALL_HOSTNAME_VERIFIER", "Weak SSL/TLS Hostname Verification (MASTG M3)", 15, "CRITICAL"),
+        (r"implements\s+X509TrustManager[\s\S]{0,150}checkServerTrusted\s*\([^)]*\)\s*\{\s*\}", "Insecure TrustManager (TrustAll) (MASTG M3)", 15, "CRITICAL")
     ]
     
-    seen = set()
+    seen = set(v["rule"] + ":" + v["file"] for v in findings["violations"])
     for root_dir, dirs, files in os.walk(sources_dir):
-        # Prune third-party library paths
+        # Prune third-party library paths during traversal
         rel_root = os.path.relpath(root_dir, sources_dir)
         pruned_dirs = []
         for d in dirs:
@@ -807,12 +914,13 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             for pattern, desc, score, sev in rules:
                 import re
                 if re.search(pattern, content):
-                    dedup_key = f"{desc}:{rel}"
+                    rule_id = f"semgrep-{desc.lower().replace(' ', '-')}"
+                    dedup_key = f"{rule_id}:{rel}"
                     if dedup_key not in seen:
                         seen.add(dedup_key)
                         findings["violations"].append({
-                            "rule": f"semgrep-{desc.lower().replace(' ', '-')}",
-                            "description": f"AST Match: {desc}",
+                            "rule": rule_id,
+                            "description": f"AST Heuristic Match: {desc}",
                             "file": rel,
                             "severity": sev,
                             "risk_score": score,
@@ -825,7 +933,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
 def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     """
     Run TruffleHog filesystem secret scanner over unpacked directories,
-    or execute a local Python-native high-entropy string scanner.
+    and execute a local Python-native high-entropy string scanner to augment/fallback.
     """
     import os
     import shutil
@@ -847,6 +955,8 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             target_scan_dir = jadx_out
             if package_name:
                 package_dir = os.path.join(jadx_out, "sources", *package_name.split("."))
+                if not os.path.isdir(package_dir):
+                    package_dir = os.path.join(jadx_out, "src", *package_name.split("."))
                 if os.path.isdir(package_dir):
                     target_scan_dir = package_dir
             cmd = [trufflehog_bin, "filesystem", target_scan_dir, "--json"]
@@ -873,11 +983,10 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                         findings["score"] += 15
                     except Exception:
                         pass
-                return findings
         except Exception:
             pass
 
-    # High-Fidelity Local Fallback: Traces high-entropy strings (Shannon Entropy > 4.5)
+    # High-Fidelity Local Heuristics: Traces high-entropy strings (Shannon Entropy > 4.5)
     def calculate_shannon_entropy(data: str) -> float:
         import math
         if not data:
@@ -891,6 +1000,8 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
 
     sources_dir = os.path.join(jadx_out, "sources")
     if not os.path.isdir(sources_dir):
+        sources_dir = os.path.join(jadx_out, "src")
+    if not os.path.isdir(sources_dir):
         sources_dir = jadx_out
 
     if package_name:
@@ -898,9 +1009,9 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
         if os.path.isdir(package_dir):
             sources_dir = package_dir
         
-    seen = set()
+    seen = set(s["description"][:30] for s in findings["secrets"])
     for root_dir, dirs, files in os.walk(sources_dir):
-        # Prune third-party library paths
+        # Prune third-party library paths during traversal
         rel_root = os.path.relpath(root_dir, sources_dir)
         pruned_dirs = []
         for d in dirs:
@@ -935,15 +1046,16 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                 ent = calculate_shannon_entropy(c)
                 if ent >= 4.5:
                     dedup_key = f"{c[:10]}"
-                    if dedup_key not in seen:
+                    redacted = c[:6] + "****" + c[-3:] if len(c) > 12 else "****"
+                    desc_val = f"High-entropy literal detected (Entropy: {ent:.2f}): ({redacted})"
+                    if dedup_key not in seen and desc_val[:30] not in seen:
                         seen.add(dedup_key)
-                        redacted = c[:6] + "****" + c[-3:] if len(c) > 12 else "****"
                         findings["secrets"].append({
                             "type": "TruffleHog: High-Entropy Secret",
                             "file": rel,
                             "risk_score": 12,
                             "severity": "HIGH",
-                            "description": f"High-entropy literal detected (Entropy: {ent:.2f}): ({redacted})"
+                            "description": desc_val
                         })
                         findings["score"] += 12
     return findings
@@ -1189,13 +1301,13 @@ def calculate_deterministic_score(
     else:
         # Determine Worst-Finding Base Score (S_max)
         if critical_findings:
-            s_max = 80.0
+            s_max = 50.0
         elif high_findings:
-            s_max = 55.0
-        elif any(v["severity"] == "MEDIUM" for v in vulnerabilities):
             s_max = 30.0
+        elif any(v["severity"] == "MEDIUM" for v in vulnerabilities):
+            s_max = 15.0
         else:
-            s_max = 10.0
+            s_max = 5.0
             
         # Sum other findings weights (excluding worst setting base)
         has_critical = len(critical_findings) > 0
@@ -1229,7 +1341,7 @@ def calculate_deterministic_score(
         w_others = sum(remaining_weights)
         
         # Exponential accumulation formula (decreased coefficient to prevent scoring from rushing to 100 too easily)
-        clamped_score = min(100, int(round(s_max + (100.0 - s_max) * (1.0 - math.exp(-0.005 * w_others)))))
+        clamped_score = min(100, int(round(s_max + (100.0 - s_max) * (1.0 - math.exp(-0.008 * w_others)))))
 
     # Normalize backward compatible metrics for Likelihood and Impact
     likelihood = round(max(1.0, min(10.0, base_exposure * 0.7)), 2)

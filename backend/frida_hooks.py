@@ -173,6 +173,34 @@ try {
         return this.connect();
     };
 } catch(e) {}
+
+try {
+    var _RealCall = Java.use("okhttp3.RealCall");
+    _RealCall.enqueue.implementation = function(callback) {
+        try {
+            var req = this.request();
+            var u = req.url().toString();
+            var m = req.method();
+            _emit("network.http", "enqueue_okhttp", "medium",
+                  "okhttp3.RealCall", "enqueue",
+                  { url: _trunc(u, 200), method: m },
+                  "OkHttp enqueue (" + m + "): " + _trunc(u, 150));
+        } catch(e2) {}
+        return this.enqueue(callback);
+    };
+    _RealCall.execute.implementation = function() {
+        try {
+            var req = this.request();
+            var u = req.url().toString();
+            var m = req.method();
+            _emit("network.http", "execute_okhttp", "medium",
+                  "okhttp3.RealCall", "execute",
+                  { url: _trunc(u, 200), method: m },
+                  "OkHttp execute (" + m + "): " + _trunc(u, 150));
+        } catch(e2) {}
+        return this.execute();
+    };
+} catch(e) {}
 """
 
 # --------------------------------------------------------------------------- #

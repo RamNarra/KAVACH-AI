@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import HTTPException, Request
 from firebase_admin import auth as firebase_auth
 
-DISABLE_AUTH = True
+DISABLE_AUTH = os.environ.get("DISABLE_AUTH", "0") in ("1", "true", "True")
 
 
 def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:

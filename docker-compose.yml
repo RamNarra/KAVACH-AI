@@ -11,7 +11,7 @@ services:
     environment:
       - PORT=8080
       - PROJECT_ID=${PROJECT_ID:-kavach-ai-497708}
-      - LOCATION=${LOCATION:-asia-south1}
+      - LOCATION=${LOCATION:-global}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
       - DYNAMIC_DURATION_SECS=${DYNAMIC_DURATION_SECS:-25}

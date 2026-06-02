@@ -197,8 +197,8 @@ def analyze_banking_fraud(
         
     BFI = min(10.0, bfi_score)
     
-    # Calculate composite Banking Fraud Score
-    fraud_score = max(0, min(100, int(BFL * BFI * 10.0)))
+    # Calculate composite Banking Fraud Score using average model rather than high-scaling multiplication
+    fraud_score = max(0, min(100, int(((BFL + BFI) / 2.0) * 10.0)))
     if not badges:
         fraud_score = 0
 

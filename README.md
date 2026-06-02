@@ -1,121 +1,170 @@
 <div align="center">
-  <img src="https://img.shields.io/badge/Security-Critical-red?style=for-the-badge&logo=shield" alt="Security" />
-  <img src="https://img.shields.io/badge/AI-Generative-purple?style=for-the-badge&logo=google-gemini" alt="GenAI" />
-  <img src="https://img.shields.io/badge/Framework-Next.js-black?style=for-the-badge&logo=next.js" alt="Next.js" />
+  <img src="https://img.shields.io/badge/Security-Forensic--Grade-red?style=for-the-badge&logo=shield" alt="Security" />
+  <img src="https://img.shields.io/badge/AI-Multi--Tier--Resilient-purple?style=for-the-badge&logo=google-gemini" alt="GenAI" />
+  <img src="https://img.shields.io/badge/Framework-Next.js--14-black?style=for-the-badge&logo=next.js" alt="Next.js" />
   <img src="https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi" alt="FastAPI" />
 </div>
 
 <h1 align="center">🛡️ KAVACH AI</h1>
 
 <p align="center">
-  <strong>Generative AI-Based APK Malware Analysis & Threat Auditing System</strong>
+  <strong>Generative AI-Powered Mobile Banking Trojan Sandbox & Explainable Threat Auditing System</strong>
 </p>
 
-Kavach AI is an automated, AI-driven malware analysis system for Android applications (`.apk`). It statically decompiles Android packages, extracts critical security-sensitive code blocks, and leverages **Google GenAI (Gemini 3.5 Flash)** to perform a complex threat audit—returning a structured JSON risk scorecard to a sleek Next.js UI.
+Kavach AI is an automated, forensic-grade malware analysis sandbox for Android applications (`.apk`). It statically decompiles Android packages in a GIL-free concurrent pipeline, injects custom Frida hooks at runtime (intercepting deep OkHttp3 and Retrofit C2 socket channels), and leverages a **multi-tiered Google Gemini 3.5 Flash gateway** to synthesize complex bytecode/network traces into highly explainable, consumer-grade security reports.
+
+The threat assessment is driven by a transparent **OWASP Likelihood x Impact scoring matrix**, ensuring 100% mathematical scoring determinism immune to GenAI hallucinations.
 
 ---
 
-## ✨ Features
+## ✨ Core Highlights & Technical Breakthroughs
 
-- 🧠 **AI-Powered Threat Audits**: Employs Gemini 3.5 Flash for deep static analysis of code behaviors.
-- 🏦 **Banking Fraud Intelligence**: Dedicated fraud score and badges (SMS stealer, overlay, UPI targeting, credential exfil).
-- 🎯 **MITRE ATT&CK Mapping**: Mobile technique tags on static and fraud findings.
-- 📊 **Explainable Risk Decomposition**: Static / dynamic / AI / fraud weighted breakdown.
-- 🔬 **Dynamic Sandbox**: Frida instrumentation with runtime findings and trigger playbooks.
-- 💬 **AI Analyst Chat**: Follow-up Q&A on completed reports (`POST /api/chat`).
-- 📄 **Report Export**: Text executive report download (`GET /api/analysis/{id}/report`).
-- 📦 **Automated Decompilation**: Uses `apktool` and `jadx` to extract `.class` and `.dex` bytecode right inside the Cloud Run environment.
-- ⚡ **Real-Time Next.js Frontend**: Sleek dashboard featuring fake-terminal progress loaders, AI synthesis panels, findings grids, and historical run sidebars powered by Firebase Firestore.
-- 🧪 **MobSF, Semgrep & TruffleHog Static Scans**: Fully operational native integration for standard vulnerability auditing and OWASP Top 10 compliance scoring.
-- 📑 **Segmented Dual-Story Results View**: Sleek, glassmorphic segment controllers allowing security operators to toggle between the **🔎 Static Audit Story** (baseline decompiled class audits and telemetry logs explorer) and the **⚡ Dynamic Execution Story** (unified executive verdict, live Frida runtime intercepts, QEMU console trace).
-- 🔐 **Robust Security Gating**: Enforces Google Cloud Storage lifecycle hygiene and strict Firebase security rules for authenticated-only access.
-- 🚀 **Serverless Scalability**: Dockerized FastAPI container carefully tuned for high-memory JVM tasks, deployed to GCP Cloud Run.
+- 🏦 **Calibrated Banking Fraud Intelligence**: Dedicated scoring model representing mobile banking trojans. Uses the average formula `((BFL + BFI) / 2) * 10` for stable, non-alarmist rating scaling that isolates SMS interceptors, Accessibility API hijacking, screen overlay theft, and dynamic keyloggers.
+- 🎯 **MITRE ATT&CK Mapping**: Deep semantic code auditing (Quark Engine + Androguard DEX constant tables) dynamically maps found triggers to the standard MITRE ATT&CK Mobile matrix.
+- 🔬 **OkHttp3/Retrofit Decoupled Telemetry**: Standard socket tracing hooks only capture raw encrypted binary streams. Kavach AI injects custom Frida hooks targeting `okhttp3.RealCall.enqueue` and `execute` methods to capture fully decrypted HTTP/JSON outbound payloads before TLS transport.
+- 🌀 **Resilient Sandbox Spawner**: Engineered to survive virtualization lag on modern hypervisors. Implements a double-launch ADB fallback (explicit Activity starts with instant ADB `monkey` fallbacks) and advanced process searching (`pidof` + `ps -A` process parsers) over 15 attempts.
+- 🧠 **Tiered Cognitive GenAI Layer**: A defensive, highly resilient AI generation gateway. Executes on `gemini-3.5-flash` under 15 RPM constraints, falls back gracefully to `gemini-3.1-flash-lite` if rate limits are exhausted, and degrades to an offline rule parser if cloud services are offline.
+- 💻 **Premium Widescreen 1600px UI**: Modular, glassmorphic Next.js App Router UI styled to occupy the full widescreen width. Features visual score gauges, interactive ATT&CK accordions, live laboratory logs console, and segmented tabs (Static, Dynamic, and Combined views).
 
 ---
 
-## 🏗️ Technical Architecture
+## 🏗️ System Architecture
 
-- **Frontend**: Next.js App Router (Tailwind CSS, React, Lucide Icons) deployed as a static site to Firebase Hosting.
-- **Backend**: Python FastAPI service running in a custom Docker container (including JRE, APKTool, and JADX) deployed on GCP Cloud Run.
-- **Routing**: In production, Firebase Hosting rewrite rules map all `/api/**` traffic from the client-side origin to the GCP Cloud Run service (`kavach-api`). This guarantees a single-origin policy, avoiding complex CORS setups in production and keeping calls clean.
+```mermaid
+graph TD
+    subgraph Client [Frontend - Next.js 14 App Router]
+        UI[page.tsx - Widescreen Layout] --> |Sub-Component| Canvas[CanvasRain.tsx - Matrix Backdrop]
+        UI --> |Sub-Component| Logs[TerminalLogs.tsx - Live Telemetry]
+        UI --> |Sub-Component| Dial[ScoreCard.tsx - Risk Breakdown]
+        UI --> |Sub-Component| Attack[AttackMapping.tsx - MITRE Accordion]
+        UI --> |Sub-Component| Socket[TelemetryStream.tsx - Telemetry Matrix]
+    end
 
----
+    subgraph Backend [FastAPI Application Container]
+        API_Gateway[main.py] --> |Parallel Engine Orchestrator| Worker_Pool[run_analysis_pipeline]
+        
+        subgraph Static_Pipeline [Phase 1: Concurrent Scans]
+            Worker_Pool --> |APKiD VM Check| APKiD[apkid]
+            Worker_Pool --> |Androguard constant scan| Androguard[androguard]
+            Worker_Pool --> |Quark ATT&CK mapping| Quark[quark]
+            Worker_Pool --> |JADX Source Decompiler| JADX[resolve_jadx]
+        end
 
-## 🛠️ Google Cloud API Enablement
+        subgraph Dynamic_Sandbox [Phase 2: Tracing Sandbox]
+            Worker_Pool --> |Frida Hook Assembly| Frida[frida_hooks.py]
+            Worker_Pool --> |Double-Launch Trigger Playbook| Playbook[playbook_engine.py]
+        end
 
-Before running backend code or deploying, ensure the required APIs are enabled on your Google Cloud project:
+        subgraph Core_Decision [Decision & Intel Layer]
+            Static_Pipeline & Dynamic_Sandbox --> |Scoring Matrix| Risk_Engine[risk_engine.py]
+            Risk_Engine --> |Average Score Scale| Banking_Fraud[banking_fraud.py]
+        end
 
-```bash
-gcloud services enable aiplatform.googleapis.com \
-                        run.googleapis.com \
-                        cloudbuild.googleapis.com \
-                        artifactregistry.googleapis.com
+        subgraph GenAI_Layer [Cognitive Layer]
+            Core_Decision --> |Multi-Tier Resiliency| Gemini[Gemini 3.5 Flash Gateway]
+        end
+    end
 ```
 
 ---
 
-## 🐳 Developer Self-Hosting (Docker Compose)
+## 🛠️ Instant Setup & Replication Guide (For another PC)
 
-The entire Kavach AI system (Next.js + FastAPI decompiler backend) is fully containerized and can be spun up locally using Docker Compose in a single command. This is highly recommended for easy testing and evaluation.
+To clone and continue this project on another machine, follow these simple setup steps.
 
 ### Prerequisites
-- Docker and Docker Compose installed on your host system.
-- Your Vertex AI / Gemini API Key.
-
-### Execution
-1. Create a `.env` file in the root directory and add your Vertex AI / Gemini API Key:
-   ```text
-   GEMINI_API_KEY=your_gemini_api_key_here
-   ```
-2. Build and start the containers:
-   ```bash
-   docker compose up --build
-   ```
-3. Open [http://localhost:3000](http://localhost:3000) to view the Kavach AI frontend. The backend will automatically bind and serve traffic on [http://localhost:8080](http://localhost:8080).
+- **Python 3.11+** installed
+- **Node.js 18+** & **npm** installed
+- **Java JRE/JDK** installed (required by JADX & APKTool decompilers)
+- **Android SDK Platform-Tools (adb)** installed and added to system `PATH`
+- A Google Vertex AI or Google AI Studio Gemini API Key
 
 ---
 
-## 💻 Local Development Workflow
-
-Ensure you have Python 3.11+, Java (JRE), `apktool`, and `jadx` installed locally on your system path.
-
-### 1. Run the Python Backend Locally
-Start the backend server using the standard uvicorn launcher:
+### Step 1: Clone the Repository
 ```bash
+git clone https://github.com/RamNarra/KAVACH-AI.git
+cd KAVACH-AI
+```
+
+### Step 2: Launch the Python Backend
+Run the following commands to initialize the virtual environment, install all required forensic dependencies (including `frida`, `semgrep`, `apkid`, and `androguard`), and start the uvicorn API gateway:
+
+```bash
+# Navigate to backend and create venv
 cd backend
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-# Local dev without Firebase token middleware:
-export DISABLE_AUTH=1
-uvicorn main:app --host 0.0.0.0 --port 8080 --reload
-```
-Upon startup, FastAPI automatically triggers the **Dynamic Sandbox Bootstrapper** in the background:
-- It checks if the Android Virtual Device (`kavach_sandbox`) is running. If not, it launches it headlessly.
-- It automatically deploys and starts the matching **Frida Server-16** on the emulator.
-- You can monitor the live bootstrap state at `/api/sandbox-health`.
-- If the emulator/Frida setup is offline, the backend degrades gracefully to static-only reports.
 
-### 2. Run the Next.js Frontend Locally
-Create `frontend/.env.local`:
-```text
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
+# Install all dependencies
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# Start uvicorn with Local Auth Bypass enabled on Port 8080
+export DISABLE_AUTH=1
+export GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE"  # Add your Gemini Key
+uvicorn main:app --reload --port 8080
 ```
-Then start the server:
-```bash
-cd frontend
-npm install
-npm run dev
-```
-Open [http://localhost:3000](http://localhost:3000) to view the application interface.
+
+*FastAPI will start, bootstrap the dynamic sandbox (locating the emulator via ADB and starting the guest Frida server), and serve endpoints on `http://localhost:8080`.*
 
 ---
 
-## ☁️ Production Deployment Steps
+### Step 3: Launch the Next.js Frontend
+Open a new terminal window, navigate to the frontend directory, install npm packages, and run the developer hot-reload server:
 
-### 1. Deploy the Backend to GCP Cloud Run
-Deploy the FastAPI backend directly from source. Cloud Run will build the custom `Dockerfile`:
+```bash
+# Navigate to frontend and install node packages
+cd ../frontend
+npm install
 
+# Start the dev server mapped to local backend port
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8080 npm run dev
+```
+
+---
+
+### ⚡ Quick Resume Shortcuts for Your Local Environment
+Once the initial setup is complete, you can start or resume the application at any time by copy-pasting and running these commands in two separate terminal sessions:
+
+**Session 1: Backend API Server**
+```bash
+# backend 
+cd "/home/p4cketsn1ff3r/Downloads/Projects/KAVACH AI/backend"
+source venv/bin/activate
+uvicorn main:app --reload --port 8080
+```
+
+**Session 2: Frontend UI Client**
+```bash
+# frontend
+cd "/home/p4cketsn1ff3r/Downloads/Projects/KAVACH AI/frontend"
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8080 npm run dev
+```
+
+*Open [http://localhost:3000](http://localhost:3000) to view the fully populated Kavach AI Widescreen Threat Dashboard. You are ready to analyze target APKs!*
+
+---
+
+## 🐳 Self-Hosting via Docker Compose
+
+Alternatively, spin up the entire pre-configured ecosystem (Next.js + FastAPI decompiler backend) inside a single command using Docker:
+
+```bash
+# Create root dotenv file
+echo "GEMINI_API_KEY=your_gemini_api_key_here" > .env
+
+# Build and launch compose services
+docker compose up --build
+```
+*Access the Next.js dashboard at [http://localhost:3000](http://localhost:3000) (backend mounts on `http://localhost:8080`).*
+
+---
+
+## ☁️ Production GCP Deployments
+
+### 1. Backend Container (Cloud Run)
+Deploy the FastAPI backend directly from source:
 ```bash
 cd backend
 gcloud run deploy kavach-api \
@@ -126,14 +175,10 @@ gcloud run deploy kavach-api \
   --memory 4Gi \
   --cpu 2 \
   --timeout 180 \
-  --concurrency 8 \
-  --set-env-vars PROJECT_ID=kavach-ai-497708,LOCATION=global,MODEL_NAME=gemini-3.5-flash
+  --set-env-vars PROJECT_ID=kavach-ai-497708,LOCATION=global
 ```
 
-> [!WARNING]
-> Running JADX decompilation is heavily CPU/memory-intensive. Default Cloud Run settings (512MB RAM, 1 vCPU) will result in immediate **Out Of Memory (OOM) crashes**. We configure the runtime with at least **4GB RAM, 2 vCPUs**, and restrict concurrency to **8**.
-
-### 2. Deploy the Next.js Frontend to Firebase Hosting
+### 2. Frontend Build (Firebase Hosting)
 ```bash
 cd frontend
 npm run build
@@ -142,20 +187,6 @@ firebase deploy --only hosting,firestore,storage
 ```
 
 ---
-
-## 🧹 Cost Control & Cleanup
-
-- **Immediate Deletion**: Configured out-of-the-box inside the FastAPI server.
-- **Orphan Cleanup**: Run the cleanup script to remove stale APKs older than 10 minutes:
-  ```bash
-  python ops/cleanup_orphan_apks.py
-  ```
-- **Safety Fallback**: Apply the safety fallback lifecycle rule to delete any remaining files older than 1 day:
-  ```bash
-  gcloud storage buckets update gs://kavach-ai-497708.firebasestorage.app --lifecycle-file=ops/storage-lifecycle.json
-  ```
-
----
 <div align="center">
-  Built with ❤️ for Security Automation
+  Built with ❤️ for High-Fidelity Security Automation & Banking Protection
 </div>
