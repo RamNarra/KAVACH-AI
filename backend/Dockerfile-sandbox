@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+# Install system dependencies (Java JRE, wget, unzip)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    default-jre \
+    wget \
+    unzip \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Apktool
+RUN mkdir -p /opt/apktool \
+    && wget -q -O /opt/apktool/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar \
+    && chmod +x /opt/apktool/apktool.jar \
+    && echo '#!/bin/bash\nexec java -jar /opt/apktool/apktool.jar "$@"' > /usr/local/bin/apktool \
+    && chmod +x /usr/local/bin/apktool
+
+# Install JADX
+RUN mkdir -p /opt/jadx \
+    && wget -q -O /tmp/jadx.zip https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip \
+    && unzip -q /tmp/jadx.zip -d /opt/jadx \
+    && rm /tmp/jadx.zip \
+    && chmod +x /opt/jadx/bin/jadx
+
+# Add JADX to PATH
+ENV PATH="/opt/jadx/bin:${PATH}"
+
+# Install minimal python tools
+RUN pip install --no-cache-dir quark-engine mdv apkid
+RUN HOME=/sandbox freshquark && chmod -R 777 /sandbox/.quark-engine || true
+
+WORKDIR /sandbox
+ENTRYPOINT ["/bin/bash"]

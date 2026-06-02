@@ -44,6 +44,12 @@ from runtime_findings import (
     build_evidence_summary,
 )
 
+# Global Semaphore to prevent Hackathon Stage DoS / Memory Bombs
+MAX_CONCURRENT_ANALYSES = int(os.getenv("MAX_CONCURRENT_ANALYSES", "2"))
+analysis_semaphore = threading.Semaphore(MAX_CONCURRENT_ANALYSES)
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB File Limit
+
+
 # Configure logging
 sandbox_lock = threading.Lock()
 
@@ -980,7 +986,7 @@ def clean_and_parse_json(text: str) -> Dict[str, Any]:
         logger.error(f"Failed to parse JSON from Gemini: {e}")
         return {}
 
-def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
+def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semaphore: bool = False):
     apk_url = request.apk_url
     logger.info(f"Starting analysis pipeline for {doc_id}")
     
@@ -1308,6 +1314,20 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             except Exception as e:
                 logger.error(f"Semgrep analysis failed in background task: {e}")
 
+        vt_res = None
+        def run_virustotal():
+            nonlocal vt_res
+            try:
+                update_progress("virustotal", "RUNNING", "Querying VirusTotal API by file hash...")
+                import asyncio
+                from vt_scan import get_virustotal_report
+                loop = asyncio.new_event_loop()
+                vt_res = loop.run_until_complete(get_virustotal_report(target_apk))
+                loop.close()
+                update_progress("virustotal", "COMPLETED", "VirusTotal scan completed.")
+            except Exception as e:
+                logger.error(f"VirusTotal integration failed in background task: {e}")
+
         dynamic_result = {
             "status": "UNAVAILABLE",
             "events": [],
@@ -1318,7 +1338,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         }
 
         # Coordinated High-Performance Concurrent Pipeline via ThreadPoolExecutor:
-        # Run APKTool, JADX, APKiD, Quark, and Androguard in a resource-capped executor.
+        # Run APKTool, JADX, APKiD, Quark, Androguard, and VirusTotal in a resource-capped executor.
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             # Phase 1: Submit independent workers in parallel
@@ -1327,7 +1347,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
                 executor.submit(run_jadx): "jadx",
                 executor.submit(run_apkid): "apkid",
                 executor.submit(run_quark): "quark",
-                executor.submit(run_androguard): "androguard"
+                executor.submit(run_androguard): "androguard",
+                executor.submit(run_virustotal): "virustotal",
             }
             
             # Wait for all Phase 1 tasks to fully complete
@@ -1750,6 +1771,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
             "absolute_threat_score": absolute_score,
             "evidence": {
                 **deterministic_result["evidence"],
+                "virustotal": vt_res,
                 "dynamic_analysis": {
                     "status": dynamic_result.get("status"),
                     "events": dynamic_result.get("events"),
@@ -1808,6 +1830,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest):
         # available for the dynamic analysis pipeline to re-download.
         # delete_storage_object() is called after dynamic analysis completes.
         shutil.rmtree(temp_dir, ignore_errors=True)
+        if release_semaphore:
+            analysis_semaphore.release()
         logger.info(f"Cleaned up temp directory for {doc_id}")
 
 @app.get("/")
@@ -2581,14 +2605,28 @@ def analyze_apk_upload(
 
     # Write uploaded file directly to a local temp file
     temp_upload_path = os.path.join(SCAN_TEMP_DIR, f"uploaded_{doc_id}.apk")
+    
+    file_size_bytes = 0
     try:
         with open(temp_upload_path, "wb") as f:
             # Stream the file content in chunks to avoid high RAM usage
             while chunk := file.file.read(1024 * 1024):
+                file_size_bytes += len(chunk)
+                if file_size_bytes > MAX_FILE_SIZE:
+                    raise ValueError(f"File size exceeds administrative limit of {MAX_FILE_SIZE//(1024*1024)}MB. This prevents Out-Of-Memory zipbombs.")
                 f.write(chunk)
     except Exception as e:
         logger.error(f"Failed to save uploaded APK to temp path: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {str(e)}")
+        if os.path.exists(temp_upload_path):
+            os.remove(temp_upload_path)
+        raise HTTPException(status_code=413 if "exceeds administrative limit" in str(e) else 500, detail=f"Failed to process uploaded file: {str(e)}")
+        
+    # Check concurrent pipeline availability to prevent CPU thrashing
+    if not analysis_semaphore.acquire(blocking=False):
+        logger.warning("Concurrency limit reached. Rejecting upload.")
+        if os.path.exists(temp_upload_path):
+            os.remove(temp_upload_path)
+        raise HTTPException(status_code=429, detail="Server is currently analyzing maximum concurrent payloads. Please try again in a few moments.")
         
     # We will pass file:// URL to run_analysis_pipeline
     apk_url = f"file://{temp_upload_path}"
@@ -2629,11 +2667,11 @@ def analyze_apk_upload(
     doc_ref.set(initial_doc)
 
     if background:
-        background_tasks.add_task(run_analysis_pipeline, doc_id, request)
+        background_tasks.add_task(run_analysis_pipeline, doc_id, request, True)
         return initial_doc
     else:
         try:
-            final_doc = run_analysis_pipeline(doc_id, request)
+            final_doc = run_analysis_pipeline(doc_id, request, True)
             return final_doc
         except Exception as e:
             logger.error(f"Analysis upload endpoint failed: {e}")
