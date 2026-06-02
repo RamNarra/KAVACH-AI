@@ -43,7 +43,7 @@ export default function Home() {
   const [summaryExpanded, setSummaryExpanded] = useState(false);
   const [mitreExpanded, setMitreExpanded] = useState(false);
   const [expandedTechniques, setExpandedTechniques] = useState<Record<string, boolean>>({});
-  const [staticTab, setStaticTab] = useState<'manifest' | 'apkid' | 'quark' | 'androguard' | 'secrets' | 'network' | 'compliance'>('manifest');
+  const [staticTab, setStaticTab] = useState<'manifest' | 'apkid' | 'quark' | 'androguard' | 'secrets' | 'network' | 'compliance' | 'virustotal'>('manifest');
   const [storyTab, setStoryTab] = useState<'static' | 'dynamic' | 'final'>('static');
   const [estSecondsRemaining, setEstSecondsRemaining] = useState(30);
 
@@ -704,7 +704,7 @@ export default function Home() {
                           </div>
 
                           <div className="flex gap-1 overflow-x-auto pb-2 border-b border-[var(--border)] -mx-6 px-6 no-scrollbar">
-                            {(['manifest', 'apkid', 'quark', 'androguard', 'secrets', 'network', 'compliance'] as const).map((tab) => (
+                            {(['manifest', 'apkid', 'quark', 'androguard', 'secrets', 'network', 'compliance', 'virustotal'] as const).map((tab) => (
                               <button
                                 key={tab}
                                 type="button"
@@ -722,6 +722,7 @@ export default function Home() {
                                 {tab === 'secrets' && 'Deep Secrets'}
                                 {tab === 'network' && 'Network Config'}
                                 {tab === 'compliance' && 'Semgrep AST'}
+                                {tab === 'virustotal' && '🛡 VirusTotal'}
                               </button>
                             ))}
                           </div>
@@ -890,6 +891,52 @@ export default function Home() {
                                 })()}
                               </div>
                             )}
+
+                            {staticTab === 'virustotal' && (() => {
+                              const vt = (current.evidence as any)?.virustotal;
+                              return (
+                                <div className="space-y-4 animate-fadeIn">
+                                  {!vt || vt.status === 'skipped' ? (
+                                    <p className="text-[13px] text-[var(--muted)]">VirusTotal integration requires a <code className="bg-[var(--surface)] px-1 rounded">VIRUSTOTAL_API_KEY</code> env variable. Set it in your backend <code>.env</code> file.</p>
+                                  ) : vt.status === 'not_found' ? (
+                                    <div className="py-4 px-5 bg-[var(--surface-2)]/40 rounded-2xl border border-[var(--border)] space-y-1">
+                                      <p className="text-[14px] font-semibold text-[var(--muted)]">File not previously indexed</p>
+                                      <p className="text-[13px] text-[var(--muted)]">This APK has not been scanned by VirusTotal before. It may be a novel or private sample.</p>
+                                    </div>
+                                  ) : vt.status === 'rate_limited' ? (
+                                    <p className="text-[13px] text-[var(--red)]">VirusTotal free tier rate limit hit (4 req/min). Try again shortly.</p>
+                                  ) : vt.status === 'success' ? (
+                                    <div className="space-y-4">
+                                      <div className="grid grid-cols-3 gap-3">
+                                        <div className={`py-4 px-5 rounded-2xl border text-center space-y-1 ${ vt.malicious > 0 ? 'bg-[var(--red)]/10 border-[var(--red)]/30' : 'bg-[var(--green)]/10 border-[var(--green)]/30'}`}>
+                                          <p className={`text-[32px] font-bold tabular-nums ${ vt.malicious > 0 ? 'text-[var(--red)]' : 'text-[var(--green)]'}`}>{vt.malicious}</p>
+                                          <p className="text-[12px] text-[var(--muted)] uppercase tracking-widest">Malicious</p>
+                                        </div>
+                                        <div className="py-4 px-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-2)]/40 text-center space-y-1">
+                                          <p className="text-[32px] font-bold tabular-nums text-[var(--muted)]">{vt.undetected}</p>
+                                          <p className="text-[12px] text-[var(--muted)] uppercase tracking-widest">Undetected</p>
+                                        </div>
+                                        <div className="py-4 px-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-2)]/40 text-center space-y-1">
+                                          <p className="text-[32px] font-bold tabular-nums">{vt.total}</p>
+                                          <p className="text-[12px] text-[var(--muted)] uppercase tracking-widest">Engines</p>
+                                        </div>
+                                      </div>
+                                      {vt.malicious > 0 && (
+                                        <div className="py-2 px-4 rounded-xl bg-[var(--red)]/10 border border-[var(--red)]/20">
+                                          <p className="text-[13px] font-semibold text-[var(--red)]">⚠ {vt.malicious} of {vt.total} antivirus engines flagged this file as malicious.</p>
+                                        </div>
+                                      )}
+                                      <a href={vt.permalink} target="_blank" rel="noopener noreferrer"
+                                        className="flex items-center gap-2 text-[13px] text-[var(--blue)] hover:underline">
+                                        View full VirusTotal report →
+                                      </a>
+                                    </div>
+                                  ) : (
+                                    <p className="text-[13px] text-[var(--muted)]">VT scan status: {vt?.status || 'unknown'}. {vt?.reason || ''}</p>
+                                  )}
+                                </div>
+                              );
+                            })()}
 
                             {staticTab === 'androguard' && (
                               <div className="space-y-4 animate-fadeIn">

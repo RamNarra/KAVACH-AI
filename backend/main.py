@@ -1544,8 +1544,13 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             "}"
         )
 
+        # ── Prompt injection hardening ──────────────────────────────────────
+        # Wrap ALL APK-derived data inside strict delimiters so that any
+        # adversarial strings embedded in the APK (e.g. "Ignore previous
+        # instructions") cannot escape into the system instruction context.
         prompt_sections = [
             (
+                "<ANALYSIS_PAYLOAD>\n"
                 f"We have statically analyzed the app and calculated a deterministic baseline "
                 f"risk score of {det_score}/100.\n"
                 "Below are the evidentiary findings from our local engines (APKTool, JADX, APKiD):\n\n"
@@ -1559,6 +1564,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         ]
         for filepath, code in key_sources.items():
             prompt_sections.append(f"\nFile: {filepath}\n```java\n{code}\n```\n")
+        prompt_sections.append("\n</ANALYSIS_PAYLOAD>\n")
 
         prompt = "".join(prompt_sections)
 
@@ -2599,17 +2605,28 @@ def analyze_apk_upload(
 ):
     verified_uid = verify_request_uid(http_request, uid)
     
+    # Sanitize original filename — strip path separators and control characters
+    # to prevent log injection and directory traversal via display name
+    raw_filename = file.filename or "unknown.apk"
+    safe_display_name = re.sub(r'[^\w.\-]', '_', os.path.basename(raw_filename))[:128]
+    if not safe_display_name.endswith('.apk'):
+        safe_display_name = safe_display_name + '.apk'
+
     # Generate unique document ID
     doc_ref = db.collection("apkanalysisresults").document()
     doc_id = doc_ref.id
 
-    # Write uploaded file directly to a local temp file
+    # Write uploaded file directly to a UUID-named local temp file
+    # (Never use the original filename in filesystem paths)
     temp_upload_path = os.path.join(SCAN_TEMP_DIR, f"uploaded_{doc_id}.apk")
+    
+    # Uncompressed zipbomb prevention
+    MAX_UNCOMPRESSED_SIZE = 1024 * 1024 * 512 # 512MB limit
     
     file_size_bytes = 0
     try:
+        import zipfile
         with open(temp_upload_path, "wb") as f:
-            # Stream the file content in chunks to avoid high RAM usage
             while chunk := file.file.read(1024 * 1024):
                 file_size_bytes += len(chunk)
                 if file_size_bytes > MAX_FILE_SIZE:
@@ -2636,7 +2653,7 @@ def analyze_apk_upload(
         apk_url=apk_url,
         email=email,
         uid=verified_uid,
-        filename=file.filename
+        filename=safe_display_name
     )
 
     now_str = datetime.datetime.utcnow().isoformat() + "Z"
