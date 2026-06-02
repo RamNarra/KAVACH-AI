@@ -151,19 +151,14 @@ class _FirestoreShim:
 firestore = _FirestoreShim()
 
 
-# Initialize Google Gen AI client (Dynamic AI Studio / Vertex AI backend)
+# Initialize Google Gen AI client (Google AI Studio Free Tier)
 try:
     api_key = os.environ.get("GEMINI_API_KEY")
-    if api_key:
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not found in environment variables. GenAI will be disabled.")
+    else:
         genai_client = genai.Client(api_key=api_key)
         logger.info("Google Gen AI client initialized using AI Studio API Key (100% FREE developer tier)")
-    else:
-        genai_client = genai.Client(
-            vertexai=True,
-            project=PROJECT_ID,
-            location=LOCATION,
-        )
-        logger.info(f"Google Gen AI client (Vertex AI) initialized — project={PROJECT_ID}, location={LOCATION}")
 except Exception as e:
     logger.error(f"Error initializing Google Gen AI client: {e}")
     genai_client = None

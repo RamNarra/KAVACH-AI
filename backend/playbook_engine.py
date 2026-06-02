@@ -33,19 +33,11 @@ _SWIPE_DELAY = 0.3  # seconds between touch events
 def _get_genai_client():
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
-        if api_key:
-            client = genai.Client(api_key=api_key)
-            logger.info("GenAI client initialized in playbook using API key")
-            return client
-        
-        project_id = os.environ.get("PROJECT_ID", "kavach-ai-497708")
-        location = os.environ.get("LOCATION", "global")
-        client = genai.Client(
-            vertexai=True,
-            project=project_id,
-            location=location,
-        )
-        logger.info(f"GenAI client initialized in playbook using Vertex AI (project={project_id})")
+        if not api_key:
+            logger.warning("GEMINI_API_KEY not found in environment variables. Playbook GenAI will be disabled.")
+            return None
+        client = genai.Client(api_key=api_key)
+        logger.info("GenAI client initialized in playbook using Google AI Studio Free Tier")
         return client
     except Exception as e:
         logger.warning(f"Failed to initialize GenAI client in playbook: {e}")
