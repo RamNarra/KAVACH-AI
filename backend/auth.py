@@ -92,7 +92,7 @@ def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:
     if os.getenv(LEGACY_UID_ENV, "0") in ("1", "true", "True"):
         legacy_uid = (claimed_uid or "").strip()
         if legacy_uid:
-            if not _SESSION_RE.fullmatch(legacy_uid):
+            if not re.match(r"^[A-Za-z0-9_\-]{3,128}$", legacy_uid):
                 raise HTTPException(status_code=400, detail="Invalid legacy uid format.")
             return legacy_uid
 
