@@ -16,7 +16,7 @@ import uuid
 import datetime
 import xml.etree.ElementTree as ET
 import threading
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urljoin
 from typing import Dict, List, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,6 +60,21 @@ STALE_SCAN_MAX_AGE_SECS = int(os.getenv("STALE_SCAN_MAX_AGE_SECS", "21600"))
 # Configure logging
 sandbox_lock = threading.Lock()
 
+def is_safe_ip(ip_str: str) -> bool:
+    try:
+        import ipaddress
+        ip_str_clean = ip_str.strip("[]")
+        ip = ipaddress.ip_address(ip_str_clean)
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+            return False
+        if hasattr(ip, "ipv4_mapped") and ip.ipv4_mapped:
+            mapped = ip.ipv4_mapped
+            if mapped.is_loopback or mapped.is_private or mapped.is_link_local or mapped.is_multicast or mapped.is_reserved:
+                return False
+        return True
+    except Exception:
+        return False
+
 def is_safe_ingest_url(url: str) -> bool:
     """
     Validate that the URL is safe for ingestion.
@@ -86,24 +101,11 @@ def is_safe_ingest_url(url: str) -> bool:
         return True
         
     try:
-        ip = socket.gethostbyname(hostname)
-    except Exception:
-        return False
-        
-    try:
-        parts = list(map(int, ip.split('.')))
-        if len(parts) != 4:
-            return False
-        if parts[0] == 127:
-            return False
-        if parts[0] == 10:
-            return False
-        if parts[0] == 172 and (16 <= parts[1] <= 31):
-            return False
-        if parts[0] == 192 and parts[1] == 168:
-            return False
-        if parts[0] == 169 and parts[1] == 254:
-            return False
+        addrinfo = socket.getaddrinfo(hostname, None)
+        ips = set(info[4][0] for info in addrinfo)
+        for ip in ips:
+            if not is_safe_ip(ip):
+                return False
         return True
     except Exception:
         return False
@@ -135,14 +137,27 @@ def _write_downloaded_apk(raw_bytes: bytes, destination_path: str) -> None:
     with open(destination_path, "wb") as f:
         f.write(payload)
 
-    # Zipbomb guard: verify uncompressed size doesn't exceed 512MB
+    # Zipbomb guard: verify uncompressed size doesn't exceed 512MB by streaming decompression in-memory
     MAX_UNCOMPRESSED_SIZE = 1024 * 1024 * 512 # 512MB limit
+    MAX_RATIO = 100 # Max ratio of uncompressed / compressed size
+    compressed_size = os.path.getsize(destination_path)
     try:
         import zipfile
+        total_read = 0
         with zipfile.ZipFile(destination_path, 'r') as zf:
-            total_uncompressed = sum(info.file_size for info in zf.infolist())
-            if total_uncompressed > MAX_UNCOMPRESSED_SIZE:
-                raise Exception("APK uncompressed content exceeds 512MB limit. Possible zipbomb detected.")
+            for info in zf.infolist():
+                if info.file_size > MAX_UNCOMPRESSED_SIZE:
+                    raise Exception("APK uncompressed content exceeds 512MB limit in metadata. Possible zipbomb detected.")
+                with zf.open(info) as f_entry:
+                    while True:
+                        chunk = f_entry.read(65536)
+                        if not chunk:
+                            break
+                        total_read += len(chunk)
+                        if total_read > MAX_UNCOMPRESSED_SIZE:
+                            raise Exception("APK uncompressed content exceeds 512MB limit. Possible zipbomb detected.")
+                        if compressed_size > 0 and (total_read / compressed_size) > MAX_RATIO:
+                            raise Exception("Abnormally high compression ratio. Possible zipbomb detected.")
     except Exception as e:
         if os.path.exists(destination_path):
             os.remove(destination_path)
@@ -190,20 +205,78 @@ def _download_apk_to_path(apk_url: str, destination_path: str) -> None:
         return
 
     if parsed.scheme in ("http", "https"):
-        with httpx.Client(follow_redirects=True, timeout=60.0) as client:
-            response = client.get(apk_url)
-            response.raise_for_status()
-
-            content_length = response.headers.get("content-length")
-            if content_length:
+        current_url = apk_url
+        redirect_count = 0
+        max_redirects = 5
+        
+        while True:
+            parsed_current = urlparse(current_url)
+            if parsed_current.scheme not in ("http", "https"):
+                raise Exception(f"Unsupported redirect scheme: {parsed_current.scheme}")
+            
+            hostname = parsed_current.hostname
+            if not hostname:
+                raise Exception("Missing hostname in URL")
+                
+            bypass = os.getenv("DISABLE_SSRF_CHECK", "0") in ("1", "true", "True")
+            if not bypass:
                 try:
-                    if int(content_length) > MAX_FILE_SIZE:
-                        raise Exception(f"APK exceeds maximum allowed size of {MAX_FILE_SIZE // (1024 * 1024)}MB.")
-                except ValueError:
-                    pass
-
-            _write_downloaded_apk(response.content, destination_path)
-        return
+                    addrinfo = socket.getaddrinfo(hostname, None)
+                    ips = list(set(info[4][0] for info in addrinfo))
+                except Exception as e:
+                    raise Exception(f"Failed to resolve hostname '{hostname}': {e}")
+                
+                for ip in ips:
+                    if not is_safe_ip(ip):
+                        raise Exception(f"Unsafe IP address detected: {ip} for host {hostname}")
+                
+                ip_to_use = None
+                for ip in ips:
+                    if ":" not in ip:
+                        ip_to_use = ip
+                        break
+                    else:
+                        ip_to_use = f"[{ip}]"
+                        break
+                if not ip_to_use:
+                    ip_to_use = ips[0]
+                    if ":" in ip_to_use and not ip_to_use.startswith("["):
+                        ip_to_use = f"[{ip_to_use}]"
+                
+                port_suffix = f":{parsed_current.port}" if parsed_current.port else ""
+                target_url = f"{parsed_current.scheme}://{ip_to_use}{port_suffix}{parsed_current.path}"
+                if parsed_current.query:
+                    target_url += f"?{parsed_current.query}"
+                headers = {"Host": hostname}
+                extensions = {"sni_hostname": hostname}
+            else:
+                target_url = current_url
+                headers = {}
+                extensions = {}
+                
+            with httpx.Client(follow_redirects=False, timeout=60.0) as client:
+                response = client.get(target_url, headers=headers, extensions=extensions)
+                
+            if response.is_redirect:
+                redirect_count += 1
+                if redirect_count > max_redirects:
+                    raise Exception("Too many redirects")
+                redirect_url = response.headers.get("Location")
+                if not redirect_url:
+                    raise Exception("Redirect without Location header")
+                current_url = urljoin(current_url, redirect_url)
+                continue
+            else:
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        if int(content_length) > MAX_FILE_SIZE:
+                            raise Exception(f"APK exceeds maximum allowed size of {MAX_FILE_SIZE // (1024 * 1024)}MB.")
+                    except ValueError:
+                        pass
+                _write_downloaded_apk(response.content, destination_path)
+                return
 
     raise Exception(f"Unsupported APK URL scheme: {parsed.scheme or 'unknown'}")
 
@@ -258,7 +331,7 @@ STATIC_MODEL = "gemini-3.5-flash"
 DYNAMIC_MODEL = "gemini-3.5-flash"
 CHAT_MODEL = "gemini-3.5-flash"
 MODEL_NAME = STATIC_MODEL
-FALLBACK_MODEL = "gemini-3.1-flash-lite"
+FALLBACK_MODEL = "gemini-2.0-flash-lite"
 
 # Decide where to put temporary extraction files to avoid RAM exhaustion on tmpfs systems
 SCAN_TEMP_DIR = os.environ.get("SCAN_TEMP_DIR", os.path.join(_BACKEND_DIR, "tmp_scans"))
@@ -319,7 +392,7 @@ def generate_content_with_fallback(
     model: str,
     contents: Any,
     config: Any,
-    fallback_model: str = "gemini-3.1-flash-lite"
+    fallback_model: str = "gemini-2.0-flash-lite"
 ) -> Any:
     """
     Executes GenAI content generation using a primary model.
@@ -1042,7 +1115,7 @@ def select_key_java_files(jadx_dir: str, package_name: str) -> tuple[Dict[str, s
     scored_files.sort(key=lambda x: x[0], reverse=True)
 
     total_characters = 0
-    max_total_characters = 300000
+    max_total_characters = 30000
 
     # Extract all key source files for analysis to ensure full static context depth without 15-file cap
     for score, rel_path, full_path in scored_files:
@@ -1284,6 +1357,23 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 pkg_ready.wait(timeout=10)
                 pkg = pkg_box["name"] or package_name
                 
+                # Check JADX Cache based on APK SHA-256
+                import hashlib
+                sha256_hash = hashlib.sha256()
+                with open(apk_path, "rb") as f:
+                    for byte_block in iter(lambda: f.read(4096), b""):
+                        sha256_hash.update(byte_block)
+                file_hash = sha256_hash.hexdigest()
+                
+                cache_dir = os.path.join(SCAN_TEMP_DIR or "/tmp", "jadx_cache", file_hash)
+                if os.path.exists(cache_dir) and os.listdir(cache_dir):
+                    logger.info(f"JADX Cache hit for hash {file_hash}. Copying cached sources...")
+                    update_progress("jadx", "RUNNING", "JADX decompilation cache hit. Restoring decompiled sources...")
+                    shutil.copytree(cache_dir, jadx_out, dirs_exist_ok=True)
+                    jadx_partial_output = False
+                    update_progress("jadx", "COMPLETED", "Decompilation complete (restored from cache).")
+                    return
+
                 # Allocate JVM heap memory dynamically based on APK size (larger APK = more JVM RAM, but capped)
                 # For very large APKs on local developer machines, G1GC and 1 thread prevents system OOM/freeze
                 apk_size_mb = os.path.getsize(apk_path) / (1024 * 1024)
@@ -1332,6 +1422,12 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 )
                 if rc != 0:
                     logger.warning(f"JADX decompilation returned non-zero: {rc}")
+                
+                # After successful decompilation, save to cache
+                if os.path.exists(jadx_out) and os.listdir(jadx_out):
+                    os.makedirs(os.path.dirname(cache_dir), exist_ok=True)
+                    shutil.copytree(jadx_out, cache_dir, dirs_exist_ok=True)
+
                 jadx_partial_output = False
                 update_progress("jadx", "COMPLETED", "Decompilation complete. Custom Java application files successfully decompiled.")
             except subprocess.TimeoutExpired:

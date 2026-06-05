@@ -14,6 +14,7 @@ All hooks emit normalized events via send() with schema:
   }
 """
 
+import json
 from typing import List
 
 # --------------------------------------------------------------------------- #
@@ -376,7 +377,7 @@ try {
 
 try {
     var _SysProp = Java.use("android.os.SystemProperties");
-    var _vmKeys = """ + str(_VM_PROP_KEYWORDS) + """;
+    var _vmKeys = """ + json.dumps(_VM_PROP_KEYWORDS) + """;
     _SysProp.get.overload("java.lang.String").implementation = function(key) {
         var r = this.get(key);
         var k = String(key);

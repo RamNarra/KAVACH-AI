@@ -18,8 +18,8 @@ DANGEROUS_PERMISSIONS = {
     "android.permission.WRITE_CONTACTS": 15,
     "android.permission.ACCESS_FINE_LOCATION": 10,
     "android.permission.ACCESS_COARSE_LOCATION": 10,
-    "android.permission.RECORD_AUDIO": 15,
-    "android.permission.CAMERA": 15,
+    "android.permission.RECORD_AUDIO": 20,
+    "android.permission.CAMERA": 20,
     "android.permission.READ_PHONE_STATE": 10,
     "android.permission.SYSTEM_ALERT_WINDOW": 25,
     "android.permission.BIND_DEVICE_ADMIN": 25,
@@ -32,7 +32,7 @@ URL_REGEX = re.compile(r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?::\d+)?(?:/[^\s"
 SECRET_REGEX = re.compile(r'(?:api_key|apikey|secret|password|private_key|token|auth_token|jwt_token)\s*=\s*[\'"]([a-zA-Z0-9+/=_\-\.@]{16,})[\'"]', re.IGNORECASE)
 
 DANGEROUS_CODE_PATTERNS = [
-    ("http://", 5, "Cleartext HTTP traffic", "network_indicators"),
+    (re.compile(r'\"http://(?!(?:schemas\.android\.com|schemas\.xmlsoap\.org|www\.w3\.org|www\.oracle\.com|java\.sun\.com|android\.com/tools))([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})[^\s"\']*\"'), 5, "Cleartext HTTP traffic", "network_indicators"),
     ("Runtime.getRuntime().exec", 20, "Command execution via Runtime.exec", "reflection_dynamic_loading"),
     ("DexClassLoader", 20, "Dynamic code loading via DexClassLoader", "reflection_dynamic_loading"),
     ("ProcessBuilder", 15, "Command execution via ProcessBuilder", "reflection_dynamic_loading"),
@@ -41,7 +41,7 @@ DANGEROUS_CODE_PATTERNS = [
     ("checkServerTrusted", 15, "Insecure TrustManager (TrustAll)", "crypto_issues"),
     ("MODE_WORLD_READABLE", 10, "World-readable SharedPreferences", "data_storage_issues"),
     ("System.loadLibrary", 5, "Loading native libraries", "obfuscation_signals"),
-    ("Base64.decode", 2, "Base64 decoding (possible obfuscation)", "obfuscation_signals"),
+    (re.compile(r'Base64\.decode\s*\(\s*[\'"][A-Za-z0-9+/=]{20,}[\'"]'), 5, "Decoding of long hardcoded Base64 string", "obfuscation_signals"),
 ]
 
 def analyze_manifest(manifest_content: str) -> Dict[str, Any]:
@@ -168,8 +168,15 @@ def analyze_jadx(jadx_sources: Dict[str, str], jadx_out: str = None, package_nam
 
     for path, code in target_sources.items():
         # Match code patterns
-        for pattern_str, sc, desc, category in DANGEROUS_CODE_PATTERNS:
-            if pattern_str in code:
+        for pattern_item, sc, desc, category in DANGEROUS_CODE_PATTERNS:
+            matched = False
+            if isinstance(pattern_item, re.Pattern):
+                if pattern_item.search(code):
+                    matched = True
+            else:
+                if pattern_item in code:
+                    matched = True
+            if matched:
                 pattern_key = f"{path}:{desc}"
                 if pattern_key not in matched_patterns:
                     matched_patterns.add(pattern_key)
@@ -592,11 +599,7 @@ _RISKY_SUPERCLASSES = [
 
 def analyze_androguard(apk_path: str) -> Dict[str, Any]:
     """
-    Parse the APK's DEX bytecode with androguard to find:
-    1. Suspicious string constants (obfuscated C2 URLs, base64 blobs)
-    2. Dangerous API call chain patterns across methods
-    3. Risky class inheritance patterns (device admin, accessibility, etc.)
-    Returns structured findings — does not require emulation.
+    Parse the APK's DEX bytecode with androguard via standalone subprocess to bypass GIL.
     """
     findings: Dict[str, Any] = {
         "suspicious_strings": [],
@@ -608,130 +611,31 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
         return findings
 
     try:
-        from androguard.core.bytecodes.apk import APK
-        from androguard.core.bytecodes.dvm import DalvikVMFormat
+        import sys
+        import subprocess
+        import json
+        import tempfile
+        import os
         
-        a = APK(apk_path)
-        d_list = []
-        for dex in a.get_all_dex():
-            df = DalvikVMFormat(dex)
-            d_list.append(df)
-    except ImportError:
-        return findings
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            output_json = tmp.name
+        
+        analyzer_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "androguard_analyzer.py")
+        python_bin = sys.executable
+        
+        cmd = [python_bin, analyzer_script, apk_path, output_json]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        if proc.returncode == 0 and os.path.exists(output_json):
+            with open(output_json, "r") as f:
+                findings = json.load(f)
+                
+        if os.path.exists(output_json):
+            os.remove(output_json)
     except Exception as e:
-        return findings
-
-    seen_strings: set = set()
-    # Suspicious string patterns inside DEX constants
-    _STR_PATTERNS = [
-        (r"https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?[/\w]*", "Hardcoded IP URL",         15),
-        (r"https?://[a-zA-Z0-9-]+\.onion",                                  "Tor .onion C2 URL",       30),
-        (r"https?://[a-zA-Z0-9]+\.ngrok\.io",                               "ngrok Tunnel URL",        20),
-        (r"(?:[A-Za-z0-9+/]{4}){10,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", "Long Base64 Blob", 8),
-        (r"127\.0\.0\.1",                                                    "Loopback Listener Reference", 10),
-        (r"/system/bin/sh|/system/xbin/su|/bin/sh",                          "Shell Command Binary Reference", 25),
-        (r"\.dex|\.jar|\.so",                                                "Dynamic Executable File Target", 15),
-    ]
-    try:
-        for d in d_list:
-            if len(findings["suspicious_strings"]) >= 100:
-                break
-            for val_raw in d.get_strings():
-                if len(findings["suspicious_strings"]) >= 100:
-                    break
-                if isinstance(val_raw, bytes):
-                    val = val_raw.decode('utf-8', errors='ignore')
-                else:
-                    val = str(val_raw)
-                    
-                if len(val) < 12:
-                    continue
-                    
-                # Quick C-optimized pre-filter to bypass 99% of normal strings without regular expressions
-                if not any(x in val for x in ("://", "127.0.0.1", "/bin/", ".dex", ".jar", ".so", "==", "=")) and len(val) < 40:
-                    continue
-                    
-                for pat, label, sc in _STR_PATTERNS:
-                    if re.search(pat, val) and val not in seen_strings:
-                        if label == "Long Base64 Blob":
-                            if val.startswith("L") and val.endswith(";"):
-                                continue
-                            # Skip short strings that can't be meaningful Base64
-                            if len(val) < 20:
-                                continue
-                            # Skip pure-alphanumeric strings without Base64 padding/special chars
-                            if not any(c in val for c in ('+', '=')) and '/' not in val:
-                                continue
-                            if "/" in val and not any(x in val for x in ("+", "=")):
-                                if re.match(r"^L?[a-zA-Z0-9_]+(/[a-zA-Z0-9_]+)+;?$", val):
-                                    continue
-                        seen_strings.add(val)
-                        findings["suspicious_strings"].append({
-                            "type": label,
-                            "value": val[:120],
-                            "risk_score": sc,
-                            "severity": "HIGH",
-                            "description": f"{label} found in bytecode constant: {val[:60]}"
-                        })
-                        findings["score"] += sc
-                        break
-    except Exception:
-        pass
-
-    # Dangerous API chain detection (O(1) exact name lookup using a pre-built set to prevent slow iterative scans)
-    try:
-        available_methods = set()
-        for d in d_list:
-            for cls in d.get_classes():
-                for m in cls.get_methods():
-                    m_name = m.name
-                    if isinstance(m_name, bytes):
-                        m_name = m_name.decode('utf-8', errors='ignore')
-                    else:
-                        m_name = str(m_name or "")
-                    available_methods.add(m_name)
-            
-        for read_api, write_api, label, score in _DANGEROUS_API_CHAINS:
-            if read_api in available_methods and write_api in available_methods:
-                findings["dangerous_api_chains"].append({
-                    "type": label,
-                    "risk_score": score,
-                    "severity": "CRITICAL" if score >= 25 else "HIGH",
-                    "description": f"API chain detected: {read_api} → {write_api} ({label})"
-                })
-                findings["score"] += score
-    except Exception:
-        pass
-
-    # Risky superclass detection
-    try:
-        for d in d_list:
-            for cls in d.get_classes():
-                sup_raw = cls.get_superclassname()
-                if isinstance(sup_raw, bytes):
-                    sup = sup_raw.decode('utf-8', errors='ignore')
-                else:
-                    sup = str(sup_raw or "")
-                    
-                for risky_cls, label, score in _RISKY_SUPERCLASSES:
-                    if risky_cls in sup:
-                        cls_name_raw = cls.name
-                        if isinstance(cls_name_raw, bytes):
-                            class_name = cls_name_raw.decode('utf-8', errors='ignore')
-                        else:
-                            class_name = str(cls_name_raw or "")
-                        class_name = class_name.replace("/", ".").strip("L;")
-                        findings["risky_classes"].append({
-                            "class": class_name,
-                            "type": label,
-                            "risk_score": score,
-                            "severity": "HIGH",
-                            "description": f"Class `{class_name}` extends {risky_cls} ({label})"
-                        })
-                        findings["score"] += score
-    except Exception:
-        pass
-
+        import logging
+        logging.getLogger("kavach").error(f"In-process Androguard analyzer subprocess execution failed: {e}")
+        
     return findings
 
 

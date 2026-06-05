@@ -702,6 +702,11 @@ def chat_with_analyst(request: ChatRequest, http_request: Request):
         analysis_data = snapshot.to_dict()
         _assert_doc_access(http_request, analysis_data)
         
+        chat_count = analysis_data.get("chat_count", 0)
+        if chat_count >= 10:
+            raise HTTPException(status_code=429, detail="Chat message limit of 10 messages per analysis has been reached.")
+        doc_ref.update({"chat_count": chat_count + 1})
+        
         summary = analysis_data.get("investigation_report", {}).get("summary", "")
         verdict = analysis_data.get("investigation_report", {}).get("executive_verdict", "")
         vulns = analysis_data.get("investigation_report", {}).get("code_vulnerabilities", [])

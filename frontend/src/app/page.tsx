@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect } from '../lib/api';
+import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect, fetchHistory, printExecutiveReport } from '../lib/api';
 import { DEMO_ANALYSIS } from '../lib/demo';
 import type { AnalysisDoc, ThreatLevel, VirusTotalSummary } from '../lib/types';
 import { livelyScanHeadline, runningStepKeys } from '../lib/scan-messages';
@@ -25,7 +25,8 @@ const threatColor: Record<ThreatLevel, string> = {
 };
 
 export default function Home() {
-  const [history] = useState<AnalysisDoc[]>([]);
+  const [history, setHistory] = useState<AnalysisDoc[]>([]);
+  const [dragActive, setDragActive] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [active, setActive] = useState<AnalysisDoc | null>(null);
   const [isDemo, setIsDemo] = useState(false);
@@ -47,9 +48,17 @@ export default function Home() {
   const [storyTab, setStoryTab] = useState<'static' | 'dynamic' | 'final'>('static');
   const [estSecondsRemaining, setEstSecondsRemaining] = useState(30);
 
+  const loadHistory = useCallback(async () => {
+    try {
+      const hist = await fetchHistory();
+      setHistory(hist);
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => {
     fetchSandboxHealth().then((h) => setSandboxOk(h.sandbox_status === 'READY'));
-  }, []);
+    loadHistory();
+  }, [loadHistory]);
 
   // Poll backend for live analysis status (replaces Firestore real-time listener)
   // Adaptive polling: only polls while backend processing is active.
@@ -78,6 +87,9 @@ export default function Home() {
             setActive(nextActive);
             if (nextActive.evidence?.dynamic_analysis?.status === 'COMPLETED') {
               setStoryTab('final');
+            }
+            if (nextActive.status === 'COMPLETED' || nextActive.status === 'FAILED') {
+              loadHistory();
             }
           }
         }
@@ -110,6 +122,7 @@ export default function Home() {
       setUploading(false);
       setActiveId(data.id);
       setFile(null);
+      loadHistory();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Upload failed.');
     } finally {
@@ -166,6 +179,7 @@ export default function Home() {
     setSummaryExpanded(false);
     setMitreExpanded(false);
     setStoryTab('static');
+    loadHistory();
   };
 
   const current = isDemo ? active : activeId ? active : null;
@@ -265,10 +279,43 @@ export default function Home() {
     return Math.max(2, est);
   })();
 
-  const displayedSecondsRemaining =
-    baseEstimate < estSecondsRemaining || Math.abs(baseEstimate - estSecondsRemaining) > 8
-      ? baseEstimate
-      : estSecondsRemaining;
+  const displayedSecondsRemaining = estSecondsRemaining;
+
+  useEffect(() => {
+    if (view === 'scan') {
+      setEstSecondsRemaining((prev) => {
+        if (baseEstimate > prev || Math.abs(baseEstimate - prev) > 5) {
+          return baseEstimate;
+        }
+        return prev;
+      });
+    }
+  }, [baseEstimate, view]);
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const f = e.dataTransfer.files[0];
+      if (f.name.endsWith('.apk')) {
+        setFile(f);
+        setError(null);
+      } else {
+        setError('APK files only.');
+      }
+    }
+  };
 
   useEffect(() => {
     if (view !== 'scan') return;
@@ -431,44 +478,52 @@ export default function Home() {
                 <p className="text-[15px] text-[var(--muted)]">Initiate sandbox, manifest, and deep static auditing.</p>
               </div>
 
-              <label className="block cursor-pointer group">
-                <input type="file" accept=".apk" className="sr-only" onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f?.name.endsWith('.apk')) { setFile(f); setError(null); }
-                  else setError('APK files only.');
-                }} />
-                
-                {!file ? (
-                  <div className="rounded-3xl border border-dashed border-[var(--border)] bg-zinc-950/20 px-8 py-16 text-center group-hover:border-[var(--blue-glow)] hover:bg-zinc-950/30 transition-all duration-300 flex flex-col items-center justify-center space-y-5 relative overflow-hidden">
-                    <div className="relative flex items-center justify-center w-16 h-16 rounded-full bg-zinc-900 border border-[var(--border)] group-hover:border-[var(--blue)]/30 transition-all duration-300">
-                      <div className="absolute inset-0 rounded-full border border-[var(--blue)]/10 animate-ping opacity-30 pointer-events-none" />
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-7 h-7 text-[var(--muted)] group-hover:text-[var(--blue)] transition-colors">
-                        <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242" />
-                        <path d="M12 12v9" />
-                        <path d="m16 16-4-4-4 4" />
-                      </svg>
+              <div 
+                className="w-full relative"
+                onDragEnter={handleDrag}
+                onDragOver={handleDrag}
+                onDragLeave={handleDrag}
+                onDrop={handleDrop}
+              >
+                <label className="block cursor-pointer group">
+                  <input type="file" accept=".apk" className="sr-only" onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f?.name.endsWith('.apk')) { setFile(f); setError(null); }
+                    else setError('APK files only.');
+                  }} />
+                  
+                  {!file ? (
+                    <div className={`rounded-3xl border border-dashed px-8 py-16 text-center transition-all duration-300 flex flex-col items-center justify-center space-y-5 relative overflow-hidden ${dragActive ? 'border-[var(--blue)] bg-zinc-900/40 shadow-[0_0_25px_rgba(77,144,254,0.15)] scale-[1.02]' : 'border-[var(--border)] bg-zinc-950/20 group-hover:border-[var(--blue-glow)] hover:bg-zinc-950/30'}`}>
+                      <div className="relative flex items-center justify-center w-16 h-16 rounded-full bg-zinc-900 border border-[var(--border)] group-hover:border-[var(--blue)]/30 transition-all duration-300">
+                        <div className="absolute inset-0 rounded-full border border-[var(--blue)]/10 animate-ping opacity-30 pointer-events-none" />
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-7 h-7 text-[var(--muted)] group-hover:text-[var(--blue)] transition-colors">
+                          <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242" />
+                          <path d="M12 12v9" />
+                          <path d="m16 16-4-4-4 4" />
+                        </svg>
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-[17px] font-semibold text-zinc-100 group-hover:text-[var(--blue)] transition-colors">Select target APK file</p>
+                        <p className="text-[13px] text-[var(--muted)] max-w-sm leading-relaxed">Drag and drop your file here, or click to browse local files for static & dynamic evaluation.</p>
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      <p className="text-[17px] font-semibold text-zinc-100 group-hover:text-[var(--blue)] transition-colors">Select target APK file</p>
-                      <p className="text-[13px] text-[var(--muted)] max-w-sm leading-relaxed">Drag and drop your file here, or click to browse local files for static & dynamic evaluation.</p>
+                  ) : (
+                    <div className="rounded-3xl border border-[var(--blue)]/30 bg-zinc-950/45 px-8 py-10 text-center flex flex-col items-center justify-center space-y-4 transition-all duration-300 relative overflow-hidden">
+                      <div className="laser-scanner" />
+                      <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-[var(--blue)]/10 border border-[var(--blue)]/20 text-[var(--blue)]">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
+                          <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                          <polyline points="14 2 14 8 20 8" />
+                        </svg>
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-[17px] font-semibold text-zinc-100">{file.name}</p>
+                        <p className="text-[13px] text-[var(--muted)]">Size: {file.size > 1024 * 1024 ? `${(file.size / (1024 * 1024)).toFixed(2)} MB` : `${(file.size / 1024).toFixed(1)} KB`} | Format: Android Application</p>
+                      </div>
                     </div>
-                  </div>
-                ) : (
-                  <div className="rounded-3xl border border-[var(--blue)]/30 bg-zinc-950/45 px-8 py-10 text-center flex flex-col items-center justify-center space-y-4 transition-all duration-300 relative overflow-hidden">
-                    <div className="laser-scanner" />
-                    <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-[var(--blue)]/10 border border-[var(--blue)]/20 text-[var(--blue)]">
-                      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6">
-                        <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-                        <polyline points="14 2 14 8 20 8" />
-                      </svg>
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-[17px] font-semibold text-zinc-100">{file.name}</p>
-                      <p className="text-[13px] text-[var(--muted)]">Size: {file.size > 1024 * 1024 ? `${(file.size / (1024 * 1024)).toFixed(2)} MB` : `${(file.size / 1024).toFixed(1)} KB`} | Format: Android Application</p>
-                    </div>
-                  </div>
-                )}
-              </label>
+                  )}
+                </label>
+              </div>
 
               {error && <p className="text-[14px] text-[var(--red)] text-center font-medium">{error}</p>}
 
@@ -590,7 +645,7 @@ export default function Home() {
                     logs={current.logs || []}
                     chatOpen={chatOpen}
                     setChatOpen={setChatOpen}
-                    downloadReport={() => downloadReport(current.id)}
+                    downloadReport={() => printExecutiveReport(current)}
                     isDemo={isDemo}
                     reset={reset}
                   />

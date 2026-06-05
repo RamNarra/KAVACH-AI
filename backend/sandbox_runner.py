@@ -74,6 +74,7 @@ def sandboxed_run(
             "--memory", "3g",                           # OOM bomb cap
             "--memory-swap", "3g",                      # No swap escape
             "--cpus", "2",                              # CPU cap
+            "--pids-limit", "100",                      # Fork-bomb protection
             "--user", "nobody",                         # Non-root
             "--read-only",                              # Immutable container FS
             "--tmpfs", "/tmp:size=512m",                # Writable /tmp in RAM only
@@ -117,6 +118,7 @@ def sandboxed_popen(
             "--memory", "3g",
             "--memory-swap", "3g",
             "--cpus", "2",
+            "--pids-limit", "100",                      # Fork-bomb protection
             "--user", "nobody",
             "--read-only",
             "--tmpfs", "/tmp:size=512m",

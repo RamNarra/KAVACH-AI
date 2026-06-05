@@ -197,6 +197,19 @@ def run_behavioral_trace(
             "error_message": "Invalid package name format. Security validation failed."
         }
 
+    # Sanitize launcher_activity to prevent ADB shell injections
+    if launcher_activity and not re.match(r"^[a-zA-Z0-9_\.\$]+$", launcher_activity):
+        log_event(f"Security check failed: Launcher activity '{launcher_activity}' contains invalid characters.", is_error=True)
+        return {
+            "status": "FAILED",
+            "events": [],
+            "normalized_events": [],
+            "trigger_transcript": [],
+            "event_count": 0,
+            "duration_seconds": duration,
+            "error_message": "Invalid launcher activity format. Security validation failed."
+        }
+
     try:
         import sandbox_bootstrap
         sandbox_info = sandbox_bootstrap.ensure_sandbox_ready()

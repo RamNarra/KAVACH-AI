@@ -19,9 +19,9 @@ SMS_PERMS = {
 OVERLAY_PERMS = {"android.permission.SYSTEM_ALERT_WINDOW"}
 A11Y_PERMS = {"android.permission.BIND_ACCESSIBILITY_SERVICE"}
 
-UPI_SCHEMES = re.compile(r"upi://|phonepe://|paytmmp://|gpay://|bhim://", re.I)
+UPI_SCHEMES = re.compile(r"upi://|phonepe://|paytmmp://|gpay://|bhim://|tez://|imobile://|yonosbi://|yono://|hdfcbank://|hdfc://|axispay://|axis://|kotakbank://|kotak://|indmobile://", re.I)
 BANK_KEYWORDS = re.compile(
-    r"\b(bank|upi|wallet|otp|pin|credential|login|account|transfer|ifsc|card)\b",
+    r"\b(bank|upi|wallet|otp|pin|credential|login|account|transfer|ifsc|card|rupee|lakh|crore|neft|rtgs|nach|aadhaar|pan|cibil|sbi|boi|hdfc|icici|kotak|axis|paytm|phonepe)\b",
     re.I,
 )
 
@@ -135,7 +135,7 @@ def analyze_banking_fraud(
     # Credential exfil at runtime
     for ev in runtime_events:
         evidence = str(ev.get("evidence") or ev.get("action") or "")
-        if BANK_KEYWORDS.search(evidence) and re.search(r"http://", evidence, re.I):
+        if BANK_KEYWORDS.search(evidence) and re.search(r"https?://", evidence, re.I):
             badges.append(
                 _badge(
                     "BANK-CRED-EXFIL",

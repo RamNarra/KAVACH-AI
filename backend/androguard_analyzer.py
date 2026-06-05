@@ -59,11 +59,15 @@ def run_analysis(apk_path: str, output_path: str):
     }
 
     try:
+        from androguard.core.analysis.analysis import Analysis
         a = APK(apk_path)
         d_list = []
+        dx = Analysis()
         for dex in a.get_all_dex():
             df = DalvikVMFormat(dex)
             d_list.append(df)
+            dx.add(df)
+        dx.create_xref()
     except Exception as e:
         # Save empty findings if APK parsing fails
         with open(output_path, "w") as f:
@@ -110,30 +114,73 @@ def run_analysis(apk_path: str, output_path: str):
                     findings["score"] += sc
                     break
 
-    # 2. Dangerous API Chains (O(1) exact name lookup using a pre-built set to prevent slow iterative scans)
-    available_methods = set()
-    for d in d_list:
-        try:
-            for cls in d.get_classes():
-                for m in cls.get_methods():
-                    m_name = m.name
-                    if isinstance(m_name, bytes):
-                        m_name = m_name.decode('utf-8', errors='ignore')
-                    else:
-                        m_name = str(m_name or "")
-                    available_methods.add(m_name)
-        except Exception:
-            pass
+    # 2. Dangerous API Chains (Reachability Call Graph analysis up to depth 2)
+    # Map each user-defined method to the set of method names it calls (depth 1)
+    # and also collect direct user method calls.
+    direct_calls = {} # MethodAnalysis -> set of called method names (str)
+    user_calls = {}   # MethodAnalysis -> set of called MethodAnalysis (user methods)
+    
+    try:
+        for c_anal in dx.get_classes():
+            if c_anal.is_external():
+                continue
+            for m_anal in c_anal.get_methods():
+                if m_anal.is_external():
+                    continue
+                
+                d_calls = set()
+                u_calls = set()
+                try:
+                    for _, call, _ in m_anal.get_xref_to():
+                        m_name = call.name
+                        if isinstance(m_name, bytes):
+                            m_name = m_name.decode('utf-8', errors='ignore')
+                        else:
+                            m_name = str(m_name or "")
+                        d_calls.add(m_name)
+                        
+                        # Check if target of call is an internal user method
+                        if not getattr(call, "is_external", lambda: True)():
+                            u_calls.add(call)
+                except Exception:
+                    pass
+                direct_calls[m_anal] = d_calls
+                user_calls[m_anal] = u_calls
 
-    for read_api, write_api, label, score in _DANGEROUS_API_CHAINS:
-        if read_api in available_methods and write_api in available_methods:
-            findings["dangerous_api_chains"].append({
-                "type": label,
-                "risk_score": score,
-                "severity": "CRITICAL" if score >= 25 else "HIGH",
-                "description": f"API chain detected: {read_api} → {write_api} ({label})"
-            })
-            findings["score"] += score
+        # Expand calls to depth 2 (1 degree of separation)
+        reachable_methods = {}
+        for m_anal in direct_calls:
+            reach = set(direct_calls[m_anal])
+            for sub_m in user_calls[m_anal]:
+                if sub_m in direct_calls:
+                    reach.update(direct_calls[sub_m])
+            reachable_methods[m_anal] = reach
+
+        # Match API chains in the reachable method sets
+        matched_chains = set()
+        for read_api, write_api, label, score in _DANGEROUS_API_CHAINS:
+            # Check if any user method has both APIs in its reachable set
+            for m_anal, reach in reachable_methods.items():
+                if read_api in reach and write_api in reach:
+                    chain_key = f"{read_api}:{write_api}"
+                    if chain_key not in matched_chains:
+                        matched_chains.add(chain_key)
+                        
+                        # Get caller class name
+                        c_name = m_anal.class_name
+                        if isinstance(c_name, bytes):
+                            c_name = c_name.decode('utf-8', errors='ignore')
+                        c_name = str(c_name or "").replace("/", ".").strip("L;")
+                        
+                        findings["dangerous_api_chains"].append({
+                            "type": label,
+                            "risk_score": score,
+                            "severity": "CRITICAL" if score >= 25 else "HIGH",
+                            "description": f"API chain detected in {c_name}: {read_api} → {write_api} ({label})"
+                        })
+                        findings["score"] += score
+    except Exception as exc:
+        print(f"Error in API chain reachability audit: {exc}")
 
     # 3. Risky Superclasses
     for d in d_list:
