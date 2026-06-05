@@ -135,6 +135,19 @@ def _write_downloaded_apk(raw_bytes: bytes, destination_path: str) -> None:
     with open(destination_path, "wb") as f:
         f.write(payload)
 
+    # Zipbomb guard: verify uncompressed size doesn't exceed 512MB
+    MAX_UNCOMPRESSED_SIZE = 1024 * 1024 * 512 # 512MB limit
+    try:
+        import zipfile
+        with zipfile.ZipFile(destination_path, 'r') as zf:
+            total_uncompressed = sum(info.file_size for info in zf.infolist())
+            if total_uncompressed > MAX_UNCOMPRESSED_SIZE:
+                raise Exception("APK uncompressed content exceeds 512MB limit. Possible zipbomb detected.")
+    except Exception as e:
+        if os.path.exists(destination_path):
+            os.remove(destination_path)
+        raise
+
 
 def _download_apk_to_path(apk_url: str, destination_path: str) -> None:
     parsed = urlparse(apk_url)

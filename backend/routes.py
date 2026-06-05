@@ -25,6 +25,32 @@ logger = logging.getLogger("kavach-api")
 # APIRouter — registered onto the FastAPI app in main.py via app.include_router()
 router = APIRouter()
 
+from collections import defaultdict
+
+class InMemRateLimiter:
+    def __init__(self, requests_limit: int, window_secs: int):
+        self.requests_limit = requests_limit
+        self.window_secs = window_secs
+        self.history = defaultdict(list)
+        self.lock = threading.Lock()
+
+    def check(self, key: str) -> bool:
+        now = time.time()
+        with self.lock:
+            self.history[key] = [t for t in self.history[key] if now - t < self.window_secs]
+            if len(self.history[key]) >= self.requests_limit:
+                return False
+            self.history[key].append(now)
+            return True
+
+# Rate limiters:
+# 1. Static scans (URLs / Uploads): 5 requests per 2 minutes per IP
+# 2. Dynamic analysis scans: 2 requests per 5 minutes per IP
+# 3. Chat endpoint: 15 requests per 1 minute per IP
+static_scan_limiter = InMemRateLimiter(5, 120)
+dynamic_scan_limiter = InMemRateLimiter(2, 300)
+chat_limiter = InMemRateLimiter(15, 60)
+
 # ─── Shared globals injected from main.py ──────────────────────────────────────
 # These are set by main.py after import via routes.inject_globals()
 db = None
@@ -574,6 +600,10 @@ def trigger_dynamic_analysis(
     http_request: Request,
     background_tasks: BackgroundTasks,
 ):
+    client_ip = http_request.client.host if (http_request.client and http_request.client.host) else None
+    if client_ip and not dynamic_scan_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many dynamic analysis requests. Rate limit exceeded.")
+
     verified_uid = _request_owner(http_request, request.uid)
     
     doc_ref = db.collection("apkanalysisresults").document(id)
@@ -657,6 +687,10 @@ def get_analysis(id: str, http_request: Request):
 
 @router.post("/api/chat")
 def chat_with_analyst(request: ChatRequest, http_request: Request):
+    client_ip = http_request.client.host if (http_request.client and http_request.client.host) else None
+    if client_ip and not chat_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many chat requests. Rate limit exceeded.")
+
     if not request.analysis_id or not request.message:
         raise HTTPException(status_code=400, detail="Missing required parameters")
     
@@ -842,6 +876,10 @@ def analyze_apk_upload(
     uid: str | None = Form(None),
     background: bool = True,
 ):
+    client_ip = http_request.client.host if (http_request.client and http_request.client.host) else None
+    if client_ip and not static_scan_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many analysis requests. Rate limit exceeded.")
+
     verified_uid = _request_owner(http_request, uid)
     
     # Sanitize original filename — strip path separators and control characters
@@ -960,6 +998,10 @@ def analyze_apk(
     background_tasks: BackgroundTasks,
     background: bool = True,
 ):
+    client_ip = http_request.client.host if (http_request.client and http_request.client.host) else None
+    if client_ip and not static_scan_limiter.check(client_ip):
+        raise HTTPException(status_code=429, detail="Too many analysis requests. Rate limit exceeded.")
+
     verified_uid = _request_owner(http_request, request.uid)
     request.uid = verified_uid
     apk_url = request.apk_url
