@@ -459,7 +459,7 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
             _log("Dispatching UI layout to Gemini Flash for input classification...")
             try:
                 ai_response = client.models.generate_content(
-                    model="gemini-3.5-flash",
+                    model="gemini-2.5-flash",
                     contents=prompt,
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -467,9 +467,9 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
                     )
                 )
             except Exception as exc:
-                _log(f"Primary model gemini-3.5-flash failed in playbook: {exc}. Engaging secondary fallback model gemini-3.1-flash-lite...")
+                _log(f"Primary model gemini-2.5-flash failed in playbook: {exc}. Engaging secondary fallback model gemini-2.5-flash-lite...")
                 ai_response = client.models.generate_content(
-                    model="gemini-3.1-flash-lite",
+                    model="gemini-2.5-flash-lite",
                     contents=prompt,
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",

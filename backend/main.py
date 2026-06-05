@@ -327,11 +327,11 @@ if os.path.isdir(tools_dir):
 # Load environment configurations
 PROJECT_ID = os.environ.get("PROJECT_ID", "kavach-ai-497708")
 LOCATION = os.environ.get("LOCATION", "global")
-STATIC_MODEL = "gemini-3.5-flash"
-DYNAMIC_MODEL = "gemini-3.5-flash"
-CHAT_MODEL = "gemini-3.5-flash"
+STATIC_MODEL = "gemini-2.5-flash"
+DYNAMIC_MODEL = "gemini-2.5-flash"
+CHAT_MODEL = "gemini-2.5-flash"
 MODEL_NAME = STATIC_MODEL
-FALLBACK_MODEL = "gemini-3.1-flash-lite"
+FALLBACK_MODEL = "gemini-2.5-flash-lite"
 
 # Decide where to put temporary extraction files to avoid RAM exhaustion on tmpfs systems
 SCAN_TEMP_DIR = os.environ.get("SCAN_TEMP_DIR", os.path.join(_BACKEND_DIR, "tmp_scans"))
