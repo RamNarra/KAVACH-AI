@@ -453,8 +453,9 @@ export default function Home() {
         const answer = await sendChat(current.id, msg);
         setChatLog((l) => [...l, { role: 'ai', text: answer }]);
       }
-    } catch {
-      setChatLog((l) => [...l, { role: 'ai', text: 'Could not reach analyst. Try again.' }]);
+    } catch (err: any) {
+      const errMsg = err?.message || 'Could not reach analyst. Try again.';
+      setChatLog((l) => [...l, { role: 'ai', text: errMsg }]);
     } finally {
       setChatBusy(false);
     }
