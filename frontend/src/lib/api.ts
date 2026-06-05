@@ -388,13 +388,26 @@ export function printExecutiveReport(doc: AnalysisDoc) {
   </div>
 
   <h2 class="section-title">2. Analysis Summary Narrative</h2>
-  <p style="font-size: 15px; line-height: 1.6; color: #374151; white-space: pre-line; margin-bottom: 24px;">
-    ${doc.investigation_report?.summary || 'No summary compiled.'}
+  
+  <h3 style="font-size: 16px; margin-top: 15px; font-weight: 700; color: #1F2937; border-bottom: 1px solid #F3F4F6; padding-bottom: 4px;">🔧 Security Operations (SOC) Summary</h3>
+  <p style="font-size: 14px; line-height: 1.6; color: #4B5563; white-space: pre-line; margin-bottom: 20px;">
+    ${doc.investigation_report?.summary || doc.static_analysis?.investigation_report?.summary || 'No SOC summary compiled.'}
   </p>
-  ${doc.investigation_report?.dynamic_summary ? `
-    <h3 style="font-size: 16px; margin-top: 20px; font-weight: 700; color: #111827;">Behavioral Sandbox Audit Notes:</h3>
-    <p style="font-size: 15px; line-height: 1.6; color: #374151; white-space: pre-line;">
-      ${doc.investigation_report.dynamic_summary}
+
+  <h3 style="font-size: 16px; margin-top: 15px; font-weight: 700; color: #B45309; border-bottom: 1px solid #FDF2E9; padding-bottom: 4px;">🏦 Bank frontline Agent Alert</h3>
+  <p style="font-size: 14px; line-height: 1.6; color: #78350F; white-space: pre-line; margin-bottom: 20px; padding: 12px; background-color: #FEF3C7; border-left: 4px solid #F59E0B; border-radius: 6px;">
+    ${doc.investigation_report?.bank_agent_alert || doc.static_analysis?.investigation_report?.bank_agent_alert || 'No frontline warning compiled.'}
+  </p>
+
+  <h3 style="font-size: 16px; margin-top: 15px; font-weight: 700; color: #111827; border-bottom: 1px solid #F3F4F6; padding-bottom: 4px;">📋 CISO Executive Brief</h3>
+  <p style="font-size: 14px; line-height: 1.6; color: #374151; white-space: pre-line; margin-bottom: 20px; padding: 12px; background-color: #F9FAFB; border-left: 4px solid #4B5563; border-radius: 6px;">
+    ${doc.investigation_report?.ciso_brief || doc.static_analysis?.investigation_report?.ciso_brief || 'No executive brief compiled.'}
+  </p>
+
+  ${(doc.investigation_report?.dynamic_summary || doc.investigation_report?.final_report) ? `
+    <h3 style="font-size: 16px; margin-top: 20px; font-weight: 700; color: #111827; border-bottom: 1px solid #F3F4F6; padding-bottom: 4px;">Behavioral Sandbox Audit & Combined Advisory:</h3>
+    <p style="font-size: 14px; line-height: 1.6; color: #4B5563; white-space: pre-line; margin-bottom: 20px;">
+      ${doc.investigation_report?.final_report || doc.investigation_report?.dynamic_summary || ''}
     </p>
   ` : ''}
 

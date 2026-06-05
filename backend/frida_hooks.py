@@ -378,9 +378,10 @@ try {
 try {
     var _SysProp = Java.use("android.os.SystemProperties");
     var _vmKeys = """ + json.dumps(_VM_PROP_KEYWORDS) + """;
-    _SysProp.get.overload("java.lang.String").implementation = function(key) {
-        var r = this.get(key);
+    
+    function checkVMKey(key, value) {
         var k = String(key);
+        var r = String(value);
         var isVM = _vmKeys.some(function(vk) { return k.indexOf(vk) !== -1; });
         if (isVM) {
             _emit("anti_vm.signal", "property_check", "high",
@@ -388,6 +389,17 @@ try {
                   { key: _trunc(k, 80), value: _trunc(r, 80) },
                   "VM property check: " + _trunc(k, 80) + " = " + _trunc(r, 60));
         }
+    }
+
+    _SysProp.get.overload("java.lang.String").implementation = function(key) {
+        var r = this.get(key);
+        checkVMKey(key, r);
+        return r;
+    };
+
+    _SysProp.get.overload("java.lang.String", "java.lang.String").implementation = function(key, def) {
+        var r = this.get(key, def);
+        checkVMKey(key, r);
         return r;
     };
 } catch(e) {}

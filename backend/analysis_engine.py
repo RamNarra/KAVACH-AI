@@ -2,7 +2,10 @@ import json
 import re
 import os
 import xml.etree.ElementTree as ET
+import logging
 from typing import Dict, Any, List
+
+logger = logging.getLogger("kavach")
 
 _PRUNED_LIBS = {
     "androidx", "android.support", "kotlin", "kotlinx", "okio", "okhttp3", 
@@ -157,7 +160,8 @@ def analyze_jadx(jadx_sources: Dict[str, str], jadx_out: str = None, package_nam
                     with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                         rel_key = os.path.relpath(fpath, jadx_out)
                         target_sources[rel_key] = fh.read()
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Failed to read JADX source file {fpath}: {e}")
                     continue
     
     if not target_sources:
@@ -278,8 +282,8 @@ def analyze_apkid(apkid_json_path: str) -> Dict[str, Any]:
                         "risk_score": 5,
                         "description": f"Manipulated with {manip}"
                     })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to analyze APKiD JSON: {e}")
     
     return findings
 
@@ -303,7 +307,8 @@ def analyze_quark(quark_json_path: str) -> Dict[str, Any]:
                 confidence = crime.get("confidence", "0%")
                 try:
                     conf_val = float(confidence.replace("%", "")) / 100.0
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Failed to parse Quark confidence '{confidence}': {e}")
                     conf_val = 0.0
 
                 if conf_val >= 0.6:  # only include high confidence hits
@@ -322,8 +327,8 @@ def analyze_quark(quark_json_path: str) -> Dict[str, Any]:
                         "confidence": confidence,
                         "risk_score": risk_sc
                     })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to analyze Quark JSON: {e}")
     return findings
 
 
@@ -354,8 +359,8 @@ def analyze_network_security_config(apktool_out: str, manifest_content: str) -> 
                     # e.g., @xml/network_security_config -> network_security_config
                     cfg_name = cfg_attr.split("/")[-1]
                     config_file = os.path.join(apktool_out, "res", "xml", f"{cfg_name}.xml")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to parse manifest for network security config: {e}")
 
     # Fallback to default name if not found
     if not config_file or not os.path.exists(config_file):
@@ -406,8 +411,8 @@ def analyze_network_security_config(apktool_out: str, manifest_content: str) -> 
                                 "description": "App trusts ALL certificates (disables TLS verification completely).",
                                 "source": "xml"
                             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to parse network security config XML: {e}")
 
     # 3. Augment / Walk sibling JADX decompiled sources to scan for plaintext cleartext protocols in Java files.
     # This guarantees the Network Config tab is rich and populated with code cleartext protocols even if XML is missing.
@@ -443,7 +448,8 @@ def analyze_network_security_config(apktool_out: str, manifest_content: str) -> 
                 try:
                     with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                         content = fh.read()
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Failed to read JADX source for cleartext search {fpath}: {e}")
                     continue
                 
                 if "http://" in content:
@@ -535,14 +541,16 @@ def analyze_secrets(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             try:
                 with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                     content = fh.read()
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to read JADX source for secrets search {fpath}: {e}")
                 continue
 
             rel = os.path.relpath(fpath, jadx_out)
             for label, pattern, score in _SECRET_PATTERNS:
                 try:
                     matches = re.findall(pattern, content)
-                except re.error:
+                except re.error as e:
+                    logger.warning(f"Regex error scanning secrets pattern {label}: {e}")
                     continue
                 for m in matches:
                     val = m if isinstance(m, str) else str(m)
@@ -691,8 +699,8 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
                                 })
                                 findings["score"] += 10 if severity == "HIGH" else 5
                             return findings
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to query MobSF: {e}")
 
     # High-Fidelity Local Fallback: Generates standardized OWASP Mobile Top 10 indicators
     findings["scorecard"].append({
@@ -773,8 +781,8 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                             "type": "semgrep"
                         })
                         findings["score"] += 10 if sev == "ERROR" else 5
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to run Semgrep subprocess: {e}")
 
     # High-Fidelity Local Heuristics: Scans Java files for MASTG violations.
     # Runs always to augment/supplement Semgrep with JADX-compiled integer-literal equivalents.
@@ -823,7 +831,8 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             try:
                 with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                     content = fh.read()
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to read JADX source for Semgrep search {fpath}: {e}")
                 continue
                 
             rel = os.path.relpath(fpath, jadx_out)
@@ -897,10 +906,10 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                             "description": f"Verified API key detected: ({redacted})"
                         })
                         findings["score"] += 15
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        logger.debug(f"Failed to parse TruffleHog JSON line: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to run TruffleHog subprocess: {e}")
 
     # High-Fidelity Local Heuristics: Traces high-entropy strings (Shannon Entropy > 4.5)
     def calculate_shannon_entropy(data: str) -> float:
@@ -949,7 +958,8 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             try:
                 with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                     content = fh.read()
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to read JADX source for Shannon Entropy search {fpath}: {e}")
                 continue
                 
             rel = os.path.relpath(fpath, jadx_out)
@@ -1297,7 +1307,7 @@ def calculate_deterministic_score(
                 "risk_score": v["risk_score"]
             })
 
-    # Format description summaries for Vertex AI prompt context
+    # Format description summaries for Gemini prompt context
     manifest_details = [f"- {p['description']}" for p in evidence["permissions"]]
     manifest_details += [f"- {ec['description']}: {ec['name']}" for ec in evidence["exported_components"]]
     manifest_details += [f"- {f['description']}" for f in evidence["dangerous_manifest_flags"]]

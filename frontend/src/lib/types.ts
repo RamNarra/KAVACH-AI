@@ -60,6 +60,8 @@ export interface AnalysisDoc {
     attack_techniques?: AttackTechnique[];
     investigation_report?: {
       summary?: string;
+      bank_agent_alert?: string;
+      ciso_brief?: string;
       executive_verdict?: string;
       dynamic_summary?: string;
       final_report?: string;
@@ -88,6 +90,8 @@ export interface AnalysisDoc {
   };
   investigation_report?: {
     summary?: string;
+    bank_agent_alert?: string;
+    ciso_brief?: string;
     executive_verdict?: string;
     dynamic_summary?: string;
     final_report?: string;

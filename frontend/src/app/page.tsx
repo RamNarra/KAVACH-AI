@@ -46,6 +46,7 @@ export default function Home() {
   const [expandedTechniques, setExpandedTechniques] = useState<Record<string, boolean>>({});
   const [staticTab, setStaticTab] = useState<'manifest' | 'apkid' | 'quark' | 'androguard' | 'secrets' | 'network' | 'compliance' | 'virustotal'>('manifest');
   const [storyTab, setStoryTab] = useState<'static' | 'dynamic' | 'final'>('static');
+  const [reportTier, setReportTier] = useState<'soc' | 'bank_agent' | 'ciso'>('soc');
   const [estSecondsRemaining, setEstSecondsRemaining] = useState(30);
 
   const loadHistory = useCallback(async () => {
@@ -375,6 +376,17 @@ export default function Home() {
   }, [storyTab, current, hasDynamic]);
 
   const activeSummaryText = useMemo(() => {
+    const ir = storyTab === 'static'
+      ? (current?.static_analysis?.investigation_report ?? (hasDynamic ? undefined : current?.investigation_report))
+      : current?.investigation_report;
+
+    if (reportTier === 'bank_agent') {
+      return ir?.bank_agent_alert ?? 'No bank agent alert available.';
+    }
+    if (reportTier === 'ciso') {
+      return ir?.ciso_brief ?? 'No CISO executive brief available.';
+    }
+
     if (storyTab === 'static') {
       return current?.static_analysis?.investigation_report?.summary ?? (hasDynamic ? '' : current?.investigation_report?.summary ?? current?.investigation_report?.executive_verdict) ?? '';
     }
@@ -382,7 +394,7 @@ export default function Home() {
       return current?.investigation_report?.dynamic_summary ?? current?.investigation_report?.summary ?? '';
     }
     return current?.investigation_report?.final_report ?? current?.investigation_report?.summary ?? '';
-  }, [storyTab, current, hasDynamic]);
+  }, [storyTab, reportTier, current, hasDynamic]);
 
   const activeBadges = useMemo(() => {
     if (storyTab === 'static') {
@@ -731,9 +743,46 @@ export default function Home() {
                         {/* STATIC AUDIT STORIES */}
                         {activeSummaryText && (
                           <div className="security-card p-6 space-y-3">
-                            <div className="flex items-center gap-2 mb-1 border-b border-[var(--border)]/50 pb-2 text-[var(--blue)]">
-                              <span className="text-[14px]">🔎</span>
-                              <span className="text-[12px] uppercase tracking-wider font-bold">Static Audit</span>
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2 border-b border-[var(--border)]/50 pb-2">
+                              <div className="flex items-center gap-2 text-[var(--blue)]">
+                                <span className="text-[14px]">🔎</span>
+                                <span className="text-[12px] uppercase tracking-wider font-bold">Static Audit</span>
+                              </div>
+                              <div className="flex bg-[var(--surface-2)]/80 p-0.5 rounded-lg border border-[var(--border)]/30 w-fit gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setReportTier('soc')}
+                                  className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                    reportTier === 'soc'
+                                      ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                      : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                  }`}
+                                >
+                                  🔧 SOC
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setReportTier('bank_agent')}
+                                  className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                    reportTier === 'bank_agent'
+                                      ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                      : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                  }`}
+                                >
+                                  🏦 Alert
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setReportTier('ciso')}
+                                  className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                    reportTier === 'ciso'
+                                      ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                      : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                  }`}
+                                >
+                                  📋 CISO
+                                </button>
+                              </div>
                             </div>
                             <div className={summaryExpanded ? '' : 'line-clamp-[6] overflow-hidden'}>
                               <MarkdownBody text={activeSummaryText} />
@@ -1254,9 +1303,46 @@ export default function Home() {
                           <>
                             {activeSummaryText && (
                               <div className="security-card p-6 space-y-3 border border-indigo-500/20 shadow-[0_0_15px_rgba(99,102,241,0.05)]">
-                                <div className="flex items-center gap-2 mb-1 border-b border-[var(--border)]/50 pb-2 text-indigo-400">
-                                  <span className="text-[14px]">⚡</span>
-                                  <span className="text-[12px] uppercase tracking-wider font-bold">Dynamic Audit</span>
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2 border-b border-[var(--border)]/50 pb-2">
+                                  <div className="flex items-center gap-2 text-indigo-400">
+                                    <span className="text-[14px]">⚡</span>
+                                    <span className="text-[12px] uppercase tracking-wider font-bold">Dynamic Audit</span>
+                                  </div>
+                                  <div className="flex bg-[var(--surface-2)]/80 p-0.5 rounded-lg border border-[var(--border)]/30 w-fit gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => setReportTier('soc')}
+                                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                        reportTier === 'soc'
+                                          ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                          : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                      }`}
+                                    >
+                                      🔧 SOC
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setReportTier('bank_agent')}
+                                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                        reportTier === 'bank_agent'
+                                          ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                          : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                      }`}
+                                    >
+                                      🏦 Alert
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setReportTier('ciso')}
+                                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                        reportTier === 'ciso'
+                                          ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                          : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                      }`}
+                                    >
+                                      📋 CISO
+                                    </button>
+                                  </div>
                                 </div>
                                 <div className={summaryExpanded ? '' : 'line-clamp-[6] overflow-hidden'}>
                                   <MarkdownBody text={activeSummaryText} />
@@ -1310,9 +1396,46 @@ export default function Home() {
                             {/* FINAL COMBINED REPORT STORY */}
                             {activeSummaryText && (
                               <div className="security-card p-6 space-y-3 border border-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.05)]">
-                                <div className="flex items-center gap-2 mb-1 border-b border-[var(--border)]/50 pb-2 text-amber-400">
-                                  <span className="text-[14px]">📊</span>
-                                  <span className="text-[12px] uppercase tracking-wider font-bold">Final Advisory Report</span>
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2 border-b border-[var(--border)]/50 pb-2">
+                                  <div className="flex items-center gap-2 text-amber-400">
+                                    <span className="text-[14px]">📊</span>
+                                    <span className="text-[12px] uppercase tracking-wider font-bold">Final Advisory Report</span>
+                                  </div>
+                                  <div className="flex bg-[var(--surface-2)]/80 p-0.5 rounded-lg border border-[var(--border)]/30 w-fit gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => setReportTier('soc')}
+                                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                        reportTier === 'soc'
+                                          ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                          : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                      }`}
+                                    >
+                                      🔧 SOC
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setReportTier('bank_agent')}
+                                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                        reportTier === 'bank_agent'
+                                          ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                          : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                      }`}
+                                    >
+                                      🏦 Alert
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setReportTier('ciso')}
+                                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 ${
+                                        reportTier === 'ciso'
+                                          ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
+                                          : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+                                      }`}
+                                    >
+                                      📋 CISO
+                                    </button>
+                                  </div>
                                 </div>
                                 <div className={summaryExpanded ? '' : 'line-clamp-[10] overflow-hidden'}>
                                   <MarkdownBody text={activeSummaryText} />
