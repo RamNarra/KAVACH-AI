@@ -44,12 +44,22 @@ def _get_genai_client():
         return None
 
 
+import threading
+thread_local = threading.local()
+
+
 def _ts() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 
 def _run(args: List[str], timeout: int = _ADB_TIMEOUT) -> subprocess.CompletedProcess:
     """Run a command, return CompletedProcess. Never raises."""
+    device_serial = getattr(thread_local, "device_serial", None)
+    if device_serial and args and len(args) > 0 and "adb" in str(args[0]).lower():
+        if len(args) > 1 and args[1] == "-s":
+            pass
+        else:
+            args = [args[0], "-s", device_serial] + args[1:]
     try:
         return subprocess.run(
             args, capture_output=True, text=True, timeout=timeout
@@ -65,25 +75,105 @@ def _run(args: List[str], timeout: int = _ADB_TIMEOUT) -> subprocess.CompletedPr
 # UI inspection helpers
 # ---------------------------------------------------------------------------
 
+def _dump_ui_ocr(adb: str, tmp_dir: str) -> List[Dict[str, Any]]:
+    """
+    Fallback OCR-based UI element finder.
+    Takes a screenshot, uses pytesseract to locate text, and generates elements list.
+    """
+    remote = "/sdcard/kavach_screencap.png"
+    local = os.path.join(tmp_dir, "screencap.png")
+    
+    r = _run([adb, "shell", "screencap", "-p", remote])
+    if r.returncode != 0:
+        return []
+    _run([adb, "pull", remote, local])
+    _run([adb, "shell", "rm", "-f", remote])
+    
+    if not os.path.exists(local):
+        return []
+        
+    try:
+        import pytesseract
+        from PIL import Image
+        
+        # Load image
+        img = Image.open(local)
+        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+        
+        elements = []
+        n_boxes = len(data['text'])
+        for i in range(n_boxes):
+            text = str(data['text'][i]).strip()
+            if not text:
+                continue
+            conf = 0
+            try:
+                conf = int(data['conf'][i])
+            except Exception:
+                pass
+            if conf > 50:
+                x = data['left'][i] + data['width'][i] // 2
+                y = data['top'][i] + data['height'][i] // 2
+                w = data['width'][i]
+                h = data['height'][i]
+                bounds = f"[{data['left'][i]},{data['top'][i]}][{data['left'][i]+w},{data['top'][i]+h}]"
+                elements.append({
+                    "x": x, "y": y,
+                    "text": text,
+                    "class": "android.widget.Button" if text.lower() in ("allow", "accept", "ok", "next", "submit", "agree", "continue", "yes", "permission") else "android.widget.TextView",
+                    "content_desc": text,
+                    "bounds": bounds,
+                })
+        logger.info(f"[OCR] Extracted {len(elements)} elements using Tesseract OCR fallback.")
+        return elements
+    except Exception as e:
+        logger.warning(f"[OCR] Pytesseract OCR fallback failed: {e}. Ensure tesseract-ocr binary is installed on your system.")
+        return []
+
+
 def _dump_ui(adb: str, tmp_dir: str) -> Optional[ET.Element]:
     """
     Use uiautomator dump to capture current UI hierarchy.
+    Falls back to Tesseract OCR if uiautomator yields no clickable elements.
     Returns the root Element or None on failure.
     """
     remote = "/sdcard/kavach_ui_dump.xml"
     local  = os.path.join(tmp_dir, "ui_dump.xml")
 
     r = _run([adb, "shell", "uiautomator", "dump", remote])
-    if r.returncode != 0:
-        return None
-    _run([adb, "pull", remote, local])
-    _run([adb, "shell", "rm", "-f", remote])
+    
+    root = None
+    if r.returncode == 0:
+        _run([adb, "pull", remote, local])
+        _run([adb, "shell", "rm", "-f", remote])
+        try:
+            tree = ET.parse(local)
+            root = tree.getroot()
+        except Exception:
+            root = None
 
-    try:
-        tree = ET.parse(local)
-        return tree.getroot()
-    except Exception:
-        return None
+    # Verify if root has clickable elements
+    has_nodes = False
+    if root is not None:
+        has_nodes = any(node.get("clickable") == "true" for node in root.iter("node"))
+
+    if not has_nodes:
+        logger.info("[OCR] uiautomator yielded no clickable elements. Running Tesseract OCR fallback...")
+        ocr_elements = _dump_ui_ocr(adb, tmp_dir)
+        if ocr_elements:
+            mock_root = ET.Element("hierarchy", rotation="0")
+            for idx, el in enumerate(ocr_elements):
+                node = ET.SubElement(mock_root, "node", {
+                    "index": str(idx),
+                    "text": el["text"],
+                    "class": el["class"],
+                    "clickable": "true",
+                    "bounds": el["bounds"],
+                    "content-desc": el["content_desc"]
+                })
+            return mock_root
+
+    return root
 
 
 def _clickable_elements(root: Optional[ET.Element]) -> List[Dict[str, Any]]:

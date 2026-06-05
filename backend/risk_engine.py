@@ -12,36 +12,53 @@ def build_risk_decomposition(
     fraud_score: int,
     contributors: List[Dict[str, Any]] | None = None,
     absolute_score: int = 0,
+    profile: str = "default",
 ) -> Dict[str, Any]:
     """Produce weighted breakdown and top contributors for UI."""
     # independent_ai_score: zero if Gemini was forced to equal det_score (no independent signal)
     independent_ai_score = ai_score if ai_score != static_score else 0
 
-    # Build weights based on available signal sources.
-    # Normalisation below ensures they always sum to 1.0 regardless of branch.
-    if dynamic_score == 0 and fraud_score == 0:
-        if independent_ai_score > 0:
-            # Gemini returned a genuinely different score — honour it at 20%
-            weights = {"static": 0.80, "dynamic": 0.00, "ai": 0.20, "banking_fraud": 0.00}
-        else:
-            # Truly static-only: composite == det_score (honest, no inflation)
-            weights = {"static": 1.00, "dynamic": 0.00, "ai": 0.00, "banking_fraud": 0.00}
-    elif dynamic_score == 0:
-        # Static + banking fraud, optional independent AI
+    # Build weights based on profile
+    if profile == "frontline":
+        # Frontline mode: heavy banking fraud and dynamic behavior, lower static focus
         weights = {
-            "static": 0.65,
-            "dynamic": 0.00,
+            "static": 0.20,
+            "dynamic": 0.40 if dynamic_score > 0 else 0.00,
             "ai": 0.10 if independent_ai_score > 0 else 0.00,
-            "banking_fraud": 0.25,
+            "banking_fraud": 0.30 if fraud_score > 0 else 0.00
+        }
+        if weights["dynamic"] == 0 and weights["banking_fraud"] == 0:
+            weights["static"] = 0.90
+            weights["ai"] = 0.10 if independent_ai_score > 0 else 0.00
+    elif profile == "strict_compliance":
+        # Strict compliance mode: static patterns and AI analysis are prioritized
+        weights = {
+            "static": 0.60,
+            "dynamic": 0.15 if dynamic_score > 0 else 0.00,
+            "ai": 0.15 if independent_ai_score > 0 else 0.00,
+            "banking_fraud": 0.10 if fraud_score > 0 else 0.00
         }
     else:
-        # Full pipeline: static + dynamic + optional AI + banking fraud
-        weights = {
-            "static": 0.50,
-            "dynamic": 0.30,
-            "ai": 0.10 if independent_ai_score > 0 else 0.00,
-            "banking_fraud": 0.20,
-        }
+        # Default mode
+        if dynamic_score == 0 and fraud_score == 0:
+            if independent_ai_score > 0:
+                weights = {"static": 0.80, "dynamic": 0.00, "ai": 0.20, "banking_fraud": 0.00}
+            else:
+                weights = {"static": 1.00, "dynamic": 0.00, "ai": 0.00, "banking_fraud": 0.00}
+        elif dynamic_score == 0:
+            weights = {
+                "static": 0.65,
+                "dynamic": 0.00,
+                "ai": 0.10 if independent_ai_score > 0 else 0.00,
+                "banking_fraud": 0.25,
+            }
+        else:
+            weights = {
+                "static": 0.50,
+                "dynamic": 0.30,
+                "ai": 0.10 if independent_ai_score > 0 else 0.00,
+                "banking_fraud": 0.20,
+            }
 
     # Normalise weights so they always sum to 1.0 (prevents systematic bias)
     total_weight = sum(weights.values())

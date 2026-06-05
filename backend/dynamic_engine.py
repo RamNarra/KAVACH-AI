@@ -5,6 +5,7 @@ import subprocess
 import logging
 import zipfile
 import frida
+import threading
 from typing import Dict, List, Any, Optional
 
 from frida_hooks import build_frida_script, select_packs_from_signals
@@ -18,6 +19,55 @@ from toolchain import configure_android_env, resolve_adb
 
 configure_android_env()
 ADB_PATH = resolve_adb()
+
+thread_local = threading.local()
+
+_orig_subprocess_run = subprocess.run
+
+def run_cmd(args: List[str], **kwargs) -> subprocess.CompletedProcess:
+    """Wrapper that routes ADB commands to the thread-local leased emulator serial if set."""
+    device_serial = getattr(thread_local, "device_serial", None)
+    if device_serial and args and args[0] == ADB_PATH:
+        if len(args) > 1 and args[1] == "-s":
+            pass
+        else:
+            args = [ADB_PATH, "-s", device_serial] + args[1:]
+    return _orig_subprocess_run(args, **kwargs)
+
+subprocess.run = run_cmd
+
+class EmulatorPoolManager:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.busy_devices = set()
+
+    def get_available_device(self) -> Optional[str]:
+        try:
+            res = subprocess.run([ADB_PATH, "devices"], capture_output=True, text=True, timeout=10)
+            devices = []
+            for line in res.stdout.splitlines():
+                if "emulator-" in line and "device" in line:
+                    serial = line.split()[0]
+                    devices.append(serial)
+            
+            with self.lock:
+                for dev in devices:
+                    if dev not in self.busy_devices:
+                        self.busy_devices.add(dev)
+                        logger.info(f"[Pool] Leased emulator device: {dev}")
+                        return dev
+            return None
+        except Exception as e:
+            logger.warning(f"[Pool] Error querying adb devices for pool: {e}")
+            return None
+
+    def release_device(self, serial: str):
+        with self.lock:
+            if serial in self.busy_devices:
+                self.busy_devices.remove(serial)
+                logger.info(f"[Pool] Released emulator device: {serial}")
+
+emulator_pool = EmulatorPoolManager()
 
 # (Frida hook scripts are now assembled dynamically via frida_hooks.py)
 
@@ -106,12 +156,31 @@ def check_abi_compatibility(apk_path: str) -> Optional[Dict[str, Any]]:
 
 
 def ensure_frida_server_running() -> bool:
+    device_serial = getattr(thread_local, "device_serial", None)
     try:
         import sandbox_bootstrap
-        if sandbox_bootstrap.check_frida_server_running():
-            return True
-        subprocess.run([ADB_PATH, "wait-for-device"], capture_output=True, timeout=30)
-        return sandbox_bootstrap.start_frida_server()
+        if device_serial:
+            binary = sandbox_bootstrap.FRIDA_REMOTE_PATH
+            name = os.path.basename(binary)
+            res = subprocess.run([ADB_PATH, "shell", "pidof", name], capture_output=True, text=True, timeout=10)
+            if res.stdout.strip():
+                return True
+            subprocess.run([ADB_PATH, "root"], capture_output=True, timeout=10)
+            subprocess.run([ADB_PATH, "shell", "setenforce", "0"], capture_output=True, timeout=10)
+            cmd = [ADB_PATH, "-s", device_serial, "shell", f"{binary} -D"]
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(3)
+            res = subprocess.run([ADB_PATH, "shell", "pidof", name], capture_output=True, text=True, timeout=10)
+            return bool(res.stdout.strip())
+        else:
+            if sandbox_bootstrap.check_frida_server_running():
+                return True
+            subprocess.run([ADB_PATH, "wait-for-device"], capture_output=True, timeout=30)
+            return sandbox_bootstrap.start_frida_server()
     except Exception as exc:
         logger.error(f"Error ensuring Frida server is running: {exc}")
         return False
@@ -156,6 +225,7 @@ def run_behavioral_trace(
     active_packs: Optional[List[str]] = None,
     static_signals: Optional[Dict[str, Any]] = None,
     log_callback=None,
+    device_serial: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the full behavioral trace pipeline:
@@ -167,6 +237,7 @@ def run_behavioral_trace(
       6. Normalize, redact, deduplicate events
       7. Return structured result with normalized_events + trigger_transcript
     """
+    thread_local.device_serial = device_serial
     signals = static_signals or {}
     if active_packs is None:
         active_packs = select_packs_from_signals(signals)
@@ -432,7 +503,10 @@ def run_behavioral_trace(
 
         # Frida attach
         log_event("Initializing Frida USB binding...")
-        device = frida.get_usb_device(timeout=20)
+        if device_serial:
+            device = frida.get_device_manager().get_device(device_serial, timeout=20)
+        else:
+            device = frida.get_usb_device(timeout=20)
         
         # Defensive force-stop to reset the app package and Zygote hooks before spawning
         try:
@@ -600,6 +674,8 @@ def run_behavioral_trace(
         log_event("Starting trigger playbook...")
         try:
             from playbook_engine import run_playbook
+            import playbook_engine
+            playbook_engine.thread_local.device_serial = device_serial
             play_result = run_playbook(
                 adb=ADB_PATH,
                 package_name=package_name,

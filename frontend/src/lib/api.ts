@@ -73,6 +73,79 @@ export function getClientSessionId(): string {
   return created;
 }
 
+class IndexedDBCache {
+  private dbName = 'KavachCache';
+  private dbVersion = 1;
+  private storeName = 'scans';
+
+  private openDB(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+      if (typeof window === 'undefined') {
+        reject(new Error('IndexedDB is not available server-side'));
+        return;
+      }
+      const request = window.indexedDB.open(this.dbName, this.dbVersion);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(this.storeName)) {
+          db.createObjectStore(this.storeName, { keyPath: 'id' });
+        }
+      };
+    });
+  }
+
+  async put(doc: any): Promise<void> {
+    try {
+      const db = await this.openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(this.storeName, 'readwrite');
+        const store = tx.objectStore(this.storeName);
+        const req = store.put(doc);
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => resolve();
+      });
+    } catch (err) {
+      console.warn('Failed to write to IndexedDB cache:', err);
+    }
+  }
+
+  async get(id: string): Promise<any | null> {
+    try {
+      const db = await this.openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(this.storeName, 'readonly');
+        const store = tx.objectStore(this.storeName);
+        const req = store.get(id);
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => resolve(req.result || null);
+      });
+    } catch (err) {
+      console.warn('Failed to read from IndexedDB cache:', err);
+      return null;
+    }
+  }
+
+  async getAll(): Promise<any[]> {
+    try {
+      const db = await this.openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(this.storeName, 'readonly');
+        const store = tx.objectStore(this.storeName);
+        const req = store.getAll();
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => resolve(req.result || []);
+      });
+    } catch (err) {
+      console.warn('Failed to read history from IndexedDB cache:', err);
+      return [];
+    }
+  }
+}
+
+export const indexedDbCache = new IndexedDBCache();
+
 // No-auth fetch — Firebase suspended, open access for hackathon demo
 export async function apiFetch(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
@@ -84,6 +157,55 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
     headers.set(SESSION_HEADER, sessionId);
   }
   const url = path.startsWith('http') ? path : `${API}${path}`;
+
+  const isGet = !init.method || init.method.toUpperCase() === 'GET';
+  const isHistory = path === '/api/history';
+  const isAnalysisMatch = path.startsWith('/api/analysis/');
+
+  if (isGet && (isHistory || isAnalysisMatch)) {
+    try {
+      const res = await fetch(url, { ...init, headers });
+      if (res.ok) {
+        const clone = res.clone();
+        try {
+          const data = await clone.json();
+          if (isHistory && Array.isArray(data)) {
+            for (const doc of data) {
+              await indexedDbCache.put(doc);
+            }
+          } else if (isAnalysisMatch && data && typeof data === 'object') {
+            await indexedDbCache.put(data);
+          }
+        } catch (err) {
+          console.warn('Failed to parse and cache Response in IndexedDB:', err);
+        }
+      }
+      return res;
+    } catch (err) {
+      console.warn(`Network failure for GET ${path}, checking IndexedDB cache:`, err);
+      if (isHistory) {
+        const cachedDocs = await indexedDbCache.getAll();
+        if (cachedDocs && cachedDocs.length > 0) {
+          return new Response(JSON.stringify(cachedDocs), {
+            status: 200,
+            headers: new Headers({ 'Content-Type': 'application/json' })
+          });
+        }
+      } else if (isAnalysisMatch) {
+        const parts = path.split('/');
+        const id = parts[parts.length - 1];
+        const cachedDoc = await indexedDbCache.get(id);
+        if (cachedDoc) {
+          return new Response(JSON.stringify(cachedDoc), {
+            status: 200,
+            headers: new Headers({ 'Content-Type': 'application/json' })
+          });
+        }
+      }
+      throw err;
+    }
+  }
+
   return fetch(url, { ...init, headers });
 }
 

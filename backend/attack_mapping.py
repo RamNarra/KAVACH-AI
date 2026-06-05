@@ -4,22 +4,46 @@ MITRE ATT&CK Mobile technique tagging for Kavach AI findings.
 
 from typing import Any, Dict, List
 
+import os
+import json
+import logging
+
+logger = logging.getLogger("kavach-attack")
+
 # id -> {name, tactic}
-TECHNIQUES: Dict[str, Dict[str, str]] = {
-    "T1417": {"name": "Input Capture", "tactic": "Collection"},
-    "T1636": {"name": "Protected User Data", "tactic": "Collection"},
-    "T1636.001": {"name": "SMS Messages", "tactic": "Collection"},
-    "T1411": {"name": "Input Prompt", "tactic": "Credential Access"},
-    "T1629": {"name": "Impair Defenses", "tactic": "Defense Evasion"},
-    "T1629.001": {"name": "Prevent User Interaction", "tactic": "Defense Evasion"},
-    "T1406": {"name": "Obfuscated Files or Information", "tactic": "Defense Evasion"},
-    "T1633": {"name": "Virtualization Solution Discovery", "tactic": "Discovery"},
-    "T1430": {"name": "Location Tracking", "tactic": "Collection"},
-    "T1521": {"name": "Encrypted Channel", "tactic": "Command and Control"},
-    "T1437": {"name": "Application Layer Protocol", "tactic": "Command and Control"},
-    "T1407": {"name": "Download New Code at Runtime", "tactic": "Defense Evasion"},
-    "T1627": {"name": "Execution Guardrails", "tactic": "Execution"},
-}
+TECHNIQUES: Dict[str, Dict[str, str]] = {}
+
+def load_mitre_techniques():
+    global TECHNIQUES
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(base_dir, "tools", "mitre_mobile.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r") as f:
+                TECHNIQUES.update(json.load(f))
+            logger.info(f"Loaded {len(TECHNIQUES)} MITRE Mobile ATT&CK techniques from JSON database.")
+            return
+        except Exception as e:
+            logger.warning(f"Failed to load MITRE JSON database: {e}. Falling back to default list.")
+    
+    # Fallback default list
+    TECHNIQUES.update({
+        "T1417": {"name": "Input Capture", "tactic": "Collection"},
+        "T1636": {"name": "Protected User Data", "tactic": "Collection"},
+        "T1636.001": {"name": "SMS Messages", "tactic": "Collection"},
+        "T1411": {"name": "Input Prompt", "tactic": "Credential Access"},
+        "T1629": {"name": "Impair Defenses", "tactic": "Defense Evasion"},
+        "T1629.001": {"name": "Prevent User Interaction", "tactic": "Defense Evasion"},
+        "T1406": {"name": "Obfuscated Files or Information", "tactic": "Defense Evasion"},
+        "T1633": {"name": "Virtualization Solution Discovery", "tactic": "Discovery"},
+        "T1430": {"name": "Location Tracking", "tactic": "Collection"},
+        "T1521": {"name": "Encrypted Channel", "tactic": "Command and Control"},
+        "T1437": {"name": "Application Layer Protocol", "tactic": "Command and Control"},
+        "T1407": {"name": "Download New Code at Runtime", "tactic": "Defense Evasion"},
+        "T1627": {"name": "Execution Guardrails", "tactic": "Execution"},
+    })
+
+load_mitre_techniques()
 
 PERM_TECHNIQUES = {
     "android.permission.RECEIVE_SMS": ["T1636.001"],

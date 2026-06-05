@@ -47,6 +47,8 @@ PyYAML>=6.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 orjson>=3.9.0
+redis>=5.0.0
+pytesseract>=0.3.10
 
 # --- Testing ---
 pytest>=8.0.0

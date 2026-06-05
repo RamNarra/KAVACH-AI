@@ -651,6 +651,71 @@ try {
 } catch(e) {}
 """
 
+_PACK_SSL_UNPINNING = """
+// ── Universal SSL Unpinning hook ─────────────────────────────────────────────
+try {
+    var X509TrustManager = Java.use("javax.net.ssl.X509TrustManager");
+    var TrustManagerImpl = Java.use("com.android.org.conscrypt.TrustManagerImpl");
+    var HostnameVerifier = Java.use("javax.net.ssl.HostnameVerifier");
+    var HttpsURLConnection = Java.use("javax.net.ssl.HttpsURLConnection");
+    var TrustManager = Java.registerClass({
+        name: "com.kavach.TrustManager",
+        implements: [X509TrustManager],
+        methods: {
+            checkClientTrusted: function(chain, authType) {},
+            checkServerTrusted: function(chain, authType) {},
+            getAcceptedIssuers: function() { return []; }
+        }
+    });
+    
+    // Hook TrustManagerFactory.getTrustManagers
+    var TrustManagerFactory = Java.use("javax.net.ssl.TrustManagerFactory");
+    TrustManagerFactory.getTrustManagers.implementation = function() {
+        return [TrustManager.$new()];
+    };
+    
+    // Hook com.android.org.conscrypt.TrustManagerImpl
+    try {
+        TrustManagerImpl.checkServerTrusted.overload("[Ljava.security.cert.X509Certificate;", "java.lang.String", "java.lang.String").implementation = function(chain, authType, host) {
+            return chain;
+        };
+        TrustManagerImpl.checkServerTrusted.overload("[Ljava.security.cert.X509Certificate;", "java.lang.String", "java.security.KeyStore").implementation = function(chain, authType, keyStore) {
+            return chain;
+        };
+        TrustManagerImpl.checkServerTrusted.overload("[Ljava.security.cert.X509Certificate;", "java.lang.String", "javax.net.ssl.SSLParameters").implementation = function(chain, authType, params) {
+            return chain;
+        };
+    } catch(e) {}
+
+    // Hook HostnameVerifier
+    var DummyHostnameVerifier = Java.registerClass({
+        name: "com.kavach.HostnameVerifier",
+        implements: [HostnameVerifier],
+        methods: {
+            verify: function(hostname, session) { return true; }
+        }
+    });
+    HttpsURLConnection.setDefaultHostnameVerifier.implementation = function(v) {
+        return this.setDefaultHostnameVerifier(DummyHostnameVerifier.$new());
+    };
+
+    // Hook OkHttp3 CertificatePinner
+    try {
+        var CertificatePinner = Java.use("okhttp3.CertificatePinner");
+        CertificatePinner.check.overload("java.lang.String", "java.util.List").implementation = function(hostname, peerCertificates) {
+            return;
+        };
+        CertificatePinner.check.overload("java.lang.String", "[Ljava.security.cert.Certificate;").implementation = function(hostname, peerCertificates) {
+            return;
+        };
+    } catch(e) {}
+    
+    console.log("[Kavach] Universal SSL Unpinning bypass installed.");
+} catch(e) {
+    console.log("[Kavach] SSL Unpinning installation failed: " + e);
+}
+"""
+
 # --------------------------------------------------------------------------- #
 # Registry and assembler
 # --------------------------------------------------------------------------- #
@@ -672,12 +737,13 @@ ALL_PACKS: dict = {
     "dynamic_loading": _PACK_DYNAMIC_LOADING,
     "process_builder": _PACK_PROCESS_BUILDER,
     "app_listing":     _PACK_APP_LISTING,
+    "ssl_unpinning":   _PACK_SSL_UNPINNING,
 }
 
 # Core packs always loaded — lightweight, high signal
 DEFAULT_PACKS: List[str] = [
     "shared_prefs", "network", "crypto", "native", "clipboard", "permissions",
-    "sms_telephony", "location_gps", "media_recorder", "dynamic_loading", "process_builder", "app_listing"
+    "sms_telephony", "location_gps", "media_recorder", "dynamic_loading", "process_builder", "app_listing", "ssl_unpinning"
 ]
 
 

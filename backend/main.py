@@ -464,6 +464,7 @@ class AnalysisRequest(BaseModel):
     email: str | None = None
     uid: str | None = None
     filename: str | None = None
+    profile: str = "default"
 
 class ChatRequest(BaseModel):
     analysis_id: str

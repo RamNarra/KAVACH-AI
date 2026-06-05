@@ -27,29 +27,83 @@ router = APIRouter()
 
 from collections import defaultdict
 
-class InMemRateLimiter:
-    def __init__(self, requests_limit: int, window_secs: int):
-        self.requests_limit = requests_limit
-        self.window_secs = window_secs
-        self.history = defaultdict(list)
-        self.lock = threading.Lock()
+class HybridRateLimiter:
+    def __init__(self, *args, **kwargs):
+        if len(args) == 3:
+            self.name = args[0]
+            self.requests_limit = args[1]
+            self.window_secs = args[2]
+        elif len(args) == 2:
+            self.name = "default"
+            self.requests_limit = args[0]
+            self.window_secs = args[1]
+        else:
+            self.name = kwargs.get("name", "default")
+            self.requests_limit = kwargs.get("requests_limit", 10)
+            self.window_secs = kwargs.get("window_secs", 60)
+        self.local_history = defaultdict(list)
+        self.local_lock = threading.Lock()
+        self.redis_client = None
+        self.redis_failed = False
+        self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+    def _get_redis(self):
+        if self.redis_failed:
+            return None
+        if self.redis_client is not None:
+            return self.redis_client
+        try:
+            import redis
+            self.redis_client = redis.Redis.from_url(
+                self.redis_url,
+                socket_timeout=1.0,
+                socket_connect_timeout=1.0,
+                decode_responses=True
+            )
+            self.redis_client.ping()
+            logger.info(f"Connected to Redis for rate limiting ({self.name})")
+            return self.redis_client
+        except Exception as e:
+            logger.warning(f"Failed to connect to Redis at {self.redis_url}: {e}. Falling back to in-memory rate limiting.")
+            self.redis_failed = True
+            self.redis_client = None
+            return None
 
     def check(self, key: str) -> bool:
+        r = self._get_redis()
+        if r:
+            try:
+                now = time.time()
+                redis_key = f"rate_limit:{self.name}:{key}"
+                pipe = r.pipeline()
+                pipe.zremrangebyscore(redis_key, 0, now - self.window_secs)
+                pipe.zcard(redis_key)
+                pipe.zadd(redis_key, {str(now): now})
+                pipe.expire(redis_key, self.window_secs + 10)
+                _, count, _, _ = pipe.execute()
+                if count >= self.requests_limit:
+                    return False
+                return True
+            except Exception as e:
+                logger.warning(f"Redis rate limit check failed: {e}. Falling back to local in-memory.")
+
         now = time.time()
-        with self.lock:
-            self.history[key] = [t for t in self.history[key] if now - t < self.window_secs]
-            if len(self.history[key]) >= self.requests_limit:
+        with self.local_lock:
+            self.local_history[key] = [t for t in self.local_history[key] if now - t < self.window_secs]
+            if len(self.local_history[key]) >= self.requests_limit:
                 return False
-            self.history[key].append(now)
+            self.local_history[key].append(now)
             return True
+
+InMemRateLimiter = HybridRateLimiter
 
 # Rate limiters:
 # 1. Static scans (URLs / Uploads): 5 requests per 2 minutes per IP
 # 2. Dynamic analysis scans: 2 requests per 5 minutes per IP
 # 3. Chat endpoint: 15 requests per 1 minute per IP
-static_scan_limiter = InMemRateLimiter(5, 120)
-dynamic_scan_limiter = InMemRateLimiter(2, 300)
-chat_limiter = InMemRateLimiter(15, 60)
+static_scan_limiter = HybridRateLimiter("static_scan", 5, 120)
+dynamic_scan_limiter = HybridRateLimiter("dynamic_scan", 2, 300)
+chat_limiter = HybridRateLimiter("chat", 15, 60)
 
 # ─── Shared globals injected from main.py ──────────────────────────────────────
 # These are set by main.py after import via routes.inject_globals()
@@ -139,6 +193,7 @@ def health_check():
 
 class DynamicAnalysisRequest(BaseModel):
     uid: str | None = None
+    profile: str = "default"
 
 
 def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
@@ -192,12 +247,18 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
         def dynamic_log_callback(msg: str):
             doc_ref.update({"logs": firestore.ArrayUnion([f"[DYNAMIC_SANDBOX] {msg}"])})
 
-        logger.info("Requesting emulator access lock for sequential dynamic trace...")
-        acquired = sandbox_lock.acquire(timeout=180.0)
-        if not acquired:
-            logger.warning("Could not acquire sandbox lock. Dynamic analysis bypassed.")
-            update_progress("dynamic_sandbox", "COMPLETED", "Dynamic analysis bypassed (Resource busy).")
-            return
+        logger.info("Requesting emulator access from pool...")
+        from dynamic_engine import emulator_pool
+        device_serial = emulator_pool.get_available_device()
+        
+        acquired = False
+        if not device_serial:
+            logger.info("No pool emulator leased. Falling back to global sandbox lock...")
+            acquired = sandbox_lock.acquire(timeout=180.0)
+            if not acquired:
+                logger.warning("Could not acquire sandbox lock. Dynamic analysis bypassed.")
+                update_progress("dynamic_sandbox", "COMPLETED", "Dynamic analysis bypassed (Resource busy).")
+                return
 
         try:
             update_progress("dynamic_sandbox", "RUNNING", f"Booting sandbox and preparing to install {package_name}…")
@@ -206,6 +267,8 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
             wait_start = time.time()
             boot_timeout = 90.0
             while True:
+                if device_serial:
+                    break
                 sandbox_bootstrap.ensure_sandbox_ready()
                 status_dict = sandbox_bootstrap.get_status_dict()
                 curr_status = status_dict["sandbox_status"]
@@ -277,7 +340,8 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
                 launcher_activity=launcher_activity,
                 active_packs=select_packs_from_signals(static_signals),
                 static_signals=static_signals,
-                log_callback=dynamic_log_callback
+                log_callback=dynamic_log_callback,
+                device_serial=device_serial
             )
             logger.info(f"Dynamic trace complete: status={dynamic_result.get('status')}, events={dynamic_result.get('event_count', 0)}")
             update_progress("dynamic_sandbox", "COMPLETED", f"Dynamic analysis complete. Events traced: {dynamic_result.get('event_count', 0)}")
@@ -293,8 +357,11 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
                 "error_message": str(dyn_err)
             }
         finally:
-            sandbox_lock.release()
-            logger.info("Sandbox lock released.")
+            if device_serial:
+                emulator_pool.release_device(device_serial)
+            if acquired:
+                sandbox_lock.release()
+                logger.info("Sandbox lock released.")
 
         # 4. Cluster dynamic findings
         runtime_findings = cluster_runtime_findings(
@@ -512,6 +579,7 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
 
         # Metrics already calculated prior to the Gemini call
 
+        profile = doc_data.get("profile", "default")
         risk_decomposition = build_risk_decomposition(
             static_score=static_score,
             dynamic_score=dynamic_score,
@@ -519,6 +587,7 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
             fraud_score=banking_fraud.get("fraud_score", 0),
             contributors=contributors,
             absolute_score=absolute_score,
+            profile=profile,
         )
         attack_techniques = map_evidence_to_attack(
             static_evidence,
@@ -976,6 +1045,7 @@ def analyze_apk_upload(
         "email": request.email,
         "apk_url": apk_url,
         "filename": request.filename or "unknown_target.apk",
+        "profile": getattr(request, "profile", "default"),
         "progress": {
             "upload": "COMPLETED",
             "download": "WAITING",
@@ -1042,6 +1112,7 @@ def analyze_apk(
         "uid": request.uid,
         "email": request.email,
         "apk_url": apk_url,
+        "profile": getattr(request, "profile", "default"),
         "progress": {
             "upload": "COMPLETED",
             "download": "WAITING",
@@ -1093,6 +1164,7 @@ def init_analysis(
         "created_at": now_str,
         "uid": request.uid,
         "email": request.email,
+        "profile": getattr(request, "profile", "default"),
         "progress": {
             "upload": "COMPLETED",
             "download": "WAITING",
