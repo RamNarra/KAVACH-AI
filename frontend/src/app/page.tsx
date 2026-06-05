@@ -282,10 +282,19 @@ export default function Home() {
 
   const displayedSecondsRemaining = estSecondsRemaining;
 
+  // Reset estSecondsRemaining to 120 when dynamic sandbox starts running
+  useEffect(() => {
+    if (current?.progress?.dynamic_sandbox === 'RUNNING') {
+      setEstSecondsRemaining(120);
+    }
+  }, [current?.progress?.dynamic_sandbox]);
+
   useEffect(() => {
     if (view === 'scan') {
       setEstSecondsRemaining((prev) => {
-        if (baseEstimate > prev || Math.abs(baseEstimate - prev) > 5) {
+        // Enforce monotonically decreasing remaining time for static scans to prevent jumping back up.
+        // We only adjust downwards when baseEstimate is lower than current prev, or if it is at the initial value (30).
+        if (prev === 30 || baseEstimate < prev) {
           return baseEstimate;
         }
         return prev;
@@ -319,7 +328,11 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (view !== 'scan') return;
+    const isStaticRunning = view === 'scan';
+    const isDynamicRunning = current?.status === 'PROCESSING' && current?.progress?.dynamic_sandbox === 'RUNNING';
+
+    if (!isStaticRunning && !isDynamicRunning) return;
+
     const health = setInterval(() => {
       fetchSandboxHealth().then((h) => setSandboxOk(h.sandbox_status === 'READY'));
     }, 5000);
@@ -339,7 +352,7 @@ export default function Home() {
       clearInterval(tick);
       clearInterval(countdown);
     };
-  }, [view]);
+  }, [view, current?.status, current?.progress?.dynamic_sandbox]);
 
   const hasDynamic = useMemo(() => {
     return Boolean(current?.evidence?.dynamic_analysis && current?.progress?.dynamic_sandbox !== 'SKIPPED');
@@ -1253,7 +1266,7 @@ export default function Home() {
                           <div className="security-card p-6 border border-[var(--blue)]/30 space-y-4">
                             <div className="flex items-center justify-between">
                               <p className="text-[12px] uppercase tracking-widest text-[var(--blue)] font-bold animate-pulse">⚡ Sandbox Running</p>
-                              <span className="text-[11px] font-mono text-[var(--muted)] animate-pulse">Tracing APIs live ...</span>
+                              <span className="text-[11px] font-mono text-[var(--muted)] animate-pulse">Est. remaining: {estSecondsRemaining}s</span>
                             </div>
                             <div className="space-y-3">
                               <p className="text-[15px] font-semibold">Dynamic Instrumentation Tracing</p>
@@ -1261,7 +1274,7 @@ export default function Home() {
                                 Booting Android sandbox, preparing Frida hook packs, and initiating UI triggers. Telemetry signals are recorded in real-time.
                               </p>
                               <div className="relative h-2 w-full rounded-full bg-[var(--surface-2)] overflow-hidden border border-[var(--border)]">
-                                <div className="h-full bg-[var(--blue)] animate-pulse rounded-full" style={{ width: '45%' }} />
+                                <div className="h-full bg-[var(--blue)] animate-pulse rounded-full transition-all duration-1000 ease-linear" style={{ width: `${Math.round(((120 - estSecondsRemaining) / 120) * 100)}%` }} />
                               </div>
                             </div>
                             
