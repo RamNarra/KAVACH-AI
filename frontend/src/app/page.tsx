@@ -52,8 +52,21 @@ export default function Home() {
   }, []);
 
   // Poll backend for live analysis status (replaces Firestore real-time listener)
+  // Adaptive polling: only polls while backend processing is active.
   useEffect(() => {
     if (isDemo || !activeId) return;
+
+    const isRunning = !active || 
+                      active.status === 'PROCESSING' || 
+                      active.progress?.dynamic_sandbox === 'RUNNING' || 
+                      active.progress?.dynamic_sandbox === 'WAITING' ||
+                      active.progress?.finalize === 'RUNNING' ||
+                      active.progress?.finalize === 'WAITING';
+
+    if (!isRunning) {
+      return;
+    }
+
     let cancelled = false;
     const poll = async () => {
       try {
@@ -71,9 +84,9 @@ export default function Home() {
       } catch { /* ignore */ }
     };
     poll();
-    const interval = setInterval(poll, 2500);
+    const interval = setInterval(poll, 3000); // 3s optimized polling
     return () => { cancelled = true; clearInterval(interval); };
-  }, [activeId, isDemo]);
+  }, [activeId, isDemo, active?.status, active?.progress?.dynamic_sandbox, active?.progress?.finalize]);
 
 
 
@@ -112,6 +125,15 @@ export default function Home() {
     setBusy(true);
     try {
       await triggerDynamicAnalysis(current.id, 'anonymous');
+      // Explicitly update local state to trigger polling restart
+      setActive(prev => prev ? {
+        ...prev,
+        status: 'PROCESSING',
+        progress: {
+          ...prev.progress,
+          dynamic_sandbox: 'RUNNING'
+        }
+      } : null);
       setActiveId(current.id);
       setSummaryExpanded(false);
       setMitreExpanded(false);
