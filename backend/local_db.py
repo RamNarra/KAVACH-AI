@@ -8,11 +8,17 @@ import os
 import json
 import uuid
 import threading
-import datetime
 from typing import Any, Dict, Optional, List
+import tempfile
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 _STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_scans", "local_store.json")
 _lock = threading.Lock()
+_LOCK_PATH = _STORE_PATH + ".lock"
 
 
 def _load() -> Dict[str, Any]:
@@ -27,8 +33,49 @@ def _load() -> Dict[str, Any]:
 
 def _save(data: Dict[str, Any]):
     os.makedirs(os.path.dirname(_STORE_PATH), exist_ok=True)
-    with open(_STORE_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, default=str)
+    fd, temp_path = tempfile.mkstemp(prefix="local_store_", suffix=".json", dir=os.path.dirname(_STORE_PATH))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, default=str)
+        os.replace(temp_path, _STORE_PATH)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+class _FileLock:
+    def __enter__(self):
+        os.makedirs(os.path.dirname(_LOCK_PATH), exist_ok=True)
+        self._fh = open(_LOCK_PATH, "a+", encoding="utf-8")
+        if fcntl is not None:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self._fh
+
+    def __exit__(self, exc_type, exc, tb):
+        if fcntl is not None:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        self._fh.close()
+
+
+def _get_nested(data: Dict[str, Any], field: str, default: Any = None) -> Any:
+    current: Any = data
+    for part in field.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+    return current
+
+
+def _set_nested(data: Dict[str, Any], field: str, value: Any) -> None:
+    parts = field.split(".")
+    current = data
+    for part in parts[:-1]:
+        next_value = current.get(part)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            current[part] = next_value
+        current = next_value
+    current[parts[-1]] = value
 
 
 # ─── Fake ArrayUnion sentinel ──────────────────────────────────────────────────
@@ -58,34 +105,34 @@ class DocumentReference:
         return f"{self._col}/{self.id}"
 
     def get(self) -> DocumentSnapshot:
-        with _lock:
+        with _lock, _FileLock():
             store = _load()
         data = store.get(self._key())
         return DocumentSnapshot(self.id, data)
 
     def set(self, data: Dict):
-        with _lock:
+        with _lock, _FileLock():
             store = _load()
             store[self._key()] = dict(data)
             _save(store)
 
     def update(self, updates: Dict):
-        with _lock:
+        with _lock, _FileLock():
             store = _load()
             existing = store.get(self._key(), {})
             for k, v in updates.items():
                 if isinstance(v, ArrayUnion):
-                    existing_list = existing.get(k, [])
+                    existing_list = _get_nested(existing, k, [])
                     if not isinstance(existing_list, list):
                         existing_list = []
-                    existing[k] = existing_list + v.values
+                    _set_nested(existing, k, existing_list + v.values)
                 else:
-                    existing[k] = v
+                    _set_nested(existing, k, v)
             store[self._key()] = existing
             _save(store)
 
     def delete(self):
-        with _lock:
+        with _lock, _FileLock():
             store = _load()
             store.pop(self._key(), None)
             _save(store)
@@ -130,7 +177,7 @@ class Query:
         for doc_id, data in self._docs:
             match = True
             for field, op, value in self._filters:
-                v = data.get(field)
+                v = _get_nested(data, field)
                 if op == "==" and v != value:
                     match = False; break
                 elif op == "!=" and v == value:
@@ -144,7 +191,7 @@ class Query:
 
         if self._order_field:
             results.sort(
-                key=lambda s: s.to_dict().get(self._order_field, ""),
+                key=lambda s: _get_nested(s.to_dict(), self._order_field, ""),
                 reverse=self._order_desc
             )
         if self._limit_n is not None:
@@ -172,7 +219,7 @@ class CollectionReference:
         return self._make_query().order_by(field, direction)
 
     def _make_query(self) -> Query:
-        with _lock:
+        with _lock, _FileLock():
             store = _load()
         prefix = f"{self._name}/"
         docs = [

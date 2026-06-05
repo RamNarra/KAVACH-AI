@@ -25,14 +25,13 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Expose Next.js server port
+# Expose static site port
 EXPOSE 3000
 
-# Copy necessary files from build stage
-COPY --from=builder /app/package.json /app/package-lock.json ./
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/node_modules ./node_modules
+RUN npm install -g serve
 
-# Start the Next.js production server
-CMD ["npm", "run", "start"]
+# Copy exported static bundle from build stage
+COPY --from=builder /app/out ./out
+
+# Serve the exported site
+CMD ["serve", "-s", "out", "-l", "3000"]

@@ -1,3 +1,6 @@
+const SESSION_STORAGE_KEY = 'KAVACH_SESSION_ID';
+const SESSION_HEADER = 'X-Kavach-Session';
+
 const getApiUrl = (): string => {
   if (typeof window === 'undefined') return '';
 
@@ -35,16 +38,48 @@ const getApiUrl = (): string => {
     return 'http://localhost:8080';
   }
 
-  return 'http://localhost:8080';
+  // Non-local host: use same-origin (frontend and backend served from same domain/reverse proxy)
+  // To override, set NEXT_PUBLIC_API_BASE_URL at build time or use ?api_url= query param
+  return '';
 };
 
 const API = getApiUrl();
+
+export interface AnalysisStartResponse {
+  id: string;
+  status: string;
+  [key: string]: unknown;
+}
+
+export interface DynamicAnalysisResponse {
+  status: string;
+}
+
+function generateSessionId(): string {
+  const randomPart = globalThis.crypto?.randomUUID?.().replace(/-/g, '') ?? `${Date.now()}${Math.random().toString(36).slice(2)}`;
+  return `sess_${randomPart}`;
+}
+
+export function getClientSessionId(): string {
+  if (typeof window === 'undefined') return '';
+
+  const existing = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (existing) return existing;
+
+  const created = generateSessionId();
+  window.localStorage.setItem(SESSION_STORAGE_KEY, created);
+  return created;
+}
 
 // No-auth fetch — Firebase suspended, open access for hackathon demo
 export async function apiFetch(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type') && init.body) {
     headers.set('Content-Type', 'application/json');
+  }
+  const sessionId = getClientSessionId();
+  if (sessionId && !headers.has(SESSION_HEADER)) {
+    headers.set(SESSION_HEADER, sessionId);
   }
   const url = path.startsWith('http') ? path : `${API}${path}`;
   return fetch(url, { ...init, headers });
@@ -82,14 +117,14 @@ export async function sendChat(analysisId: string, message: string): Promise<str
   return data.answer as string;
 }
 
-export async function triggerDynamicAnalysis(analysisId: string, uid: string): Promise<any> {
+export async function triggerDynamicAnalysis(analysisId: string, uid: string): Promise<DynamicAnalysisResponse> {
   const res = await apiFetch(`/api/analysis/${analysisId}/dynamic`, {
     method: 'POST',
     body: JSON.stringify({ uid }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Dynamic analysis failed to start.');
-  return data;
+  return data as DynamicAnalysisResponse;
 }
 
 export const isLocalAPI = typeof window !== 'undefined' &&
@@ -100,7 +135,7 @@ export async function uploadApkDirect(
   email: string | null,
   uid: string | null,
   onProgress?: (pct: number) => void
-): Promise<any> {
+): Promise<AnalysisStartResponse> {
   const formData = new FormData();
   formData.append('file', file);
   if (email) formData.append('email', email);
@@ -112,10 +147,13 @@ export async function uploadApkDirect(
   const url = `${API}/api/analyze/upload?background=true`;
   const res = await fetch(url, {
     method: 'POST',
+    headers: {
+      [SESSION_HEADER]: getClientSessionId(),
+    },
     body: formData,
   });
   if (onProgress) onProgress(100);
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Direct upload analysis failed.');
-  return data;
+  return data as AnalysisStartResponse;
 }

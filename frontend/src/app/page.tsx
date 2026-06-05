@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect } from '../lib/api';
+import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect } from '../lib/api';
 import { DEMO_ANALYSIS } from '../lib/demo';
-import type { AnalysisDoc, ThreatLevel } from '../lib/types';
-import { livelyScanHeadline, recentScanLogs, runningStepKeys } from '../lib/scan-messages';
+import type { AnalysisDoc, ThreatLevel, VirusTotalSummary } from '../lib/types';
+import { livelyScanHeadline, runningStepKeys } from '../lib/scan-messages';
 import { MarkdownBody } from '../lib/chat-ui';
 
 // Import modular components
@@ -51,27 +51,22 @@ export default function Home() {
     fetchSandboxHealth().then((h) => setSandboxOk(h.sandbox_status === 'READY'));
   }, []);
 
-  useEffect(() => {
-    setSummaryExpanded(false);
-    setMitreExpanded(false);
-    if (active?.evidence?.dynamic_analysis?.status === 'COMPLETED') {
-      setStoryTab('final');
-    } else {
-      setStoryTab('static');
-    }
-  }, [activeId, active?.evidence?.dynamic_analysis?.status]);
-
   // Poll backend for live analysis status (replaces Firestore real-time listener)
   useEffect(() => {
     if (isDemo || !activeId) return;
     let cancelled = false;
     const poll = async () => {
       try {
-        const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8080';
-        const res = await fetch(`${API_BASE}/api/analysis/${activeId}`);
+        const res = await apiFetch(`/api/analysis/${activeId}`);
         if (res.ok) {
           const data = await res.json();
-          if (!cancelled) setActive({ id: activeId, ...data } as AnalysisDoc);
+          if (!cancelled) {
+            const nextActive = { id: activeId, ...data } as AnalysisDoc;
+            setActive(nextActive);
+            if (nextActive.evidence?.dynamic_analysis?.status === 'COMPLETED') {
+              setStoryTab('final');
+            }
+          }
         }
       } catch { /* ignore */ }
     };
@@ -90,6 +85,9 @@ export default function Home() {
     setUploadPct(0);
     setActiveId(null);
     setIsDemo(false);
+    setSummaryExpanded(false);
+    setMitreExpanded(false);
+    setStoryTab('static');
 
     const initialSeconds = Math.min(75, Math.max(25, Math.round(file.size / (1024 * 1024) * 0.6) + 20));
     setEstSecondsRemaining(initialSeconds);
@@ -115,6 +113,8 @@ export default function Home() {
     try {
       await triggerDynamicAnalysis(current.id, 'anonymous');
       setActiveId(current.id);
+      setSummaryExpanded(false);
+      setMitreExpanded(false);
       setStoryTab('dynamic');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to start dynamic analysis.');
@@ -129,6 +129,9 @@ export default function Home() {
     setActive(DEMO_ANALYSIS);
     setFile(null);
     setError(null);
+    setSummaryExpanded(false);
+    setMitreExpanded(false);
+    setStoryTab('final');
   }, []);
 
   const reset = () => {
@@ -138,6 +141,9 @@ export default function Home() {
     setFile(null);
     setChatLog([]);
     setChatOpen(false);
+    setSummaryExpanded(false);
+    setMitreExpanded(false);
+    setStoryTab('static');
   };
 
   const current = isDemo ? active : activeId ? active : null;
@@ -156,10 +162,9 @@ export default function Home() {
   }, [current, busy, uploading]);
 
   const scanHeadline = livelyScanHeadline(current?.progress, current?.logs, scanTick);
-  const scanFeed = recentScanLogs(current?.logs, 8);
   const parallelSteps = runningStepKeys(current?.progress);
 
-  const progressPercent = useMemo(() => {
+  const progressPercent = (() => {
     if (uploading) {
       return Math.min(15, Math.round(uploadPct * 0.15));
     }
@@ -170,9 +175,9 @@ export default function Home() {
     
     const staticPercent = 15 + Math.round((completedCount / stepKeys.length) * 80);
     return Math.min(95, staticPercent);
-  }, [uploading, uploadPct, current?.progress]);
+  })();
 
-  const baseEstimate = useMemo(() => {
+  const baseEstimate = (() => {
     if (uploading) {
       return Math.round((100 - uploadPct) * 0.15) + 20;
     }
@@ -186,7 +191,6 @@ export default function Home() {
     const serialPre = 2; // download
     const parallelPhase1 = 18; // apktool, jadx, apkid, quark, androguard (dominated by jadx)
     const parallelPhase2 = 8; // net_sec, secrets, trufflehog, semgrep (dominated by semgrep/trufflehog)
-    const serialPost = 10; // gemini + finalize
 
     let est = 0;
 
@@ -237,17 +241,12 @@ export default function Home() {
     }
 
     return Math.max(2, est);
-  }, [uploading, uploadPct, current?.progress]);
+  })();
 
-
-  useEffect(() => {
-    setEstSecondsRemaining((prev) => {
-      if (baseEstimate < prev || Math.abs(baseEstimate - prev) > 8) {
-        return baseEstimate;
-      }
-      return prev;
-    });
-  }, [baseEstimate]);
+  const displayedSecondsRemaining =
+    baseEstimate < estSecondsRemaining || Math.abs(baseEstimate - estSecondsRemaining) > 8
+      ? baseEstimate
+      : estSecondsRemaining;
 
   useEffect(() => {
     if (view !== 'scan') return;
@@ -518,7 +517,7 @@ export default function Home() {
                     Forensic engines active
                   </span>
                   <span className="tabular-nums font-medium text-zinc-300">
-                    Est. time remaining: <strong className="text-[var(--blue)]">{estSecondsRemaining}s</strong>
+                    Est. time remaining: <strong className="text-[var(--blue)]">{displayedSecondsRemaining}s</strong>
                   </span>
                 </div>
               </div>
@@ -878,11 +877,11 @@ export default function Home() {
                                         {totalSemgrep.map((s, i) => (
                                           <div key={i} className="py-3 px-4 bg-[var(--surface-2)]/40 rounded-2xl border border-[var(--border)] space-y-1.5">
                                             <div className="flex justify-between items-start gap-3">
-                                              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20 shrink-0">{(s as any).severity || "HIGH"}</span>
+                                              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20 shrink-0">{s.severity || "HIGH"}</span>
                                               <span className="text-[12px] font-semibold text-[var(--red)]">+{s.risk_score || 10} pts</span>
                                             </div>
-                                            <p className="text-[14px] font-semibold">{s.description || (s as any).rule}</p>
-                                            {(s as any).file && <p className="text-[11px] font-mono text-[var(--muted)] break-all bg-[var(--surface)] py-1 px-2 rounded">{(s as any).file}</p>}
+                                            <p className="text-[14px] font-semibold">{s.description || s.rule}</p>
+                                            {s.file && <p className="text-[11px] font-mono text-[var(--muted)] break-all bg-[var(--surface)] py-1 px-2 rounded">{s.file}</p>}
                                           </div>
                                         ))}
                                       </div>
@@ -893,7 +892,11 @@ export default function Home() {
                             )}
 
                             {staticTab === 'virustotal' && (() => {
-                              const vt = (current.evidence as any)?.virustotal;
+                              const vt = current.evidence?.virustotal as VirusTotalSummary | undefined;
+                              const malicious = vt?.malicious || 0;
+                              const undetected = vt?.undetected || 0;
+                              const total = vt?.total || 0;
+                              const permalink = vt?.permalink || '#';
                               return (
                                 <div className="space-y-4 animate-fadeIn">
                                   {!vt || vt.status === 'skipped' ? (
@@ -908,25 +911,25 @@ export default function Home() {
                                   ) : vt.status === 'success' ? (
                                     <div className="space-y-4">
                                       <div className="grid grid-cols-3 gap-3">
-                                        <div className={`py-4 px-5 rounded-2xl border text-center space-y-1 ${ vt.malicious > 0 ? 'bg-[var(--red)]/10 border-[var(--red)]/30' : 'bg-[var(--green)]/10 border-[var(--green)]/30'}`}>
-                                          <p className={`text-[32px] font-bold tabular-nums ${ vt.malicious > 0 ? 'text-[var(--red)]' : 'text-[var(--green)]'}`}>{vt.malicious}</p>
+                                        <div className={`py-4 px-5 rounded-2xl border text-center space-y-1 ${ malicious > 0 ? 'bg-[var(--red)]/10 border-[var(--red)]/30' : 'bg-[var(--green)]/10 border-[var(--green)]/30'}`}>
+                                          <p className={`text-[32px] font-bold tabular-nums ${ malicious > 0 ? 'text-[var(--red)]' : 'text-[var(--green)]'}`}>{malicious}</p>
                                           <p className="text-[12px] text-[var(--muted)] uppercase tracking-widest">Malicious</p>
                                         </div>
                                         <div className="py-4 px-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-2)]/40 text-center space-y-1">
-                                          <p className="text-[32px] font-bold tabular-nums text-[var(--muted)]">{vt.undetected}</p>
+                                          <p className="text-[32px] font-bold tabular-nums text-[var(--muted)]">{undetected}</p>
                                           <p className="text-[12px] text-[var(--muted)] uppercase tracking-widest">Undetected</p>
                                         </div>
                                         <div className="py-4 px-5 rounded-2xl border border-[var(--border)] bg-[var(--surface-2)]/40 text-center space-y-1">
-                                          <p className="text-[32px] font-bold tabular-nums">{vt.total}</p>
+                                          <p className="text-[32px] font-bold tabular-nums">{total}</p>
                                           <p className="text-[12px] text-[var(--muted)] uppercase tracking-widest">Engines</p>
                                         </div>
                                       </div>
-                                      {vt.malicious > 0 && (
+                                      {malicious > 0 && (
                                         <div className="py-2 px-4 rounded-xl bg-[var(--red)]/10 border border-[var(--red)]/20">
-                                          <p className="text-[13px] font-semibold text-[var(--red)]">⚠ {vt.malicious} of {vt.total} antivirus engines flagged this file as malicious.</p>
+                                          <p className="text-[13px] font-semibold text-[var(--red)]">⚠ {malicious} of {total} antivirus engines flagged this file as malicious.</p>
                                         </div>
                                       )}
-                                      <a href={vt.permalink} target="_blank" rel="noopener noreferrer"
+                                      <a href={permalink} target="_blank" rel="noopener noreferrer"
                                         className="flex items-center gap-2 text-[13px] text-[var(--blue)] hover:underline">
                                         View full VirusTotal report →
                                       </a>
@@ -1282,18 +1285,11 @@ export default function Home() {
                       <div className="security-card p-6 space-y-3">
                         <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Remediation</p>
                         <ul className="space-y-2">
-                          {activeRemediation.map((r, i) => {
-                            const displayValue = typeof r === 'string'
-                              ? r
-                              : (r && typeof r === 'object'
-                                  ? ((r as any).recommendation || (r as any).action || (r as any).description || (r as any).title || JSON.stringify(r))
-                                  : String(r));
-                            return (
-                              <li key={i} className="text-[15px] pl-3 border-l-2 border-[var(--green)]">
-                                {displayValue}
-                              </li>
-                            );
-                          })}
+                          {activeRemediation.map((recommendation, i) => (
+                            <li key={i} className="text-[15px] pl-3 border-l-2 border-[var(--green)]">
+                              {recommendation}
+                            </li>
+                          ))}
                         </ul>
                       </div>
                     )}

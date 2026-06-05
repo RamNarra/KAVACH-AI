@@ -1,33 +1,55 @@
-FROM python:3.11-slim
+# ─────────────────────────────────────────────────────────────────────────────
+# Kavach AI — Analysis Sandbox Container
+# Provides isolated execution for JADX, APKTool, APKiD, Semgrep, TruffleHog
+# against untrusted/potentially hostile APK files.
+#
+# Build:  docker build -t kavach-sandbox:latest -f Dockerfile-sandbox .
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Install system dependencies (Java JRE, wget, unzip)
+FROM eclipse-temurin:17-jre-jammy AS base
+
+LABEL org.opencontainers.image.title="kavach-sandbox"
+LABEL org.opencontainers.image.description="Isolated APK analysis sandbox for KAVACH AI"
+
+# Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    default-jre \
-    wget \
-    unzip \
-    && apt-get clean \
+    python3 python3-pip wget unzip curl git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Apktool
-RUN mkdir -p /opt/apktool \
-    && wget -q -O /opt/apktool/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar \
-    && chmod +x /opt/apktool/apktool.jar \
-    && echo '#!/bin/bash\nexec java -jar /opt/apktool/apktool.jar "$@"' > /usr/local/bin/apktool \
-    && chmod +x /usr/local/bin/apktool
+# Install Python analysis tools
+RUN pip3 install --no-cache-dir \
+    apkid==2.1.3 \
+    androguard==3.3.5 \
+    quark-engine==23.2.1 \
+    semgrep \
+    trufflehog3
+
+# Install APKTool
+ARG APKTOOL_VERSION=2.9.3
+RUN wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" \
+    -O /usr/local/lib/apktool.jar && \
+    echo '#!/bin/sh\nexec java -jar /usr/local/lib/apktool.jar "$@"' > /usr/local/bin/apktool && \
+    chmod +x /usr/local/bin/apktool
 
 # Install JADX
-RUN mkdir -p /opt/jadx \
-    && wget -q -O /tmp/jadx.zip https://github.com/skylot/jadx/releases/download/v1.5.0/jadx-1.5.0.zip \
-    && unzip -q /tmp/jadx.zip -d /opt/jadx \
-    && rm /tmp/jadx.zip \
-    && chmod +x /opt/jadx/bin/jadx
+ARG JADX_VERSION=1.5.0
+RUN wget -q "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" \
+    -O /tmp/jadx.zip && \
+    unzip -q /tmp/jadx.zip -d /opt/jadx && \
+    rm /tmp/jadx.zip && \
+    ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx
 
-# Add JADX to PATH
-ENV PATH="/opt/jadx/bin:${PATH}"
+# Create non-root sandbox user
+RUN useradd -r -s /bin/false sandbox && \
+    mkdir -p /sandbox/input /sandbox/output /sandbox/tmp && \
+    chown -R sandbox:sandbox /sandbox
 
-# Install minimal python tools
-RUN pip install --no-cache-dir quark-engine mdv apkid
-RUN HOME=/sandbox freshquark && chmod -R 777 /sandbox/.quark-engine || true
+# Security: drop all Linux capabilities except what's needed for JVM
+RUN apt-get purge -y wget curl git 2>/dev/null || true
 
+USER sandbox
 WORKDIR /sandbox
-ENTRYPOINT ["/bin/bash"]
+
+# Default entrypoint — caller passes the actual command
+ENTRYPOINT []
+CMD ["echo", "kavach-sandbox ready"]

@@ -1,5 +1,4 @@
-import { motion } from 'framer-motion';
-import type { ThreatLevel } from '../lib/types';
+import type { FraudBadge, ThreatLevel } from '../lib/types';
 
 interface ScoreCardProps {
   score: number;
@@ -8,7 +7,7 @@ interface ScoreCardProps {
   absoluteScore?: number;
   fraudScore?: number;
   filename: string;
-  activeBadges: any[];
+  activeBadges: FraudBadge[];
   logs: string[];
   chatOpen: boolean;
   setChatOpen: (open: boolean) => void;

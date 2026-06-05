@@ -653,6 +653,18 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
                     
                 for pat, label, sc in _STR_PATTERNS:
                     if re.search(pat, val) and val not in seen_strings:
+                        if label == "Long Base64 Blob":
+                            if val.startswith("L") and val.endswith(";"):
+                                continue
+                            # Skip short strings that can't be meaningful Base64
+                            if len(val) < 20:
+                                continue
+                            # Skip pure-alphanumeric strings without Base64 padding/special chars
+                            if not any(c in val for c in ('+', '=')) and '/' not in val:
+                                continue
+                            if "/" in val and not any(x in val for x in ("+", "=")):
+                                if re.match(r"^L?[a-zA-Z0-9_]+(/[a-zA-Z0-9_]+)+;?$", val):
+                                    continue
                         seen_strings.add(val)
                         findings["suspicious_strings"].append({
                             "type": label,

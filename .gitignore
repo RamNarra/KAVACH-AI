@@ -11,6 +11,8 @@ backend/tools/
 backend/*.log
 frontend/*.log
 *.log
+*.quark.log
+uvicorn.log
 .firebase/
 .DS_Store
 *.apk

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://img.shields.io/badge/Security-Forensic--Grade-red?style=for-the-badge&logo=shield" alt="Security" />
+  <img src="https://img.shields.io/badge/Security-Research--Prototype-red?style=for-the-badge&logo=shield" alt="Security" />
   <img src="https://img.shields.io/badge/AI-Multi--Tier--Resilient-purple?style=for-the-badge&logo=google-gemini" alt="GenAI" />
   <img src="https://img.shields.io/badge/Framework-Next.js--14-black?style=for-the-badge&logo=next.js" alt="Next.js" />
   <img src="https://img.shields.io/badge/Backend-FastAPI-009688?style=for-the-badge&logo=fastapi" alt="FastAPI" />
@@ -11,9 +11,9 @@
   <strong>Generative AI-Powered Mobile Banking Trojan Sandbox & Explainable Threat Auditing System</strong>
 </p>
 
-Kavach AI is an automated, forensic-grade malware analysis sandbox for Android applications (`.apk`). It statically decompiles Android packages in a GIL-free concurrent pipeline, injects custom Frida hooks at runtime (intercepting deep OkHttp3 and Retrofit C2 socket channels), and leverages a **multi-tiered Google Gemini 3.5 Flash gateway** to synthesize complex bytecode/network traces into highly explainable, consumer-grade security reports.
+Kavach AI is an automated Android malware-analysis prototype for `.apk` samples. It statically decompiles Android packages in a concurrent pipeline, injects Frida hooks at runtime for sandbox traces, and uses Google Gemini synthesis to turn bytecode and runtime evidence into readable investigation reports.
 
-The threat assessment is driven by a transparent **OWASP Likelihood x Impact scoring matrix**, ensuring 100% mathematical scoring determinism immune to GenAI hallucinations.
+The threat assessment is driven by a transparent **OWASP Likelihood x Impact scoring matrix**, keeping the numeric score deterministic even when the narrative explanation is AI-assisted.
 
 ---
 
@@ -23,7 +23,7 @@ The threat assessment is driven by a transparent **OWASP Likelihood x Impact sco
 - 🎯 **MITRE ATT&CK Mapping**: Deep semantic code auditing (Quark Engine + Androguard DEX constant tables) dynamically maps found triggers to the standard MITRE ATT&CK Mobile matrix.
 - 🔬 **OkHttp3/Retrofit Decoupled Telemetry**: Standard socket tracing hooks only capture raw encrypted binary streams. Kavach AI injects custom Frida hooks targeting `okhttp3.RealCall.enqueue` and `execute` methods to capture fully decrypted HTTP/JSON outbound payloads before TLS transport.
 - 🌀 **Resilient Sandbox Spawner**: Engineered to survive virtualization lag on modern hypervisors. Implements a double-launch ADB fallback (explicit Activity starts with instant ADB `monkey` fallbacks) and advanced process searching (`pidof` + `ps -A` process parsers) over 15 attempts.
-- 🧠 **Tiered Cognitive GenAI Layer**: A defensive, highly resilient AI generation gateway. Executes on `gemini-3.5-flash` under 15 RPM constraints, falls back gracefully to `gemini-3.1-flash-lite` if rate limits are exhausted, and degrades to an offline rule parser if cloud services are offline.
+- 🧠 **Tiered Cognitive GenAI Layer**: Uses `gemini-3.5-flash` with a fallback to `gemini-3.1-flash-lite`, plus offline fallback messaging when cloud synthesis is unavailable.
 - 💻 **Premium Widescreen 1600px UI**: Modular, glassmorphic Next.js App Router UI styled to occupy the full widescreen width. Features visual score gauges, interactive ATT&CK accordions, live laboratory logs console, and segmented tabs (Static, Dynamic, and Combined views).
 
 ---

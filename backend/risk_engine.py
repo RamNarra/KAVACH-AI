@@ -14,38 +14,50 @@ def build_risk_decomposition(
     absolute_score: int = 0,
 ) -> Dict[str, Any]:
     """Produce weighted breakdown and top contributors for UI."""
-    weights = {
-        "static": 0.35,
-        "dynamic": 0.25,
-        "ai": 0.25,
-        "banking_fraud": 0.15,
-    }
-    
-    # Adjust weights if no dynamic analysis was conducted
+    # independent_ai_score: zero if Gemini was forced to equal det_score (no independent signal)
+    independent_ai_score = ai_score if ai_score != static_score else 0
+
+    # Build weights based on available signal sources.
+    # Normalisation below ensures they always sum to 1.0 regardless of branch.
     if dynamic_score == 0 and fraud_score == 0:
-        weights = {
-            "static": 0.60,
-            "dynamic": 0.00,
-            "ai": 0.40,
-            "banking_fraud": 0.00,
-        }
+        if independent_ai_score > 0:
+            # Gemini returned a genuinely different score — honour it at 20%
+            weights = {"static": 0.80, "dynamic": 0.00, "ai": 0.20, "banking_fraud": 0.00}
+        else:
+            # Truly static-only: composite == det_score (honest, no inflation)
+            weights = {"static": 1.00, "dynamic": 0.00, "ai": 0.00, "banking_fraud": 0.00}
     elif dynamic_score == 0:
+        # Static + banking fraud, optional independent AI
+        weights = {
+            "static": 0.65,
+            "dynamic": 0.00,
+            "ai": 0.10 if independent_ai_score > 0 else 0.00,
+            "banking_fraud": 0.25,
+        }
+    else:
+        # Full pipeline: static + dynamic + optional AI + banking fraud
         weights = {
             "static": 0.50,
-            "dynamic": 0.00,
-            "ai": 0.35,
-            "banking_fraud": 0.15,
+            "dynamic": 0.30,
+            "ai": 0.10 if independent_ai_score > 0 else 0.00,
+            "banking_fraud": 0.20,
         }
+
+    # Normalise weights so they always sum to 1.0 (prevents systematic bias)
+    total_weight = sum(weights.values())
+    if total_weight > 0:
+        weights = {k: round(v / total_weight, 4) for k, v in weights.items()}
 
     components = {
         "static": min(100, max(0, static_score)),
         "dynamic": min(100, max(0, dynamic_score)),
-        "ai": min(100, max(0, ai_score)),
+        "ai": min(100, max(0, independent_ai_score)),
         "banking_fraud": min(100, max(0, fraud_score)),
     }
-    
+
     weighted = {k: round(components[k] * weights[k], 1) for k in components}
     composite = min(100, round(sum(weighted.values())))
+
 
     top = sorted(contributors or [], key=lambda x: x.get("weight", 0), reverse=True)[:5]
 
