@@ -37,8 +37,8 @@ androguard==3.4.0a1
 semgrep>=1.65.0
 
 # --- Dynamic Analysis (Frida Hooking) ---
-frida>=16.0.0
-frida-tools>=12.0.0
+frida==16.2.5
+frida-tools==12.3.0
 
 # --- Runtime & Utilities ---
 tqdm>=4.65.0

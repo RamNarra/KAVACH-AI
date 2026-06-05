@@ -1144,6 +1144,9 @@ def select_key_java_files(jadx_dir: str, package_name: str) -> tuple[Dict[str, s
     return key_files, all_paths
 
 def delete_storage_object(apk_url: str):
+    if not firebase_admin._apps:
+        logger.info("Firebase Admin not initialized; skipping remote storage cleanup.")
+        return
     try:
         bucket = firebase_storage.bucket()
         blob_path = None
