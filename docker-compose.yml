@@ -1,6 +1,13 @@
 version: '3.8'
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: kavach-redis
+    ports:
+      - "6379:6379"
+    restart: always
+
   backend:
     build:
       context: ./backend
@@ -13,12 +20,34 @@ services:
       - PROJECT_ID=${PROJECT_ID:-kavach-ai-497708}
       - LOCATION=${LOCATION:-global}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/service-account.json
       - DYNAMIC_DURATION_SECS=${DYNAMIC_DURATION_SECS:-25}
       - SANDBOX_GPU_MODE=${SANDBOX_GPU_MODE:-swiftshader}
+      - REDIS_URL=redis://redis:6379/0
+      - USE_CELERY=1
     volumes:
-      # Mounts local service-account.json for GCP / Firebase authentication if available
       - ./backend/service-account.json:/app/service-account.json:ro
+      - scan-cache:/app/tmp_scans
+    depends_on:
+      - redis
+    restart: always
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: kavach-celery-worker
+    command: celery -A celery_app worker --loglevel=info
+    environment:
+      - PROJECT_ID=${PROJECT_ID:-kavach-ai-497708}
+      - LOCATION=${LOCATION:-global}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - USE_CELERY=1
+    volumes:
+      - ./backend/service-account.json:/app/service-account.json:ro
+      - scan-cache:/app/tmp_scans
+    depends_on:
+      - redis
     restart: always
 
   frontend:
@@ -34,3 +63,7 @@ services:
     depends_on:
       - backend
     restart: always
+
+volumes:
+  scan-cache:
+

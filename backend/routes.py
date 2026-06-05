@@ -168,6 +168,44 @@ def inject_globals(g: dict):
     for k, v in g.items():
         setattr(module, k, v)
 
+
+def queue_static_analysis(doc_id: str, request, release_semaphore: bool = False, background_tasks = None):
+    use_celery = os.getenv("USE_CELERY", "0") in ("1", "true", "True")
+    if use_celery:
+        try:
+            from celery_app import run_static_analysis
+            req_dict = request.model_dump() if hasattr(request, "model_dump") else request.dict()
+            run_static_analysis.delay(doc_id, req_dict, release_semaphore)
+            logger.info(f"Queued static analysis task {doc_id} to Celery")
+            return
+        except Exception as e:
+            logger.warning(f"Failed to queue static analysis on Celery: {e}. Falling back to background task.")
+    
+    if background_tasks:
+        background_tasks.add_task(run_analysis_pipeline, doc_id, request, release_semaphore)
+    else:
+        import threading
+        threading.Thread(target=run_analysis_pipeline, args=(doc_id, request, release_semaphore)).start()
+
+
+def queue_dynamic_analysis(doc_id: str, apk_url: str, uid: str, background_tasks = None):
+    use_celery = os.getenv("USE_CELERY", "0") in ("1", "true", "True")
+    if use_celery:
+        try:
+            from celery_app import run_dynamic_analysis
+            run_dynamic_analysis.delay(doc_id, apk_url, uid)
+            logger.info(f"Queued dynamic analysis task {doc_id} to Celery")
+            return
+        except Exception as e:
+            logger.warning(f"Failed to queue dynamic analysis on Celery: {e}. Falling back to background task.")
+    
+    if background_tasks:
+        background_tasks.add_task(run_dynamic_analysis_pipeline, doc_id, apk_url, uid)
+    else:
+        import threading
+        threading.Thread(target=run_dynamic_analysis_pipeline, args=(doc_id, apk_url, uid)).start()
+
+
 # ─── Route Handlers ────────────────────────────────────────────────────────────
 @router.get("/")
 @router.get("/api")
@@ -695,7 +733,7 @@ def trigger_dynamic_analysis(
         "logs": firestore.ArrayUnion(["[DYNAMIC] Triggered dynamic analysis sandbox sequentially."])
     })
     
-    background_tasks.add_task(run_dynamic_analysis_pipeline, id, doc_data.get("apk_url"), verified_uid)
+    queue_dynamic_analysis(id, doc_data.get("apk_url"), verified_uid, background_tasks)
     return {"status": "PROCESSING"}
 
 
@@ -1068,7 +1106,7 @@ def analyze_apk_upload(
     doc_ref.set(initial_doc)
 
     if background:
-        background_tasks.add_task(run_analysis_pipeline, doc_id, request, True)
+        queue_static_analysis(doc_id, request, True, background_tasks)
         return initial_doc
     else:
         try:
@@ -1135,7 +1173,7 @@ def analyze_apk(
     doc_ref.set(initial_doc)
 
     if background:
-        background_tasks.add_task(run_analysis_pipeline, doc_id, request)
+        queue_static_analysis(doc_id, request, False, background_tasks)
         return initial_doc
     else:
         try:
@@ -1214,7 +1252,7 @@ def run_analysis(
         _assert_doc_access(http_request, doc.to_dict())
             
         if background:
-            background_tasks.add_task(run_analysis_pipeline, id, request)
+            queue_static_analysis(id, request, False, background_tasks)
             return doc.to_dict()
         else:
             final_doc = run_analysis_pipeline(id, request)

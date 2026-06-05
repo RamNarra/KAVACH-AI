@@ -1,5 +1,5 @@
 """
-local_db.py — Drop-in Firestore replacement using local JSON file storage.
+local_db.py — Drop-in Firestore replacement using local SQLite storage with WAL mode.
 Mimics the Firestore client API surface used by Kavach AI main.py.
 No Firebase / GCP credentials required.
 """
@@ -7,54 +7,46 @@ No Firebase / GCP credentials required.
 import os
 import json
 import uuid
+import sqlite3
 import threading
 from typing import Any, Dict, Optional, List
-import tempfile
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX fallback
-    fcntl = None
+_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_scans", "local_store.db")
+_db_initialized = False
+_init_lock = threading.Lock()
 
-_STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_scans", "local_store.json")
-_lock = threading.Lock()
-_LOCK_PATH = _STORE_PATH + ".lock"
-
-
-def _load() -> Dict[str, Any]:
-    if os.path.exists(_STORE_PATH):
+def _init_db():
+    global _db_initialized
+    if _db_initialized:
+        return
+    with _init_lock:
+        if _db_initialized:
+            return
+        os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(_DB_PATH, timeout=30.0)
         try:
-            with open(_STORE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS documents ("
+                "key TEXT PRIMARY KEY, "
+                "collection TEXT, "
+                "doc_id TEXT, "
+                "data TEXT"
+                ");"
+            )
+            conn.commit()
+            _db_initialized = True
+        finally:
+            conn.close()
 
 
-def _save(data: Dict[str, Any]):
-    os.makedirs(os.path.dirname(_STORE_PATH), exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix="local_store_", suffix=".json", dir=os.path.dirname(_STORE_PATH))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, default=str)
-        os.replace(temp_path, _STORE_PATH)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-
-class _FileLock:
-    def __enter__(self):
-        os.makedirs(os.path.dirname(_LOCK_PATH), exist_ok=True)
-        self._fh = open(_LOCK_PATH, "a+", encoding="utf-8")
-        if fcntl is not None:
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
-        return self._fh
-
-    def __exit__(self, exc_type, exc, tb):
-        if fcntl is not None:
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        self._fh.close()
+def _get_conn():
+    _init_db()
+    conn = sqlite3.connect(_DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
 
 
 def _get_nested(data: Dict[str, Any], field: str, default: Any = None) -> Any:
@@ -105,21 +97,38 @@ class DocumentReference:
         return f"{self._col}/{self.id}"
 
     def get(self) -> DocumentSnapshot:
-        with _lock, _FileLock():
-            store = _load()
-        data = store.get(self._key())
-        return DocumentSnapshot(self.id, data)
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT data FROM documents WHERE key = ?", (self._key(),))
+            row = cursor.fetchone()
+            if row:
+                data = json.loads(row[0])
+                return DocumentSnapshot(self.id, data)
+            return DocumentSnapshot(self.id, None)
+        finally:
+            conn.close()
 
     def set(self, data: Dict):
-        with _lock, _FileLock():
-            store = _load()
-            store[self._key()] = dict(data)
-            _save(store)
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO documents (key, collection, doc_id, data) VALUES (?, ?, ?, ?)",
+                (self._key(), self._col, self.id, json.dumps(data, default=str))
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def update(self, updates: Dict):
-        with _lock, _FileLock():
-            store = _load()
-            existing = store.get(self._key(), {})
+        conn = _get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE;")
+            cursor = conn.cursor()
+            cursor.execute("SELECT data FROM documents WHERE key = ?", (self._key(),))
+            row = cursor.fetchone()
+            existing = json.loads(row[0]) if row else {}
             for k, v in updates.items():
                 if isinstance(v, ArrayUnion):
                     existing_list = _get_nested(existing, k, [])
@@ -128,14 +137,25 @@ class DocumentReference:
                     _set_nested(existing, k, existing_list + v.values)
                 else:
                     _set_nested(existing, k, v)
-            store[self._key()] = existing
-            _save(store)
+            cursor.execute(
+                "INSERT OR REPLACE INTO documents (key, collection, doc_id, data) VALUES (?, ?, ?, ?)",
+                (self._key(), self._col, self.id, json.dumps(existing, default=str))
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def delete(self):
-        with _lock, _FileLock():
-            store = _load()
-            store.pop(self._key(), None)
-            _save(store)
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM documents WHERE key = ?", (self._key(),))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ─── Query (simplified — supports where + orderBy + limit) ────────────────────
@@ -219,15 +239,21 @@ class CollectionReference:
         return self._make_query().order_by(field, direction)
 
     def _make_query(self) -> Query:
-        with _lock, _FileLock():
-            store = _load()
-        prefix = f"{self._name}/"
-        docs = [
-            (k[len(prefix):], v)
-            for k, v in store.items()
-            if k.startswith(prefix)
-        ]
-        return Query(self._name, docs)
+        conn = _get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT doc_id, data FROM documents WHERE collection = ?", (self._name,))
+            rows = cursor.fetchall()
+            docs = []
+            for doc_id, data_str in rows:
+                try:
+                    data = json.loads(data_str)
+                    docs.append((doc_id, data))
+                except Exception:
+                    pass
+            return Query(self._name, docs)
+        finally:
+            conn.close()
 
     def get(self) -> List[DocumentSnapshot]:
         return self._make_query().get()
@@ -245,3 +271,4 @@ class _Direction:
     ASCENDING = "ASCENDING"
 
 Query_Direction = _Direction()
+
