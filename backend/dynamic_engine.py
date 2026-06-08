@@ -289,7 +289,6 @@ def run_behavioral_trace(
     thread_local.device_serial = device_serial
     if os.environ.get("KAVACH_DEMO_MODE") == "1":
         import json
-        import time
         demo_path = os.path.join(os.path.dirname(__file__), "demo_trace.json")
         try:
             if log_callback:
