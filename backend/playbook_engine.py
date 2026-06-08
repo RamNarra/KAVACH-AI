@@ -563,11 +563,13 @@ def _step_vision_guided_play(
     adb: str,
     tmp_dir: str,
     transcript: list,
-    log_callback=None
+    log_callback=None,
+    max_steps: int = 4
 ) -> None:
     """
     Take a screenshot of the running emulator screen, send it directly to Gemini
     along with vision prompt instructions, and trigger ADB input/tap actions dynamically.
+    Runs in a loop to explore multiple screens sequentially.
     """
     def _log(msg: str):
         if log_callback:
@@ -592,124 +594,130 @@ def _step_vision_guided_play(
             height = int(match.group(2))
             _log(f"Detected screen size: {width}x{height}")
 
-    # 2. Capture screenshot
-    remote = "/sdcard/kavach_screencap_vision.png"
-    local = os.path.join(tmp_dir, "screencap_vision.png")
-    
-    r_cap = _run([adb, "shell", "screencap", "-p", remote])
-    if r_cap.returncode != 0:
-        _log("Failed to capture emulator screen via adb.")
-        return
-    _run([adb, "pull", remote, local])
-    _run([adb, "shell", "rm", "-f", remote])
+    _log(f"Starting Vision-Guided Exploration Loop ({max_steps} steps max)...")
 
-    if not os.path.exists(local):
-        _log("Failed to pull screencap file locally.")
-        return
-
-    try:
-        from PIL import Image
-        img = Image.open(local)
-    except Exception as e:
-        _log(f"Failed to open screencap image: {e}")
-        return
-
-    # 3. Query Gemini Vision
-    try:
-        prompt = (
-            "You are an AI security sandbox assistant. This is a screenshot of an Android app running inside our emulator.\n"
-            "Determine if this is a login screen, permission request, terms, loading page, or landing page, and identify the interactive "
-            "component we need to click or interact with next to progress further and trigger network traffic (e.g. 'Allow' button, "
-            "'Continue' button, 'Log In' button, or input fields).\n"
-            "Provide the coordinates of the target element to click as relative percentages of the screen width and height (from 0.0 to 100.0).\n\n"
-            "You must return a strict JSON response matching this schema:\n"
-            "{\n"
-            "  \"screen_type\": \"login | permission | dashboard | loading | unknown\",\n"
-            "  \"action\": \"click | type | wait | unknown\",\n"
-            "  \"target_x_percent\": 50.0,\n"
-            "  \"target_y_percent\": 85.0,\n"
-            "  \"text_to_type\": \"test_input_value_if_action_is_type\",\n"
-            "  \"explanation\": \"Brief explanation of what this element is and why we are clicking it\"\n"
-            "}\n"
-            "Ensure you return ONLY raw JSON, with no markdown code blocks or wrapper text."
-        )
-
-        _log("Dispatching emulator screenshot to Gemini 3.1 Flash Lite for vision-guided target localization...")
+    for step_idx in range(1, max_steps + 1):
+        _log(f"--- Vision Exploration Step {step_idx}/{max_steps} ---")
         
-        # Enforce rate limit delay before dynamic play API requests
-        time.sleep(4.0)
+        # 2. Capture screenshot
+        remote = f"/sdcard/kavach_screencap_vision_{step_idx}.png"
+        local = os.path.join(tmp_dir, f"screencap_vision_{step_idx}.png")
+        
+        r_cap = _run([adb, "shell", "screencap", "-p", remote])
+        if r_cap.returncode != 0:
+            _log("Failed to capture emulator screen via adb. Ending loop early.")
+            break
+        _run([adb, "pull", remote, local])
+        _run([adb, "shell", "rm", "-f", remote])
 
-        ai_response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
-            contents=[img, prompt],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2,
+        if not os.path.exists(local):
+            _log("Failed to pull screencap file locally. Ending loop early.")
+            break
+
+        try:
+            from PIL import Image
+            img = Image.open(local)
+        except Exception as e:
+            _log(f"Failed to open screencap image: {e}. Ending loop early.")
+            break
+
+        # 3. Query Gemini Vision
+        try:
+            prompt = (
+                "You are an AI security sandbox assistant. This is a screenshot of an Android app running inside our emulator.\n"
+                "Determine if this is a login screen, permission request, terms, loading page, dashboard, or landing page, and identify the interactive "
+                "component we need to click or interact with next to progress further and trigger network traffic (e.g. 'Allow' button, "
+                "'Continue' button, 'Log In' button, or input fields).\n"
+                "Provide the coordinates of the target element to click as relative percentages of the screen width and height (from 0.0 to 100.0).\n\n"
+                "You must return a strict JSON response matching this schema:\n"
+                "{\n"
+                "  \"screen_type\": \"login | permission | dashboard | loading | unknown\",\n"
+                "  \"action\": \"click | type | wait | unknown\",\n"
+                "  \"target_x_percent\": 50.0,\n"
+                "  \"target_y_percent\": 85.0,\n"
+                "  \"text_to_type\": \"test_input_value_if_action_is_type\",\n"
+                "  \"explanation\": \"Brief explanation of what this element is and why we are clicking it\"\n"
+                "}\n"
+                "Ensure you return ONLY raw JSON, with no markdown code blocks or wrapper text."
             )
-        )
 
-        # Clean and parse response
-        text_resp = ai_response.text.strip()
-        if text_resp.startswith("```json"):
-            text_resp = text_resp[7:]
-        elif text_resp.startswith("```"):
-            text_resp = text_resp[3:]
-        if text_resp.endswith("```"):
-            text_resp = text_resp[:-3]
-        
-        res_dict = json.loads(text_resp.strip())
-        _log(f"Gemini vision response: screen_type={res_dict.get('screen_type')}, action={res_dict.get('action')}, explanation={res_dict.get('explanation')}")
-
-        action = res_dict.get("action")
-        target_x_percent = res_dict.get("target_x_percent")
-        target_y_percent = res_dict.get("target_y_percent")
-
-        if action in ("click", "type") and target_x_percent is not None and target_y_percent is not None:
-            # Auto-scale if Gemini outputs coordinates on a 0-1000 scale instead of 0-100
-            if target_x_percent > 100.0:
-                target_x_percent /= 10.0
-            if target_y_percent > 100.0:
-                target_y_percent /= 10.0
-
-            tx = int((target_x_percent / 100.0) * width)
-            ty = int((target_y_percent / 100.0) * height)
+            _log(f"Sending screenshot {step_idx} to Gemini Vision...")
             
-            _log(f"Executing action '{action}' on coordinate ({tx}, {ty})")
-            _tap(adb, tx, ty)
-            time.sleep(0.5)
-            
-            if action == "type" and res_dict.get("text_to_type"):
-                _text_input(adb, res_dict["text_to_type"])
-                _log(f"Typed '{res_dict['text_to_type']}' into coordinate ({tx}, {ty})")
-                time.sleep(0.5)
+            # Enforce rate limit delay before dynamic play API requests
+            time.sleep(4.0)
 
+            ai_response = client.models.generate_content(
+                model="gemini-3.1-flash-lite",
+                contents=[img, prompt],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.2,
+                )
+            )
+
+            # Clean and parse response
+            text_resp = ai_response.text.strip()
+            if text_resp.startswith("```json"):
+                text_resp = text_resp[7:]
+            elif text_resp.startswith("```"):
+                text_resp = text_resp[3:]
+            if text_resp.endswith("```"):
+                text_resp = text_resp[:-3]
+            
+            res_dict = json.loads(text_resp.strip())
+            _log(f"Gemini vision response: screen_type={res_dict.get('screen_type')}, action={res_dict.get('action')}, explanation={res_dict.get('explanation')}")
+
+            action = res_dict.get("action")
+            target_x_percent = res_dict.get("target_x_percent")
+            target_y_percent = res_dict.get("target_y_percent")
+
+            if action in ("click", "type") and target_x_percent is not None and target_y_percent is not None:
+                # Auto-scale if Gemini outputs coordinates on a 0-1000 scale instead of 0-100
+                if target_x_percent > 100.0:
+                    target_x_percent /= 10.0
+                if target_y_percent > 100.0:
+                    target_y_percent /= 10.0
+
+                tx = int((target_x_percent / 100.0) * width)
+                ty = int((target_y_percent / 100.0) * height)
+                
+                _log(f"Executing action '{action}' on coordinate ({tx}, {ty})")
+                _tap(adb, tx, ty)
+                time.sleep(1.0)
+                
+                if action == "type" and res_dict.get("text_to_type"):
+                    _text_input(adb, res_dict["text_to_type"])
+                    _log(f"Typed '{res_dict['text_to_type']}' into coordinate ({tx}, {ty})")
+                    time.sleep(1.0)
+
+                transcript.append(_step(
+                    "vision_guided_play",
+                    f"Vision-Guided Action (Step {step_idx}): {action} on ({tx}, {ty}) - {res_dict.get('explanation')}",
+                    "succeeded",
+                    f"Type: {res_dict.get('screen_type')}"
+                ))
+            elif action == "wait":
+                _log("Gemini requested wait. Sleeping 3 seconds.")
+                time.sleep(3.0)
+                transcript.append(_step(
+                    "vision_guided_play",
+                    f"Vision-Guided Action (Step {step_idx}): wait - {res_dict.get('explanation')}",
+                    "succeeded"
+                ))
+            else:
+                transcript.append(_step(
+                    "vision_guided_play",
+                    f"Vision-Guided Action (Step {step_idx}): skipped (no clear element to interact with)",
+                    "skipped"
+                ))
+        except Exception as e:
+            _log(f"Vision-guided step {step_idx} failed: {e}")
             transcript.append(_step(
                 "vision_guided_play",
-                f"Vision-Guided Action: {action} on ({tx}, {ty}) - {res_dict.get('explanation')}",
-                "succeeded",
-                f"Type: {res_dict.get('screen_type')}"
+                f"Vision-Guided Action (Step {step_idx}) failed: {e}",
+                "failed"
             ))
-        elif action == "wait":
-            _log("Gemini requested wait. Sleeping 2 seconds.")
             time.sleep(2.0)
-            transcript.append(_step(
-                "vision_guided_play",
-                f"Vision-Guided Action: wait - {res_dict.get('explanation')}",
-                "succeeded"
-            ))
-        else:
-            transcript.append(_step(
-                "vision_guided_play",
-                "Vision-Guided Action: skipped (no clear element to interact with)",
-                "skipped"
-            ))
-    except Exception as e:
-        _log(f"Vision-guided dynamic analysis step failed: {e}")
-        transcript.append(_step(
-            "vision_guided_play",
-            f"Vision-Guided Action failed: {e}",
-            "failed"
-        ))
 
 def _step_background_job_wait(adb: str, transcript: list, secs: float = 5.0) -> None:
     time.sleep(secs)
