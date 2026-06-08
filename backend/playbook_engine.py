@@ -581,9 +581,9 @@ def _step_vision_guided_play(
 
     if max_steps is None:
         try:
-            max_steps = int(os.environ.get("KAVACH_MAX_VISION_STEPS", "5"))
+            max_steps = int(os.environ.get("KAVACH_MAX_VISION_STEPS", "8"))
         except Exception:
-            max_steps = 5
+            max_steps = 8
 
     client = _get_genai_client()
     if not client:
