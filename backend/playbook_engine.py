@@ -564,7 +564,7 @@ def _step_vision_guided_play(
     tmp_dir: str,
     transcript: list,
     log_callback=None,
-    max_steps: int = 4
+    max_steps: Optional[int] = None
 ) -> None:
     """
     Take a screenshot of the running emulator screen, send it directly to Gemini
@@ -578,6 +578,12 @@ def _step_vision_guided_play(
             except Exception:
                 pass
         logger.info(msg)
+
+    if max_steps is None:
+        try:
+            max_steps = int(os.environ.get("KAVACH_MAX_VISION_STEPS", "5"))
+        except Exception:
+            max_steps = 5
 
     client = _get_genai_client()
     if not client:
