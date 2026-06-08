@@ -467,7 +467,8 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                         temperature=0.4,
-                    )
+                    ),
+                    http_options=genai_types.HttpOptions(timeout=20000)
                 )
             except Exception as exc:
                 _log(f"Primary model gemini-3.5-flash failed in playbook: {exc}. Engaging secondary fallback model gemini-3.1-flash-lite...")
@@ -477,7 +478,8 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                         temperature=0.4,
-                    )
+                    ),
+                    http_options=genai_types.HttpOptions(timeout=30000)
                 )
             
             # Clean and parse response
@@ -732,7 +734,8 @@ def _step_vision_guided_play(
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                         temperature=0.2,
-                    )
+                    ),
+                    http_options=genai_types.HttpOptions(timeout=20000)
                 )
             except Exception as exc:
                 _log(f"Primary vision model gemini-3.5-flash failed: {exc}. Engaging secondary fallback model gemini-3.1-flash-lite...")
@@ -742,7 +745,8 @@ def _step_vision_guided_play(
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                         temperature=0.2,
-                    )
+                    ),
+                    http_options=genai_types.HttpOptions(timeout=30000)
                 )
 
             # Clean and parse response

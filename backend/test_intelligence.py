@@ -312,7 +312,7 @@ def test_vision_guided_play_static_context():
             self.text = '{"screen_type": "permission", "action": "click", "target_x_percent": 50.0, "target_y_percent": 85.0, "explanation": "accept perm"}'
 
     class MockModels:
-        def generate_content(self, model, contents, config=None):
+        def generate_content(self, model, contents, config=None, *args, **kwargs):
             # contents can be [img, prompt]
             prompt = contents[1]
             captured_prompts.append(prompt)

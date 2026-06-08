@@ -348,11 +348,11 @@ if os.path.isdir(tools_dir):
 # Load environment configurations
 PROJECT_ID = os.environ.get("PROJECT_ID", "kavach-ai-497708")
 LOCATION = os.environ.get("LOCATION", "global")
-STATIC_MODEL = "gemini-3.5-flash"
-DYNAMIC_MODEL = "gemini-3.5-flash"
-CHAT_MODEL = "gemini-3.5-flash"
+STATIC_MODEL = os.environ.get("KAVACH_STATIC_MODEL", "gemini-3.5-flash")
+DYNAMIC_MODEL = os.environ.get("KAVACH_DYNAMIC_MODEL", "gemini-3.5-flash")
+CHAT_MODEL = os.environ.get("KAVACH_CHAT_MODEL", "gemini-3.5-flash")
 MODEL_NAME = STATIC_MODEL
-FALLBACK_MODEL = "gemini-3.1-flash-lite"
+FALLBACK_MODEL = os.environ.get("KAVACH_FALLBACK_MODEL", "gemini-3.1-flash-lite")
 
 # Decide where to put temporary extraction files to avoid RAM exhaustion on tmpfs systems
 SCAN_TEMP_DIR = os.environ.get("SCAN_TEMP_DIR", os.path.join(_BACKEND_DIR, "tmp_scans"))
@@ -443,24 +443,25 @@ def generate_content_with_fallback(
     fallback_model: str = "gemini-3.1-flash-lite"
 ) -> Any:
     """
-    Executes GenAI content generation using a primary model.
-    Falls back to secondary model if the primary model throws any error (e.g. 15 RPM rate limits).
+    Executes GenAI content generation using a primary model with custom timeouts.
+    Falls back to secondary and tertiary recovery models to prevent hangs.
     """
     if not client:
         raise Exception("GenAI client is not initialized")
         
     gemini_limiter.wait_if_needed()
     try:
-        logger.info(f"Generating content using primary model: {model}")
+        logger.info(f"Generating content using primary model: {model} (20s timeout)")
         return client.models.generate_content(
             model=model,
             contents=contents,
             config=config,
+            http_options=genai_types.HttpOptions(timeout=20000)
         )
     except Exception as exc:
         logger.warning(
-            f"Primary model {model} failed: {exc}. "
-            f"Engaging secondary fallback model: {fallback_model}..."
+            f"Primary model {model} failed or timed out: {exc}. "
+            f"Engaging secondary fallback model: {fallback_model} (30s timeout)..."
         )
         gemini_limiter.wait_if_needed()
         try:
@@ -468,12 +469,31 @@ def generate_content_with_fallback(
                 model=fallback_model,
                 contents=contents,
                 config=config,
+                http_options=genai_types.HttpOptions(timeout=30000)
             )
         except Exception as fallback_exc:
-            logger.error(
-                f"Secondary fallback model {fallback_model} also failed: {fallback_exc}."
-            )
-            raise fallback_exc
+            recovery_model = "gemini-1.5-flash"
+            if fallback_model != recovery_model and model != recovery_model:
+                logger.warning(
+                    f"Fallback model {fallback_model} failed: {fallback_exc}. "
+                    f"Engaging ultra-stable recovery model: {recovery_model}..."
+                )
+                gemini_limiter.wait_if_needed()
+                try:
+                    return client.models.generate_content(
+                        model=recovery_model,
+                        contents=contents,
+                        config=config,
+                        http_options=genai_types.HttpOptions(timeout=30000)
+                    )
+                except Exception as rec_exc:
+                    logger.error(f"Recovery model {recovery_model} also failed: {rec_exc}")
+                    raise rec_exc
+            else:
+                logger.error(
+                    f"Secondary fallback model {fallback_model} also failed: {fallback_exc}."
+                )
+                raise fallback_exc
 
 # Initialize FastAPI App
 app = FastAPI(
