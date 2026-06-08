@@ -563,12 +563,13 @@ def _step_vision_guided_play(
     adb: str,
     tmp_dir: str,
     transcript: list,
+    static_signals: Optional[Dict[str, Any]] = None,
     log_callback=None,
     max_steps: Optional[int] = None
 ) -> None:
     """
     Take a screenshot of the running emulator screen, send it directly to Gemini
-    along with vision prompt instructions, and trigger ADB input/tap actions dynamically.
+    along with vision prompt instructions and static context, and trigger ADB input/tap actions dynamically.
     Runs in a loop to explore multiple screens sequentially.
     """
     def _log(msg: str):
@@ -600,6 +601,55 @@ def _step_vision_guided_play(
             height = int(match.group(2))
             _log(f"Detected screen size: {width}x{height}")
 
+    # Build context string from static signals
+    context_str = ""
+    if static_signals:
+        evidence = static_signals.get("static_evidence") or {}
+        permissions = evidence.get("permissions", [])
+        if not permissions and "permissions" in static_signals:
+            permissions = static_signals["permissions"]
+        
+        hits = evidence.get("malware_rule_hits", [])
+        urls = evidence.get("suspicious_urls", [])
+        net = evidence.get("network_indicators", [])
+        
+        context_parts = []
+        if permissions:
+            context_parts.append(f"- Requested Permissions: {', '.join(permissions)}")
+        if hits:
+            hit_names = []
+            for h in hits:
+                name = h.get("rule_name") or h.get("name") if isinstance(h, dict) else str(h)
+                if name:
+                    hit_names.append(name)
+            if hit_names:
+                context_parts.append(f"- Static Threat Hits: {', '.join(hit_names)}")
+        if urls:
+            url_list = []
+            for u in urls[:5]:
+                val = u.get("url") or u.get("description") if isinstance(u, dict) else str(u)
+                if val:
+                    url_list.append(val)
+            if url_list:
+                context_parts.append(f"- Suspicious URLs/Hosts: {', '.join(url_list)}")
+        if net:
+            net_list = [str(n) for n in net[:5]]
+            context_parts.append(f"- Static Network Indicators: {', '.join(net_list)}")
+            
+        if static_signals.get("has_anti_vm"):
+            context_parts.append("- Anti-VM behavior/checks detected statically.")
+        if static_signals.get("has_login_fields"):
+            context_parts.append("- Login-related fields or components are expected.")
+            
+        if context_parts:
+            context_str = (
+                "CONTEXT FROM STATIC ANALYSIS:\n"
+                "Based on static analysis of the app, we know the following details:\n"
+                + "\n".join(context_parts) + "\n\n"
+                "INSTRUCTION FOR PLAYBOOK NAVIGATION:\n"
+                "Prioritize UI elements, inputs, and screens that can trigger the high-risk behaviors listed above (e.g. click 'Allow' on permission dialogs, input credentials, or trigger web pages/network traffic related to the suspicious URLs/hosts/networks).\n\n"
+            )
+
     _log(f"Starting Vision-Guided Exploration Loop ({max_steps} steps max)...")
 
     for step_idx in range(1, max_steps + 1):
@@ -630,10 +680,11 @@ def _step_vision_guided_play(
         # 3. Query Gemini Vision
         try:
             prompt = (
+                f"{context_str}"
                 "You are an AI security sandbox assistant. This is a screenshot of an Android app running inside our emulator.\n"
                 "Determine if this is a login screen, permission request, terms, loading page, dashboard, or landing page, and identify the interactive "
-                "component we need to click or interact with next to progress further and trigger network traffic (e.g. 'Allow' button, "
-                "'Continue' button, 'Log In' button, or input fields).\n"
+                "component we need to click or interact with next to progress further and trigger network traffic or exercise the features "
+                "identified in the static analysis context (e.g. 'Allow' button, 'Continue' button, 'Log In' button, or input fields).\n"
                 "Provide the coordinates of the target element to click as relative percentages of the screen width and height (from 0.0 to 100.0).\n\n"
                 "You must return a strict JSON response matching this schema:\n"
                 "{\n"
@@ -652,14 +703,25 @@ def _step_vision_guided_play(
             # Enforce rate limit delay before dynamic play API requests
             time.sleep(4.0)
 
-            ai_response = client.models.generate_content(
-                model="gemini-3.1-flash-lite",
-                contents=[img, prompt],
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.2,
+            try:
+                ai_response = client.models.generate_content(
+                    model="gemini-3.5-flash",
+                    contents=[img, prompt],
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                    )
                 )
-            )
+            except Exception as exc:
+                _log(f"Primary vision model gemini-3.5-flash failed: {exc}. Engaging secondary fallback model gemini-3.1-flash-lite...")
+                ai_response = client.models.generate_content(
+                    model="gemini-3.1-flash-lite",
+                    contents=[img, prompt],
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                    )
+                )
 
             # Clean and parse response
             text_resp = ai_response.text.strip()
@@ -901,7 +963,7 @@ def run_playbook(
 
         # Step 13: Vision-guided dynamic play
         _log("Step 13/15: Vision-guided dynamic play")
-        _step_vision_guided_play(adb, tmp_dir, transcript, log_callback=_log)
+        _step_vision_guided_play(adb, tmp_dir, transcript, static_signals=static_signals, log_callback=_log)
 
         # Step 14: wait for background jobs + network
         _log("Step 14/15: Background job wait")

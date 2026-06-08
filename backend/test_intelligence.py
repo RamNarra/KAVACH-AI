@@ -300,6 +300,93 @@ def test_ai_cross_validation():
     assert vulns[0]["evidence_source"] == "confirmed"
 
 
+def test_vision_guided_play_static_context():
+    from playbook_engine import _step_vision_guided_play
+    import playbook_engine
+    
+    # Mock GenAI client to capture the prompt
+    captured_prompts = []
+    
+    class MockGenerateResponse:
+        def __init__(self):
+            self.text = '{"screen_type": "permission", "action": "click", "target_x_percent": 50.0, "target_y_percent": 85.0, "explanation": "accept perm"}'
+
+    class MockModels:
+        def generate_content(self, model, contents, config=None):
+            # contents can be [img, prompt]
+            prompt = contents[1]
+            captured_prompts.append(prompt)
+            return MockGenerateResponse()
+
+    class MockClient:
+        def __init__(self):
+            self.models = MockModels()
+
+    # Monkeypatch client getter
+    original_getter = playbook_engine._get_genai_client
+    playbook_engine._get_genai_client = lambda: MockClient()
+
+    # Mock _run to return success for screen size check and screencap
+    original_run = playbook_engine._run
+    def mock_run(args, **kwargs):
+        class MockCompletedProcess:
+            def __init__(self, args, returncode, stdout, stderr):
+                self.args = args
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+        if len(args) > 2 and "wm" in args and "size" in args:
+            return MockCompletedProcess(args, 0, "Physical size: 1080x1920", "")
+        if len(args) > 2 and "screencap" in args:
+            return MockCompletedProcess(args, 0, "", "")
+        if len(args) > 3 and "pull" in args:
+            # We need to create a dummy image locally
+            local_path = args[3]
+            from PIL import Image
+            img = Image.new("RGB", (100, 100), color="red")
+            img.save(local_path)
+            return MockCompletedProcess(args, 0, "", "")
+        return MockCompletedProcess(args, 0, "", "")
+
+    playbook_engine._run = mock_run
+
+    try:
+        import tempfile
+        transcript = []
+        static_signals = {
+            "has_anti_vm": True,
+            "has_login_fields": True,
+            "static_evidence": {
+                "permissions": ["android.permission.RECEIVE_SMS", "android.permission.READ_PHONE_STATE"],
+                "malware_rule_hits": [{"rule_name": "RansomwareBehavior"}, "BankingTrojanInfo"],
+                "suspicious_urls": [{"url": "http://evil-c2.com/exfil"}],
+                "network_indicators": ["evil-c2.com"]
+            }
+        }
+        
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            _step_vision_guided_play(
+                adb="dummy_adb",
+                tmp_dir=tmp_dir,
+                transcript=transcript,
+                static_signals=static_signals,
+                max_steps=1
+            )
+            
+        assert len(captured_prompts) > 0
+        prompt = captured_prompts[0]
+        assert "RECEIVE_SMS" in prompt
+        assert "RansomwareBehavior" in prompt
+        assert "evil-c2.com" in prompt
+        assert "CONTEXT FROM STATIC ANALYSIS" in prompt
+        assert "INSTRUCTION FOR PLAYBOOK NAVIGATION" in prompt
+        
+    finally:
+        playbook_engine._get_genai_client = original_getter
+        playbook_engine._run = original_run
+
+
+
 
 
 

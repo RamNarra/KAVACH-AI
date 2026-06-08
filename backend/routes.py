@@ -386,7 +386,8 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
                 "exported_activities": exported_acts,
                 "exported_services": exported_svcs,
                 "deep_link_schemes": deep_link_schemes,
-                "has_login_fields": has_login_fields
+                "has_login_fields": has_login_fields,
+                "static_evidence": static_evidence
             }
 
             from dynamic_engine import run_behavioral_trace
