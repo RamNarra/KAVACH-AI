@@ -673,9 +673,31 @@ def _step_vision_guided_play(
         try:
             from PIL import Image
             img = Image.open(local)
+            
+            # Optimize and compress image to reduce network upload latency significantly
+            max_dim = 1024
+            if img.width > max_dim or img.height > max_dim:
+                resample_filter = Image.BICUBIC
+                if hasattr(Image, "Resampling"):
+                    resample_filter = Image.Resampling.LANCZOS
+                elif hasattr(Image, "ANTIALIAS"):
+                    resample_filter = Image.ANTIALIAS
+                img.thumbnail((max_dim, max_dim), resample_filter)
+            
+            # Save as compressed JPEG
+            opt_local = local.replace(".png", "_opt.jpg")
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img.save(opt_local, "JPEG", quality=75)
+            img = Image.open(opt_local)
+            _log(f"Optimized screencap size: {os.path.getsize(opt_local)} bytes (compressed from raw PNG)")
         except Exception as e:
-            _log(f"Failed to open screencap image: {e}. Ending loop early.")
-            break
+            _log(f"Failed to optimize screencap image: {e}. Using original.")
+            try:
+                img = Image.open(local)
+            except Exception:
+                _log("Failed to open fallback screencap image. Ending loop early.")
+                break
 
         # 3. Query Gemini Vision
         try:
