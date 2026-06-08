@@ -329,7 +329,7 @@ def _step_exported_receivers(adb: str, package: str, receivers: List[str],
     tested = 0
     for receiver in receivers[:3]:
         r = _run([adb, "shell", "am", "broadcast", "-a",
-                  "android.intent.action.MAIN", "--component",
+                  "android.intent.action.MAIN", "-n",
                   f"{package}/{receiver}"])
         ok = r.returncode == 0
         if ok:
@@ -665,6 +665,12 @@ def _step_vision_guided_play(
         target_y_percent = res_dict.get("target_y_percent")
 
         if action in ("click", "type") and target_x_percent is not None and target_y_percent is not None:
+            # Auto-scale if Gemini outputs coordinates on a 0-1000 scale instead of 0-100
+            if target_x_percent > 100.0:
+                target_x_percent /= 10.0
+            if target_y_percent > 100.0:
+                target_y_percent /= 10.0
+
             tx = int((target_x_percent / 100.0) * width)
             ty = int((target_y_percent / 100.0) * height)
             
