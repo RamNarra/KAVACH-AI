@@ -14,6 +14,7 @@ interface ScoreCardProps {
   downloadReport: () => void;
   isDemo: boolean;
   reset: () => void;
+  isAnalyzing?: boolean;
 }
 
 export function ScoreCard({
@@ -30,6 +31,7 @@ export function ScoreCard({
   downloadReport,
   isDemo,
   reset,
+  isAnalyzing = false,
 }: ScoreCardProps) {
   return (
     <div className={`space-y-6 lg:sticky lg:top-6 transition-all duration-500 ${chatOpen ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
@@ -168,7 +170,13 @@ export function ScoreCard({
           <button
             type="button"
             onClick={downloadReport}
-            className="flex-1 h-12 rounded-full border border-[var(--border)] bg-transparent text-[13px] font-semibold cursor-pointer hover:bg-[var(--surface-2)] transition-all flex items-center justify-center gap-1.5"
+            disabled={isAnalyzing}
+            className={`flex-1 h-12 rounded-full border text-[13px] font-semibold cursor-pointer transition-all flex items-center justify-center gap-1.5 ${
+              isAnalyzing 
+                ? 'bg-transparent border-zinc-800 text-zinc-600 cursor-not-allowed opacity-50'
+                : 'bg-transparent border-[var(--border)] text-[var(--text)] hover:bg-[var(--surface-2)]'
+            }`}
+            title={isAnalyzing ? "Analysis in progress..." : "Export executive PDF report"}
           >
             📥 Export PDF
           </button>

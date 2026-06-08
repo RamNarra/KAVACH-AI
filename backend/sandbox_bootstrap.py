@@ -16,7 +16,7 @@ ANDROID_HOME = os.environ.get("ANDROID_HOME")
 ADB_PATH = resolve_adb()
 EMULATOR_PATH = resolve_emulator()
 SANDBOX_AVD = os.environ.get("SANDBOX_AVD", "kavach_sandbox")
-FRIDA_REMOTE_PATH = os.environ.get("FRIDA_SERVER_PATH", "/data/local/tmp/frida-server-16")
+FRIDA_REMOTE_PATH = os.environ.get("FRIDA_SERVER_PATH", "/data/local/tmp/frida-server")
 
 sandbox_status = "UNAVAILABLE"
 error_message = None
@@ -111,6 +111,22 @@ def start_frida_server() -> bool:
     binary = FRIDA_REMOTE_PATH
     name = os.path.basename(binary)
     try:
+        # Check if binary exists on device, and push it if missing (e.g. after fresh AVD recreation)
+        exists_check = _adb_run(["shell", "ls", binary])
+        if "No such file" in exists_check.stdout or "No such file" in exists_check.stderr or not exists_check.stdout.strip():
+            logger.info("[sandbox] frida-server binary missing on device, pushing from host...")
+            local_frida = os.getenv("KAVACH_LOCAL_FRIDA_PATH")
+            if not local_frida:
+                home = os.path.expanduser("~")
+                local_frida = os.path.join(home, "Android/Sdk/frida-server-17.9.11-android-x86_64")
+            if os.path.exists(local_frida):
+                push_res = _adb_run(["push", local_frida, binary], timeout=30)
+                _adb_run(["shell", "chmod", "755", binary], timeout=10)
+                logger.info(f"[sandbox] frida-server pushed to device: {push_res.stdout.strip()}")
+            else:
+                logger.error(f"[sandbox] Local frida-server binary not found at {local_frida}. Cannot push!")
+                return False
+
         logger.info("[sandbox] frida-server not detected — attempting start...")
         _adb_run(["root"], timeout=15)
         _adb_run(["shell", "setenforce", "0"], timeout=10)

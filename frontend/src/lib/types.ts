@@ -46,6 +46,7 @@ export interface AnalysisDoc {
   absolute_threat_score?: number;
   error_message?: string;
   created_at?: string;
+  email?: string;
   static_analysis?: {
     risk_score?: number;
     threat_level?: ThreatLevel;
@@ -62,6 +63,9 @@ export interface AnalysisDoc {
       summary?: string;
       bank_agent_alert?: string;
       ciso_brief?: string;
+      reverse_engineering_summary?: string;
+      static_analysis_summary?: string;
+      dynamic_analysis_summary?: string;
       executive_verdict?: string;
       dynamic_summary?: string;
       final_report?: string;
@@ -69,8 +73,8 @@ export interface AnalysisDoc {
       static_confirmed_at_runtime?: string[];
       runtime_only_findings?: string[];
       analysis_limitations?: string;
-      suspicious_activities?: { title: string; description: string; severity?: string }[];
-      code_vulnerabilities?: { title: string; description: string; severity?: string }[];
+      suspicious_activities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
+      code_vulnerabilities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
       recommendations?: string[];
     };
   };
@@ -92,6 +96,9 @@ export interface AnalysisDoc {
     summary?: string;
     bank_agent_alert?: string;
     ciso_brief?: string;
+    reverse_engineering_summary?: string;
+    static_analysis_summary?: string;
+    dynamic_analysis_summary?: string;
     executive_verdict?: string;
     dynamic_summary?: string;
     final_report?: string;
@@ -99,8 +106,8 @@ export interface AnalysisDoc {
     static_confirmed_at_runtime?: string[];
     runtime_only_findings?: string[];
     analysis_limitations?: string;
-    suspicious_activities?: { title: string; description: string; severity?: string }[];
-    code_vulnerabilities?: { title: string; description: string; severity?: string }[];
+    suspicious_activities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
+    code_vulnerabilities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
     recommendations?: string[];
   };
   evidence?: {
@@ -116,6 +123,7 @@ export interface AnalysisDoc {
     obfuscation_signals?: { type?: string; risk_score?: number; description?: string; file?: string; match?: string; class?: string; severity?: string }[];
     malware_rule_hits?: { rule?: string; description?: string; severity?: string; confidence?: string; risk_score?: number; type?: string; match?: string; file?: string }[];
     virustotal?: VirusTotalSummary;
+    mobsf_scorecard?: { title?: string; description?: string; severity?: string; type?: string }[];
     dynamic_analysis?: {
       status?: string;
       runtime_findings?: { id?: string; title?: string; summary?: string; severity?: string }[];

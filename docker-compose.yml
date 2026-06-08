@@ -1,11 +1,14 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
     container_name: kavach-redis
     ports:
       - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     restart: always
 
   backend:
@@ -24,11 +27,18 @@ services:
       - SANDBOX_GPU_MODE=${SANDBOX_GPU_MODE:-swiftshader}
       - REDIS_URL=redis://redis:6379/0
       - USE_CELERY=1
+      - MOBSF_API_URL=http://mobsf:8000
+      - MOBSF_API_KEY=${MOBSF_API_KEY}
     volumes:
       - ./backend/service-account.json:/app/service-account.json:ro
       - scan-cache:/app/tmp_scans
     depends_on:
       - redis
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
     restart: always
 
   celery_worker:
@@ -43,11 +53,18 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - REDIS_URL=redis://redis:6379/0
       - USE_CELERY=1
+      - MOBSF_API_URL=http://mobsf:8000
+      - MOBSF_API_KEY=${MOBSF_API_KEY}
     volumes:
       - ./backend/service-account.json:/app/service-account.json:ro
       - scan-cache:/app/tmp_scans
     depends_on:
       - redis
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
     restart: always
 
   frontend:
@@ -62,8 +79,26 @@ services:
       - NEXT_TELEMETRY_DISABLED=1
     depends_on:
       - backend
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1'
+    restart: always
+
+  mobsf:
+    image: opensecurity/mobile-security-framework-mobsf:latest
+    container_name: kavach-mobsf
+    ports:
+      - "8000:8000"
+    environment:
+      - MOBSF_API_KEY=${MOBSF_API_KEY}
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
     restart: always
 
 volumes:
   scan-cache:
-

@@ -17,8 +17,14 @@ from typing import List, Optional
 
 logger = logging.getLogger("kavach-api")
 
-# Set KAVACH_DOCKER_SANDBOX=1 in production to enable container isolation
-DOCKER_SANDBOX_ENABLED = os.getenv("KAVACH_DOCKER_SANDBOX", "0") in ("1", "true", "True")
+DOCKER_SANDBOX_ENV = os.getenv("KAVACH_DOCKER_SANDBOX")
+if DOCKER_SANDBOX_ENV is None:
+    DOCKER_SANDBOX_ENABLED = True
+    STRICT_SANDBOX = False
+else:
+    DOCKER_SANDBOX_ENABLED = DOCKER_SANDBOX_ENV in ("1", "true", "True")
+    STRICT_SANDBOX = DOCKER_SANDBOX_ENABLED
+
 SANDBOX_IMAGE = os.getenv("KAVACH_SANDBOX_IMAGE", "kavach-sandbox:latest")
 
 _docker_available: Optional[bool] = None
@@ -67,7 +73,16 @@ def sandboxed_run(
     The container is disposable (--rm), has no network access (--network none),
     has a memory cap (--memory 3g), and runs as a non-root user (--user nobody).
     """
-    if DOCKER_SANDBOX_ENABLED and _check_docker():
+    use_sandbox = DOCKER_SANDBOX_ENABLED
+    if use_sandbox:
+        if not _check_docker():
+            if STRICT_SANDBOX:
+                raise RuntimeError("Docker daemon is not reachable but KAVACH_DOCKER_SANDBOX=1 is configured. Refusing to run bare host execution fallback in sandbox mode.")
+            else:
+                logger.warning("Docker daemon is not reachable. Falling back to bare host execution (SANDBOX INACTIVE).")
+                use_sandbox = False
+
+    if use_sandbox:
         docker_cmd = [
             "docker", "run", "--rm",
             "--network", "none",                        # No outbound network
@@ -76,6 +91,8 @@ def sandboxed_run(
             "--cpus", "2",                              # CPU cap
             "--pids-limit", "100",                      # Fork-bomb protection
             "--user", "nobody",                         # Non-root
+            "--cap-drop=ALL",                           # Drop all Linux capabilities
+            "--security-opt", "no-new-privileges",      # Prevent privilege escalation
             "--read-only",                              # Immutable container FS
             "--tmpfs", "/tmp:size=512m",                # Writable /tmp in RAM only
             "-v", f"{os.path.abspath(input_path)}:/sandbox/input:ro",
@@ -91,7 +108,7 @@ def sandboxed_run(
             **popen_kwargs,
         )
     else:
-        # Direct host execution (developer mode / Docker not available)
+        # Direct host execution (developer mode)
         return subprocess.run(
             cmd,
             capture_output=capture_output,
@@ -111,7 +128,16 @@ def sandboxed_popen(
     """
     Popen variant for streaming output (used by JADX which runs long).
     """
-    if DOCKER_SANDBOX_ENABLED and _check_docker():
+    use_sandbox = DOCKER_SANDBOX_ENABLED
+    if use_sandbox:
+        if not _check_docker():
+            if STRICT_SANDBOX:
+                raise RuntimeError("Docker daemon is not reachable but KAVACH_DOCKER_SANDBOX=1 is configured. Refusing to run bare host execution fallback in sandbox mode.")
+            else:
+                logger.warning("Docker daemon is not reachable. Falling back to bare host execution (SANDBOX INACTIVE).")
+                use_sandbox = False
+
+    if use_sandbox:
         docker_cmd = [
             "docker", "run", "--rm",
             "--network", "none",
@@ -120,6 +146,8 @@ def sandboxed_popen(
             "--cpus", "2",
             "--pids-limit", "100",                      # Fork-bomb protection
             "--user", "nobody",
+            "--cap-drop=ALL",                           # Drop all Linux capabilities
+            "--security-opt", "no-new-privileges",      # Prevent privilege escalation
             "--read-only",
             "--tmpfs", "/tmp:size=512m",
             "-v", f"{os.path.abspath(input_path)}:/sandbox/input:ro",

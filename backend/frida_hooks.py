@@ -299,10 +299,33 @@ try {
 
 try {
     var _Cipher = Java.use("javax.crypto.Cipher");
+    
+    // Hook all Cipher.init overloads dynamically to cache the opmode parameter
+    var initOverloads = _Cipher.init.overloads;
+    for (var i = 0; i < initOverloads.length; i++) {
+        (function(originalOverload) {
+            originalOverload.implementation = function() {
+                try {
+                    if (arguments.length > 0 && typeof arguments[0] === 'number') {
+                        this._opmode_cached = arguments[0];
+                    }
+                } catch(e) {}
+                return originalOverload.apply(this, arguments);
+            };
+        })(initOverloads[i]);
+    }
+
     _Cipher.doFinal.overload("[B").implementation = function(input) {
         var result = this.doFinal(input);
         var alg    = _trunc(String(this.getAlgorithm()), 60);
-        var mode   = this.getOpmode ? this.getOpmode() : -1;
+        var mode   = -1;
+        try {
+            if (this._opmode_cached !== undefined) {
+                mode = this._opmode_cached;
+            } else if (this.opmode !== undefined) {
+                mode = this.opmode.value;
+            }
+        } catch(e2) {}
         var cat    = (mode === 2) ? "crypto.decrypt" : "crypto.encrypt";
         var action = (mode === 2) ? "decrypt" : "encrypt";
         _emit(cat, action, "high",
@@ -314,10 +337,20 @@ try {
     _Cipher.doFinal.overload().implementation = function() {
         var result = this.doFinal();
         var alg    = _trunc(String(this.getAlgorithm()), 60);
-        _emit("crypto.encrypt", "finalize", "medium",
+        var mode   = -1;
+        try {
+            if (this._opmode_cached !== undefined) {
+                mode = this._opmode_cached;
+            } else if (this.opmode !== undefined) {
+                mode = this.opmode.value;
+            }
+        } catch(e2) {}
+        var cat    = (mode === 2) ? "crypto.decrypt" : "crypto.encrypt";
+        var action = (mode === 2) ? "decrypt" : "encrypt";
+        _emit(cat, action, "medium",
               "javax.crypto.Cipher", "doFinal()",
               { algorithm: alg },
-              "Cipher finalize using " + alg);
+              "Cipher finalize " + action + " using " + alg);
         return result;
     };
 } catch(e) {}
@@ -414,6 +447,25 @@ try {
         return this.exec(cmd);
     };
 } catch(e) {}
+
+try {
+    var _RTExec = Java.use("java.lang.Runtime");
+    _RTExec.exec.overload("[Ljava.lang.String;").implementation = function(cmdArray) {
+        var cmdStr = "";
+        try {
+            var parts = [];
+            for (var i = 0; i < cmdArray.length; i++) {
+                parts.push(String(cmdArray[i]));
+            }
+            cmdStr = parts.join(" ");
+        } catch(e3) { cmdStr = String(cmdArray); }
+        _emit("process.exec", "shell_exec", "high",
+              "java.lang.Runtime", "exec",
+              { cmd: _trunc(cmdStr, 150) },
+              "Runtime.exec: " + _trunc(cmdStr, 120));
+        return this.exec(cmdArray);
+    };
+} catch(e) {}
 """
 )
 
@@ -429,7 +481,14 @@ try {
         var text = "";
         try {
             if (clip && clip.getItemCount() > 0) {
-                text = _trunc(String(clip.getItemAt(0).coerceToText(this)), 100);
+                var context = null;
+                try {
+                    var currentApp = Java.use("android.app.ActivityThread").currentApplication();
+                    if (currentApp !== null) {
+                        context = currentApp.getApplicationContext();
+                    }
+                } catch(ctxErr) {}
+                text = _trunc(String(clip.getItemAt(0).coerceToText(context)), 100);
             }
         } catch(e2) {}
         _emit("clipboard.read", "get_primary_clip", "medium",
@@ -442,7 +501,14 @@ try {
         var text = "";
         try {
             if (clip && clip.getItemCount() > 0) {
-                text = _trunc(String(clip.getItemAt(0).coerceToText(null)), 100);
+                var context = null;
+                try {
+                    var currentApp = Java.use("android.app.ActivityThread").currentApplication();
+                    if (currentApp !== null) {
+                        context = currentApp.getApplicationContext();
+                    }
+                } catch(ctxErr) {}
+                text = _trunc(String(clip.getItemAt(0).coerceToText(context)), 100);
             }
         } catch(e2) {}
         _emit("clipboard.write", "set_primary_clip", "medium",
@@ -658,8 +724,11 @@ try {
     var TrustManagerImpl = Java.use("com.android.org.conscrypt.TrustManagerImpl");
     var HostnameVerifier = Java.use("javax.net.ssl.HostnameVerifier");
     var HttpsURLConnection = Java.use("javax.net.ssl.HttpsURLConnection");
+    
+    var randSuffix = Math.random().toString(36).substring(2, 10);
+    
     var TrustManager = Java.registerClass({
-        name: "com.kavach.TrustManager",
+        name: "com.kavach.TrustManager_" + randSuffix,
         implements: [X509TrustManager],
         methods: {
             checkClientTrusted: function(chain, authType) {},
@@ -689,7 +758,7 @@ try {
 
     // Hook HostnameVerifier
     var DummyHostnameVerifier = Java.registerClass({
-        name: "com.kavach.HostnameVerifier",
+        name: "com.kavach.HostnameVerifier_" + randSuffix,
         implements: [HostnameVerifier],
         methods: {
             verify: function(hostname, session) { return true; }
@@ -756,16 +825,32 @@ def build_frida_script(active_packs: List[str]) -> str:
     packs_js = "\n\n".join(ALL_PACKS[p] for p in selected)
     packs_label = ", ".join(selected)
 
-    return f"""
-Java.perform(function() {{
-    console.log("[Kavach] Instrumentation active. Packs: {packs_label}");
+    return f"""\
+// Kavach Frida Hook Script — Packs: {packs_label}
+// Guard: wait for ART/Dalvik VM to be ready before hooking
+(function kavachMain() {{
+    if (typeof Java === 'undefined') {{
+        // Script was injected before the JVM bridge initialised (rare) — bail out cleanly
+        console.error('[Kavach] Java bridge not available at injection time.');
+        return;
+    }}
+
+    if (!Java.available) {{
+        // VM not ready yet — retry after a tick
+        setTimeout(kavachMain, 200);
+        return;
+    }}
+
+    Java.perform(function() {{
+        console.log('[Kavach] Instrumentation active. Packs: {packs_label}');
 
 {_HELPER_JS}
 
 {packs_js}
 
-    console.log("[Kavach] All hook packs installed.");
-}});
+        console.log('[Kavach] All hook packs installed.');
+    }});
+}})();
 """
 
 

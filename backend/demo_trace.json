@@ -1,0 +1,129 @@
+{
+  "status": "COMPLETED",
+  "events": [
+    {
+      "category": "window.overlay",
+      "action": "show",
+      "evidence": "WindowManager.addView called with TYPE_APPLICATION_OVERLAY",
+      "args": {
+        "type": "TYPE_APPLICATION_OVERLAY"
+      }
+    },
+    {
+      "category": "telephony.sms",
+      "action": "send",
+      "evidence": "SmsManager.sendTextMessage intercepted to dest=9876543210 text=OTP code: 123456",
+      "args": {
+        "dest": "9876543210",
+        "text": "OTP code: 123456"
+      }
+    },
+    {
+      "category": "clipboard.read",
+      "action": "read",
+      "evidence": "Clipboard clip data read: user_password_123",
+      "args": {
+        "preview": "user_password_123"
+      }
+    },
+    {
+      "category": "process.exec",
+      "action": "exec",
+      "evidence": "Runtime.exec called with cmd: pm list packages",
+      "args": {
+        "cmd": "pm list packages"
+      }
+    },
+    {
+      "category": "crypto.key",
+      "action": "load",
+      "evidence": "AES Key loaded",
+      "args": {
+        "algorithm": "AES",
+        "key_preview": "3f82a1b9c0d5e2"
+      }
+    },
+    {
+      "category": "anti_vm.signal",
+      "action": "check",
+      "evidence": "android.os.Build.FINGERPRINT read: generic",
+      "args": {
+        "key": "ro.build.fingerprint",
+        "value": "generic"
+      }
+    }
+  ],
+  "normalized_events": [
+    {
+      "category": "window.overlay",
+      "action": "show",
+      "evidence": "WindowManager.addView called with TYPE_APPLICATION_OVERLAY",
+      "args": {
+        "type": "TYPE_APPLICATION_OVERLAY"
+      }
+    },
+    {
+      "category": "telephony.sms",
+      "action": "send",
+      "evidence": "SmsManager.sendTextMessage intercepted to dest=9876543210 text=OTP code: 123456",
+      "args": {
+        "dest": "9876543210",
+        "text": "OTP code: 123456"
+      }
+    },
+    {
+      "category": "clipboard.read",
+      "action": "read",
+      "evidence": "Clipboard clip data read: [17 chars, redacted]",
+      "args": {
+        "preview": "[17 chars, redacted]"
+      }
+    },
+    {
+      "category": "process.exec",
+      "action": "exec",
+      "evidence": "Runtime.exec called with cmd: pm list packages",
+      "args": {
+        "cmd": "pm list packages"
+      }
+    },
+    {
+      "category": "crypto.key",
+      "action": "load",
+      "evidence": "AES Key loaded",
+      "args": {
+        "algorithm": "AES",
+        "key_preview": "sha256:3f82a1b9…"
+      }
+    },
+    {
+      "category": "anti_vm.signal",
+      "action": "check",
+      "evidence": "android.os.Build.FINGERPRINT read: generic",
+      "args": {
+        "key": "ro.build.fingerprint",
+        "value": "generic"
+      }
+    }
+  ],
+  "trigger_transcript": [
+    {"step": "launch_app", "action": "Spawned process for package", "result": "success"},
+    {"step": "prime_clipboard", "action": "Copied mock credentials to clipboard", "result": "success"},
+    {"step": "interact_ui", "action": "Simulated tap on login button", "result": "success"},
+    {"step": "overlay_wait", "action": "Monitoring for unexpected window overlays", "result": "success"},
+    {"step": "sms_intercept", "action": "Triggered SMS transmission listener", "result": "success"},
+    {"step": "cleanup", "action": "Tearing down instrumentation sandbox", "result": "success"}
+  ],
+  "coverage_map": {
+    "login_simulation_attempted": true,
+    "login_simulation_effective": true,
+    "webview_expected": false
+  },
+  "event_count": 6,
+  "duration_seconds": 20,
+  "error_message": null,
+  "active_packs": ["crypto", "clipboard", "sms_telephony", "process_builder"],
+  "runtime_confidence": "full",
+  "steps_attempted": 6,
+  "steps_succeeded": 6
+}

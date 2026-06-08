@@ -22,6 +22,9 @@ from dataclasses import dataclass, asdict
 from collections import defaultdict
 from typing import List, Dict, Any, Optional
 
+RF_ID_SMS_INTERCEPTION = "rf_sms_access_or_interception_obs"
+RF_ID_OVERLAY_DRAWING  = "rf_overlay_view_drawing_detected"
+
 
 # --------------------------------------------------------------------------- #
 # Data model
@@ -447,6 +450,48 @@ def cluster_runtime_findings(
             static_finding_refs=[],
             event_count=len(perm_reqs),
             event_categories=["permission.request"],
+        ))
+
+    # ── 14. SMS Interception ──────────────────────────────────────────────
+    sms_events = by_cat.get("telephony.sms", [])
+    if sms_events:
+        findings.append(RuntimeFinding(
+            id=RF_ID_SMS_INTERCEPTION,
+            title="SMS Interception and Telephony Access",
+            severity="HIGH",
+            category="telephony.sms",
+            summary=(
+                "The application interacted with Android SMS or telephony services at runtime, "
+                "indicating potential SMS exfiltration, interception, or OTP capture capabilities."
+            ),
+            evidence_items=[e.get("evidence", "") for e in sms_events[:5]],
+            sample_events=_samples(sms_events),
+            confidence=_calc_confidence(len(sms_events), False),
+            source="dynamic",
+            static_finding_refs=[],
+            event_count=len(sms_events),
+            event_categories=["telephony.sms"],
+        ))
+
+    # ── 15. Window Overlays ──────────────────────────────────────────────
+    overlay_events = by_cat.get("window.overlay", [])
+    if overlay_events:
+        findings.append(RuntimeFinding(
+            id=RF_ID_OVERLAY_DRAWING,
+            title="Overlay View Drawing Detected",
+            severity="CRITICAL",
+            category="window.overlay",
+            summary=(
+                "The application dynamically drew an overlay view using WindowManager, "
+                "a technique commonly associated with phishing overlays and credential harvesting."
+            ),
+            evidence_items=[e.get("evidence", "") for e in overlay_events[:5]],
+            sample_events=_samples(overlay_events),
+            confidence=_calc_confidence(len(overlay_events), False),
+            source="dynamic",
+            static_finding_refs=[],
+            event_count=len(overlay_events),
+            event_categories=["window.overlay"],
         ))
 
     # Sort by severity priority

@@ -42,13 +42,17 @@ async def get_virustotal_report(file_path: str) -> dict:
                 stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
                 malicious = stats.get("malicious", 0)
                 undetected = stats.get("undetected", 0)
+                harmless = stats.get("harmless", 0)
+                suspicious = stats.get("suspicious", 0)
                 
                 logger.info(f"VT Result for {file_hash}: {malicious} malicious detections.")
                 return {
                     "status": "success", 
                     "malicious": malicious, 
                     "undetected": undetected,
-                    "total": malicious + undetected,
+                    "harmless": harmless,
+                    "suspicious": suspicious,
+                    "total": malicious + undetected + harmless + suspicious,
                     "permalink": f"https://www.virustotal.com/gui/file/{file_hash}"
                 }
             elif response.status_code == 404:
@@ -64,7 +68,7 @@ async def get_virustotal_report(file_path: str) -> dict:
                             upload_url = url_res.json().get("data", upload_url)
                 except Exception as e:
                     logger.warning(f"Failed to get custom VT upload URL: {e}")
-
+ 
                 try:
                     with open(file_path, "rb") as f:
                         files = {"file": (os.path.basename(file_path), f, "application/octet-stream")}
@@ -89,11 +93,15 @@ async def get_virustotal_report(file_path: str) -> dict:
                                             stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
                                             malicious = stats.get("malicious", 0)
                                             undetected = stats.get("undetected", 0)
+                                            harmless = stats.get("harmless", 0)
+                                            suspicious = stats.get("suspicious", 0)
                                             return {
                                                 "status": "success",
                                                 "malicious": malicious,
                                                 "undetected": undetected,
-                                                "total": malicious + undetected,
+                                                "harmless": harmless,
+                                                "suspicious": suspicious,
+                                                "total": malicious + undetected + harmless + suspicious,
                                                 "permalink": f"https://www.virustotal.com/gui/file/{file_hash}"
                                             }
                                         break

@@ -38,7 +38,7 @@ _DANGEROUS_API_CHAINS = [
     ("getRunningAppProcesses","openConnection",    "Dynamic Process Tracking & Exfil",    20),
     ("loadLibrary",         "exec",               "Native Bytecode Execution / Shell",   30),
     ("getLine1Number",      "openConnection",     "Phone Number Exfiltration to Net",    25),
-    ("SimTelephoneManager", "sendMultipartTextMessage", "Multipart SMS Evasion Risk",     25),
+    ("SmsManager",          "sendMultipartTextMessage", "Multipart SMS Evasion Risk",          25),
     ("getNetworkOperator",  "openConnection",     "Network Carrier Info Exfiltration",   15),
 ]
 
@@ -59,15 +59,23 @@ def run_analysis(apk_path: str, output_path: str):
     }
 
     try:
-        from androguard.core.analysis.analysis import Analysis
         a = APK(apk_path)
+        findings["package_name"] = a.get_package() or ""
+        findings["launcher_activity"] = a.get_main_activity() or ""
+        try:
+            import xml.etree.ElementTree as ET
+            manifest_xml = a.get_android_manifest_xml()
+            findings["manifest_content"] = ET.tostring(manifest_xml, encoding="utf-8").decode("utf-8") if manifest_xml is not None else ""
+        except Exception:
+            findings["manifest_content"] = ""
+
         d_list = []
-        dx = Analysis()
         for dex in a.get_all_dex():
             df = DalvikVMFormat(dex)
             d_list.append(df)
-            dx.add(df)
-        dx.create_xref()
+        # NOTE: We intentionally skip Analysis() / dx.create_xref() — those cost 12-16s
+        # We operate directly on DalvikVMFormat (ClassDefItem / EncodedMethod) which is
+        # fully sufficient for string scanning, taint tracking and superclass inspection.
     except Exception as e:
         # Save empty findings if APK parsing fails
         with open(output_path, "w") as f:
@@ -149,8 +157,8 @@ def run_analysis(apk_path: str, output_path: str):
                 i += 1
         return size
 
-    def analyze_method_taint(m_anal, returns_taint_methods, exfiltrates_param_methods):
-        method = m_anal.get_method()
+    def analyze_method_taint(method, instructions, returns_taint_methods, exfiltrates_param_methods):
+        """Accepts an EncodedMethod directly (from DalvikVMFormat.get_classes())."""
         if not method:
             return False, set(), []
         code = method.get_code()
@@ -177,10 +185,19 @@ def run_analysis(apk_path: str, output_path: str):
         detected_flows = []
         returns_taint = False
 
-        try:
-            instructions = list(code.get_instructions())
-        except Exception:
-            return False, set(), []
+        if not instructions:
+            try:
+                if hasattr(code, "get_bc"):
+                    instructions = list(code.get_bc().get_instructions())
+                elif hasattr(code, "get_instructions"):
+                    instructions = list(code.get_instructions())
+                else:
+                    instructions = list(code)
+            except Exception:
+                return False, set(), []
+
+        if len(instructions) > 1500:
+            instructions = instructions[:1500]
 
         for idx, inst in enumerate(instructions):
             try:
@@ -323,66 +340,158 @@ def run_analysis(apk_path: str, output_path: str):
         returns_taint_methods = set()
         exfiltrates_param_methods = {}
         
-        all_methods = []
-        for c_anal in dx.get_classes():
-            if c_anal.is_external():
-                continue
-            for m_anal in c_anal.get_methods():
-                if m_anal.is_external():
-                    continue
-                all_methods.append(m_anal)
-
-        for m_anal in all_methods:
-            try:
-                ret_taint, exfil_params, _ = analyze_method_taint(m_anal, set(), {})
-                method = m_anal.get_method()
-                if method:
-                    m_name = str(method.name or "")
-                    if ret_taint:
-                        returns_taint_methods.add(m_name)
-                    if exfil_params:
-                        exfiltrates_param_methods[m_name] = exfil_params
-            except Exception:
-                pass
-
-        final_flows = []
-        for m_anal in all_methods:
-            try:
-                _, _, api_flows = analyze_method_taint(m_anal, returns_taint_methods, exfiltrates_param_methods)
-                if api_flows:
-                    c_name = m_anal.class_name
-                    if isinstance(c_name, bytes):
-                        c_name = c_name.decode('utf-8', errors='ignore')
-                    c_name = str(c_name or "").replace("/", ".").strip("L;")
-                    for flow in api_flows:
-                        final_flows.append({
-                            "class_name": c_name,
-                            "source": flow["source"],
-                            "sink": flow["sink"],
-                            "label": flow["label"]
-                        })
-            except Exception:
-                pass
-
-        matched_chains = set()
-        for flow in final_flows:
-            chain_key = f"{flow['source']}:{flow['sink']}"
-            if chain_key not in matched_chains:
-                matched_chains.add(chain_key)
+        total_dex_size = sum(len(dex) for dex in a.get_all_dex())
+        skip_taint = total_dex_size > 15 * 1024 * 1024
+        
+        if not skip_taint:
+            _ALL_TARGET_APIS = set()
+            for src_api, sink_api, _, _ in _DANGEROUS_API_CHAINS:
+                _ALL_TARGET_APIS.add(src_api)
+                _ALL_TARGET_APIS.add(sink_api)
                 
-                score = 20
-                for read_api, write_api, label, sc in _DANGEROUS_API_CHAINS:
-                    if (flow["source"] == read_api or flow["source"].endswith(read_api)) and flow["sink"] == write_api:
-                        score = sc
-                        break
+            _PRUNED_LIBS = {
+                "androidx", "android.support", "kotlin", "kotlinx", "okio", "okhttp3", 
+                "retrofit2", "reactivex", "squareup", "fasterxml", "intellij", "jetbrains",
+                "com.google", "google.protobuf", "com.google.android", "com.google.firebase",
+                "com.adjust", "com.facebook", "com.unity3d", "com.appsflyer", "com.flurry",
+                "com.mixpanel", "com.segment", "io.fabric", "com.crashlytics", "org.json",
+                "org.jsoup", "com.google.gson", "org.yaml", "com.amazonaws", "com.microsoft",
+                "org.apache", "io.reactivex", "com.github", "org.bouncycastle", "com.fasterxml",
+                "org.w3c", "org.xml", "dom4j", "jaxen", "com.ta.utdid2", "com.ut.device",
+                "com.alibaba", "com.tencent", "com.baidu", "com.alipay", "com.xiaomi",
+                "com.huawei", "com.oppo", "com.vivo", "com.meizu"
+            }
+            
+            active_methods = []
+            for d in d_list:
+                for cls in d.get_classes():
+                    class_name = str(cls.name or "")
+                    cleaned_cls = class_name.replace("/", ".").strip("L;")
+                    is_lib = False
+                    for p in _PRUNED_LIBS:
+                        if cleaned_cls.startswith(p):
+                            is_lib = True
+                            break
+                    if is_lib:
+                        continue
+
+                    c_name_str = class_name.replace("/", ".").strip("L;")
+
+                    for m in cls.get_methods():
+                        code = m.get_code()
+                        if not code:
+                            continue
                         
-                findings["dangerous_api_chains"].append({
-                    "type": flow["label"],
-                    "risk_score": score,
-                    "severity": "CRITICAL" if score >= 25 else "HIGH",
-                    "description": f"Verified register taint flow in {flow['class_name']}: {flow['source']} → {flow['sink']} ({flow['label']})"
-                })
-                findings["score"] += score
+                        try:
+                            if hasattr(code, "get_bc"):
+                                insts = list(code.get_bc().get_instructions())
+                            elif hasattr(code, "get_instructions"):
+                                insts = list(code.get_instructions())
+                            else:
+                                insts = list(code)
+                        except Exception:
+                            continue
+                            
+                        if not insts:
+                            continue
+                            
+                        if len(insts) > 1500:
+                            insts = insts[:1500]
+                            
+                        invoked_methods = set()
+                        has_invoke = False
+                        for inst in insts:
+                            try:
+                                name = str(inst.get_name() or "")
+                                if "invoke-" in name:
+                                    has_invoke = True
+                                    output = str(inst.get_output() or "")
+                                    match = re.search(r"->([a-zA-Z0-9_]+)\(", output)
+                                    if match:
+                                        invoked_methods.add(match.group(1))
+                            except Exception:
+                                continue
+                                
+                        if not has_invoke:
+                            continue
+                            
+                        active_methods.append({
+                            "method": m,
+                            "instructions": insts,
+                            "invoked_methods": invoked_methods,
+                            "class_name": c_name_str,
+                            "name": str(m.name or "")
+                        })
+
+            # Cap active methods to prevent timeouts on huge DEXes
+            MAX_ACTIVE_METHODS = 2500
+            if len(active_methods) > MAX_ACTIVE_METHODS:
+                active_methods.sort(key=lambda x: len(x["invoked_methods"] & _ALL_TARGET_APIS), reverse=True)
+                active_methods = active_methods[:MAX_ACTIVE_METHODS]
+
+            # First pass: identify methods returning taint or exfiltrating parameters
+            for m_data in active_methods:
+                if not (m_data["invoked_methods"] & _ALL_TARGET_APIS):
+                    continue
+                try:
+                    ret_taint, exfil_params, _ = analyze_method_taint(
+                        m_data["method"], 
+                        m_data["instructions"], 
+                        set(), 
+                        {}
+                    )
+                    if ret_taint:
+                        returns_taint_methods.add(m_data["name"])
+                    if exfil_params:
+                        exfiltrates_param_methods[m_data["name"]] = exfil_params
+                except Exception:
+                    pass
+
+            # Second pass: trace final flows
+            final_flows = []
+            second_pass_targets = _ALL_TARGET_APIS | returns_taint_methods | set(exfiltrates_param_methods.keys())
+            for m_data in active_methods:
+                if not (m_data["invoked_methods"] & second_pass_targets):
+                    continue
+                try:
+                    _, _, api_flows = analyze_method_taint(
+                        m_data["method"], 
+                        m_data["instructions"], 
+                        returns_taint_methods, 
+                        exfiltrates_param_methods
+                    )
+                    if api_flows:
+                        for flow in api_flows:
+                            final_flows.append({
+                                "class_name": m_data["class_name"],
+                                "source": flow["source"],
+                                "sink": flow["sink"],
+                                "label": flow["label"]
+                            })
+                except Exception:
+                    pass
+
+            matched_chains = set()
+            for flow in final_flows:
+                chain_key = f"{flow['source']}:{flow['sink']}"
+                if chain_key not in matched_chains:
+                    matched_chains.add(chain_key)
+                    
+                    score = 20
+                    for read_api, write_api, label, sc in _DANGEROUS_API_CHAINS:
+                        if (flow["source"] == read_api or flow["source"].endswith(read_api)) and flow["sink"] == write_api:
+                            score = sc
+                            break
+                            
+                    findings["dangerous_api_chains"].append({
+                        "type": flow["label"],
+                        "risk_score": score,
+                        "severity": "CRITICAL" if score >= 25 else "HIGH",
+                        "description": f"Verified register taint flow in {flow['class_name']}: {flow['source']} → {flow['sink']} ({flow['label']})"
+                    })
+                    findings["score"] += score
+        else:
+            print(f"Skipping taint analysis: DEX size {total_dex_size / 1024 / 1024:.2f} MB is > 15 MB limit.")
 
     except Exception as exc:
         print(f"Error in bytecode register taint propagation audit: {exc}")

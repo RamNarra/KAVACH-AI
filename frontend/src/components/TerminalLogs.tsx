@@ -9,6 +9,32 @@ interface TerminalLogsProps {
 export default function TerminalLogs({ logs }: TerminalLogsProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
+  let apiPort = '8080';
+  if (typeof window !== 'undefined') {
+    const savedApi = window.localStorage.getItem('KAVACH_API_URL');
+    const hostname = window.location.hostname;
+    let apiEndpoint = savedApi || '';
+    if (!apiEndpoint && (hostname === 'localhost' || hostname === '127.0.0.1')) {
+      apiEndpoint = 'http://localhost:8080';
+    }
+    if (apiEndpoint) {
+      try {
+        const url = new URL(apiEndpoint);
+        if (url.port) {
+          apiPort = url.port;
+        } else if (url.protocol === 'https:') {
+          apiPort = '443';
+        } else if (url.protocol === 'http:') {
+          apiPort = '80';
+        }
+      } catch (e) {
+        // ignore
+      }
+    } else {
+      apiPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+    }
+  }
+
   useEffect(() => {
     if (containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
@@ -27,7 +53,7 @@ export default function TerminalLogs({ logs }: TerminalLogsProps) {
           </span>
         </div>
         <div className="flex items-center gap-1.5 text-[10px] font-mono text-[var(--blue)] font-bold tracking-wider bg-[var(--blue)]/10 px-2 py-0.5 rounded-full">
-          <span>PORT: 8080</span>
+          <span>PORT: {apiPort}</span>
         </div>
       </div>
       <div

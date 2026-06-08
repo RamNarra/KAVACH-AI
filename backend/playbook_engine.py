@@ -36,8 +36,11 @@ def _get_genai_client():
         if not api_key:
             logger.warning("GEMINI_API_KEY not found in environment variables. Playbook GenAI will be disabled.")
             return None
-        client = genai.Client(api_key=api_key)
-        logger.info("GenAI client initialized in playbook using Google AI Studio Free Tier")
+        client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=30000)
+        )
+        logger.info("GenAI client initialized in playbook using Google AI Studio Free Tier (30s timeout)")
         return client
     except Exception as e:
         logger.warning(f"Failed to initialize GenAI client in playbook: {e}")
@@ -556,6 +559,152 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
         ))
 
 
+def _step_vision_guided_play(
+    adb: str,
+    tmp_dir: str,
+    transcript: list,
+    log_callback=None
+) -> None:
+    """
+    Take a screenshot of the running emulator screen, send it directly to Gemini
+    along with vision prompt instructions, and trigger ADB input/tap actions dynamically.
+    """
+    def _log(msg: str):
+        if log_callback:
+            try:
+                log_callback(f"[PLAYBOOK_VISION] {msg}")
+            except Exception:
+                pass
+        logger.info(msg)
+
+    client = _get_genai_client()
+    if not client:
+        _log("Gemini client not initialized, skipping vision-guided play.")
+        return
+
+    # 1. Get screen size
+    r_size = _run([adb, "shell", "wm", "size"])
+    width, height = 1080, 1920 # Default emulator dimensions
+    if r_size.returncode == 0:
+        match = re.search(r"(\d+)x(\d+)", r_size.stdout)
+        if match:
+            width = int(match.group(1))
+            height = int(match.group(2))
+            _log(f"Detected screen size: {width}x{height}")
+
+    # 2. Capture screenshot
+    remote = "/sdcard/kavach_screencap_vision.png"
+    local = os.path.join(tmp_dir, "screencap_vision.png")
+    
+    r_cap = _run([adb, "shell", "screencap", "-p", remote])
+    if r_cap.returncode != 0:
+        _log("Failed to capture emulator screen via adb.")
+        return
+    _run([adb, "pull", remote, local])
+    _run([adb, "shell", "rm", "-f", remote])
+
+    if not os.path.exists(local):
+        _log("Failed to pull screencap file locally.")
+        return
+
+    try:
+        from PIL import Image
+        img = Image.open(local)
+    except Exception as e:
+        _log(f"Failed to open screencap image: {e}")
+        return
+
+    # 3. Query Gemini Vision
+    try:
+        prompt = (
+            "You are an AI security sandbox assistant. This is a screenshot of an Android app running inside our emulator.\n"
+            "Determine if this is a login screen, permission request, terms, loading page, or landing page, and identify the interactive "
+            "component we need to click or interact with next to progress further and trigger network traffic (e.g. 'Allow' button, "
+            "'Continue' button, 'Log In' button, or input fields).\n"
+            "Provide the coordinates of the target element to click as relative percentages of the screen width and height (from 0.0 to 100.0).\n\n"
+            "You must return a strict JSON response matching this schema:\n"
+            "{\n"
+            "  \"screen_type\": \"login | permission | dashboard | loading | unknown\",\n"
+            "  \"action\": \"click | type | wait | unknown\",\n"
+            "  \"target_x_percent\": 50.0,\n"
+            "  \"target_y_percent\": 85.0,\n"
+            "  \"text_to_type\": \"test_input_value_if_action_is_type\",\n"
+            "  \"explanation\": \"Brief explanation of what this element is and why we are clicking it\"\n"
+            "}\n"
+            "Ensure you return ONLY raw JSON, with no markdown code blocks or wrapper text."
+        )
+
+        _log("Dispatching emulator screenshot to Gemini 3.1 Flash Lite for vision-guided target localization...")
+        
+        # Enforce rate limit delay before dynamic play API requests
+        time.sleep(4.0)
+
+        ai_response = client.models.generate_content(
+            model="gemini-3.1-flash-lite",
+            contents=[img, prompt],
+            config=genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+            )
+        )
+
+        # Clean and parse response
+        text_resp = ai_response.text.strip()
+        if text_resp.startswith("```json"):
+            text_resp = text_resp[7:]
+        elif text_resp.startswith("```"):
+            text_resp = text_resp[3:]
+        if text_resp.endswith("```"):
+            text_resp = text_resp[:-3]
+        
+        res_dict = json.loads(text_resp.strip())
+        _log(f"Gemini vision response: screen_type={res_dict.get('screen_type')}, action={res_dict.get('action')}, explanation={res_dict.get('explanation')}")
+
+        action = res_dict.get("action")
+        target_x_percent = res_dict.get("target_x_percent")
+        target_y_percent = res_dict.get("target_y_percent")
+
+        if action in ("click", "type") and target_x_percent is not None and target_y_percent is not None:
+            tx = int((target_x_percent / 100.0) * width)
+            ty = int((target_y_percent / 100.0) * height)
+            
+            _log(f"Executing action '{action}' on coordinate ({tx}, {ty})")
+            _tap(adb, tx, ty)
+            time.sleep(0.5)
+            
+            if action == "type" and res_dict.get("text_to_type"):
+                _text_input(adb, res_dict["text_to_type"])
+                _log(f"Typed '{res_dict['text_to_type']}' into coordinate ({tx}, {ty})")
+                time.sleep(0.5)
+
+            transcript.append(_step(
+                "vision_guided_play",
+                f"Vision-Guided Action: {action} on ({tx}, {ty}) - {res_dict.get('explanation')}",
+                "succeeded",
+                f"Type: {res_dict.get('screen_type')}"
+            ))
+        elif action == "wait":
+            _log("Gemini requested wait. Sleeping 2 seconds.")
+            time.sleep(2.0)
+            transcript.append(_step(
+                "vision_guided_play",
+                f"Vision-Guided Action: wait - {res_dict.get('explanation')}",
+                "succeeded"
+            ))
+        else:
+            transcript.append(_step(
+                "vision_guided_play",
+                "Vision-Guided Action: skipped (no clear element to interact with)",
+                "skipped"
+            ))
+    except Exception as e:
+        _log(f"Vision-guided dynamic analysis step failed: {e}")
+        transcript.append(_step(
+            "vision_guided_play",
+            f"Vision-Guided Action failed: {e}",
+            "failed"
+        ))
+
 def _step_background_job_wait(adb: str, transcript: list, secs: float = 5.0) -> None:
     time.sleep(secs)
     transcript.append(_step("background_job_wait",
@@ -730,15 +879,19 @@ def run_playbook(
             transcript.append(_step("login_simulation",
                                     "Skipped (no login field signal in static analysis)", "skipped"))
 
-        # Step 13: wait for background jobs + network
-        _log("Step 13/14: Background job wait")
+        # Step 13: Vision-guided dynamic play
+        _log("Step 13/15: Vision-guided dynamic play")
+        _step_vision_guided_play(adb, tmp_dir, transcript, log_callback=_log)
+
+        # Step 14: wait for background jobs + network
+        _log("Step 14/15: Background job wait")
         _step_background_job_wait(adb, transcript)
 
-        # Step 14: force stop + cold relaunch
-        _log("Step 14/14: Force-stop and cold relaunch")
+        # Step 15: force stop + cold relaunch
+        _log("Step 15/15: Force-stop and cold relaunch")
         _step_force_stop_relaunch(adb, package_name, launcher_activity, transcript)
 
-    # Calculate high-level step statistics strictly out of 14 steps
+    # Calculate high-level step statistics strictly out of 15 steps
     high_level_steps = [
         "prime_clipboard",
         "wait_activity",
@@ -752,11 +905,12 @@ def run_playbook(
         "deep_link_intent",
         "system_broadcast_trigger",
         "login_simulation",
+        "vision_guided_play",
         "background_job_wait",
         "force_stop_relaunch"
     ]
     succeeded = 0
-    attempted = 14
+    attempted = 15
     for step_name in high_level_steps:
         steps_of_type = [s for s in transcript if s.get("step") == step_name]
         if not steps_of_type:

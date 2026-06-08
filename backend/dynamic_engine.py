@@ -22,9 +22,11 @@ ADB_PATH = resolve_adb()
 
 thread_local = threading.local()
 
+_orig_subprocess = subprocess
 _orig_subprocess_run = subprocess.run
+_orig_subprocess_Popen = subprocess.Popen
 
-def run_cmd(args: List[str], **kwargs) -> subprocess.CompletedProcess:
+def run_cmd(args: List[str], **kwargs) -> _orig_subprocess.CompletedProcess:
     """Wrapper that routes ADB commands to the thread-local leased emulator serial if set."""
     device_serial = getattr(thread_local, "device_serial", None)
     if device_serial and args and args[0] == ADB_PATH:
@@ -34,7 +36,40 @@ def run_cmd(args: List[str], **kwargs) -> subprocess.CompletedProcess:
             args = [ADB_PATH, "-s", device_serial] + args[1:]
     return _orig_subprocess_run(args, **kwargs)
 
-subprocess.run = run_cmd
+def Popen_cmd(args: List[str], **kwargs) -> _orig_subprocess.Popen:
+    """Wrapper that routes ADB commands to the thread-local leased emulator serial if set."""
+    device_serial = getattr(thread_local, "device_serial", None)
+    if device_serial and args and args[0] == ADB_PATH:
+        if len(args) > 1 and args[1] == "-s":
+            pass
+        else:
+            args = [ADB_PATH, "-s", device_serial] + args[1:]
+    return _orig_subprocess_Popen(args, **kwargs)
+
+class LocalSubprocessWrapper:
+    def __getattr__(self, name):
+        if name == "run":
+            return run_cmd
+        if name == "Popen":
+            return Popen_cmd
+        return getattr(_orig_subprocess, name)
+    @property
+    def DEVNULL(self):
+        return _orig_subprocess.DEVNULL
+    @property
+    def PIPE(self):
+        return _orig_subprocess.PIPE
+    @property
+    def CompletedProcess(self):
+        return _orig_subprocess.CompletedProcess
+    @property
+    def TimeoutExpired(self):
+        return _orig_subprocess.TimeoutExpired
+    @property
+    def CalledProcessError(self):
+        return _orig_subprocess.CalledProcessError
+
+subprocess = LocalSubprocessWrapper()
 
 class EmulatorPoolManager:
     def __init__(self):
@@ -62,6 +97,14 @@ class EmulatorPoolManager:
             return None
 
     def release_device(self, serial: str):
+        # Restore guest SELinux enforcement upon device release
+        try:
+            # Bypass thread-local serial routing to target the released device directly
+            _orig_subprocess_run([ADB_PATH, "-s", serial, "shell", "setenforce", "1"], capture_output=True, timeout=10)
+            logger.info(f"[Pool] Restored guest SELinux enforcement for: {serial}")
+        except Exception as e:
+            logger.warning(f"[Pool] Failed to restore SELinux for {serial}: {e}")
+
         with self.lock:
             if serial in self.busy_devices:
                 self.busy_devices.remove(serial)
@@ -167,15 +210,21 @@ def ensure_frida_server_running() -> bool:
                 return True
             subprocess.run([ADB_PATH, "root"], capture_output=True, timeout=10)
             subprocess.run([ADB_PATH, "shell", "setenforce", "0"], capture_output=True, timeout=10)
-            cmd = [ADB_PATH, "-s", device_serial, "shell", f"{binary} -D"]
+            cmd = [ADB_PATH, "-s", device_serial, "shell", f"killall {name} 2>/dev/null; {binary} -D"]
             subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            time.sleep(3)
-            res = subprocess.run([ADB_PATH, "shell", "pidof", name], capture_output=True, text=True, timeout=10)
-            return bool(res.stdout.strip())
+            # Wait for Frida server to initialize, checking up to 6 times (0.5s interval)
+            started = False
+            for _ in range(6):
+                time.sleep(0.5)
+                res = subprocess.run([ADB_PATH, "shell", "pidof", name], capture_output=True, text=True, timeout=5)
+                if res.stdout.strip():
+                    started = True
+                    break
+            return started
         else:
             if sandbox_bootstrap.check_frida_server_running():
                 return True
@@ -238,6 +287,32 @@ def run_behavioral_trace(
       7. Return structured result with normalized_events + trigger_transcript
     """
     thread_local.device_serial = device_serial
+    if os.environ.get("KAVACH_DEMO_MODE") == "1":
+        import json
+        import time
+        demo_path = os.path.join(os.path.dirname(__file__), "demo_trace.json")
+        try:
+            if log_callback:
+                log_callback("KAVACH_DEMO_MODE is active. Initializing dynamic simulation...")
+                time.sleep(1.0)
+                log_callback("Mocking guest environment setup...")
+                time.sleep(1.0)
+                log_callback("Attaching Frida hooks to package process...")
+                time.sleep(1.0)
+                log_callback("Simulating UI interactions (button clicks, form inputs)...")
+                time.sleep(1.0)
+                log_callback("Dynamic simulation complete. Loading pre-recorded trace.")
+            with open(demo_path, "r", encoding="utf-8") as df:
+                demo_data = json.load(df)
+            demo_data["duration_seconds"] = duration
+            if active_packs:
+                demo_data["active_packs"] = active_packs
+            return demo_data
+        except Exception as demo_err:
+            logger.error(f"Failed to load demo trace: {demo_err}")
+            if log_callback:
+                log_callback(f"Failed to load demo trace: {demo_err}. Falling back to live execution.")
+
     signals = static_signals or {}
     if active_packs is None:
         active_packs = select_packs_from_signals(signals)
@@ -253,6 +328,138 @@ def run_behavioral_trace(
                 log_callback(msg)
             except Exception as le:
                 logger.error(f"Error invoking log callback: {le}")
+
+    def dismiss_guest_system_overlays() -> bool:
+        """
+        Dumps UI layout and auto-taps system prompts — permission grants (ALLOW,
+        While In Use, Only This Time), ReviewPermissionsActivity Continue,
+        older-SDK alert OK, and ANR Wait buttons.
+        Returns True if anything was tapped.
+        """
+        import xml.etree.ElementTree as ET
+        import uuid
+
+        # Ordered priority: grant permission > continue > ok/dismiss > anr wait
+        # Each entry: (match_fn(node) -> bool, label)
+        def _get_bounds_center(node):
+            bounds = node.get("bounds", "")
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+            if m:
+                return (int(m.group(1)) + int(m.group(3))) // 2, (int(m.group(2)) + int(m.group(4))) // 2
+            return None, None
+
+        tapped_any = False
+        for loop_idx in range(6):
+            time.sleep(1.2)
+            remote_dump = "/sdcard/kavach_ui_dump.xml"
+            local_dump = f"/tmp/kavach_dump_{uuid.uuid4().hex}.xml"
+            # Explicitly create and lock down permissions of local dump file
+            try:
+                with open(local_dump, "w") as fd:
+                    pass
+                os.chmod(local_dump, 0o600)
+            except Exception:
+                pass
+
+            try:
+                subprocess.run([ADB_PATH, "shell", "uiautomator", "dump", remote_dump], capture_output=True, timeout=12)
+                subprocess.run([ADB_PATH, "pull", remote_dump, local_dump], capture_output=True, timeout=10)
+                subprocess.run([ADB_PATH, "shell", "rm", "-f", remote_dump], capture_output=True, timeout=5)
+            except Exception:
+                continue
+
+            if not os.path.exists(local_dump):
+                continue
+
+            tapped = False
+            try:
+                tree = ET.parse(local_dump)
+                root = tree.getroot()
+
+                # Collect all nodes once
+                all_nodes = list(root.iter("node"))
+
+                # Priority-ordered tap targets
+                TAP_RULES = [
+                    # (text_matches, resource-id substring, package substring, label)
+                    # 1. Runtime permission ALLOW buttons (highest priority — grant everything)
+                    (lambda t, r, p: t in ("Allow", "ALLOW", "Allow all the time",
+                                           "While using the app", "WHILE USING THE APP",
+                                           "Only this time", "ONLY THIS TIME",
+                                           "Allow only while using the app"),
+                     "permission grant"),
+                    # 2. ReviewPermissionsActivity Continue
+                    (lambda t, r, p: ("continue_button" in r or t == "Continue") and "permissioncontroller" in p,
+                     "Continue (permission review)"),
+                    # 3. Generic OK on system alert dialogs
+                    (lambda t, r, p: (r == "android:id/button1" or t == "OK") and p in ("android", ""),
+                     "OK (system alert)"),
+                    # 4. ANR Wait
+                    (lambda t, r, p: r == "android:id/aerr_wait" or t == "Wait",
+                     "Wait (ANR dialog)"),
+                    # 5. Generic positive button (button1 anywhere)
+                    (lambda t, r, p: r == "android:id/button1",
+                     "button1 (generic positive)"),
+                ]
+
+                for rule_fn, rule_label in TAP_RULES:
+                    if tapped:
+                        break
+                    for node in all_nodes:
+                        text = node.get("text", "")
+                        res_id = node.get("resource-id", "")
+                        pkg = node.get("package", "")
+                        clickable = node.get("clickable", "false")
+
+                        if rule_fn(text, res_id, pkg):
+                            x, y = _get_bounds_center(node)
+                            if x is not None:
+                                log_event(f"Dismissal: tapping '{rule_label}' at ({x},{y}) [text='{text}' pkg='{pkg}']")
+                                subprocess.run([ADB_PATH, "shell", "input", "tap", str(x), str(y)],
+                                               capture_output=True, timeout=5)
+                                tapped = True
+                                tapped_any = True
+                                break
+
+            except Exception as xml_err:
+                log_event(f"Dismissal XML parse error: {xml_err}", is_warn=True)
+            finally:
+                try:
+                    os.remove(local_dump)
+                except Exception:
+                    pass
+
+            # If nothing tapped and app is running → prompts already cleared
+            if not tapped:
+                try:
+                    pid_res = subprocess.run([ADB_PATH, "shell", "pidof", package_name],
+                                             capture_output=True, text=True, timeout=5)
+                    if pid_res.stdout.strip():
+                        log_event("No dismissable prompt found and app is running — prompts cleared.")
+                        break
+                except Exception:
+                    pass
+        else:
+            # Nuclear fallback: grant all permissions via pm grant
+            log_event("Dismissal loop exhausted — using 'pm grant' nuclear fallback for all dangerous permissions.", is_warn=True)
+            _DANGEROUS_PERMISSIONS = [
+                "android.permission.READ_CONTACTS", "android.permission.WRITE_CONTACTS",
+                "android.permission.READ_PHONE_STATE", "android.permission.CALL_PHONE",
+                "android.permission.READ_CALL_LOG", "android.permission.WRITE_CALL_LOG",
+                "android.permission.READ_SMS", "android.permission.RECEIVE_SMS",
+                "android.permission.SEND_SMS", "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.CAMERA",
+                "android.permission.RECORD_AUDIO", "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.ACCESS_COARSE_LOCATION", "android.permission.GET_ACCOUNTS",
+            ]
+            for perm in _DANGEROUS_PERMISSIONS:
+                try:
+                    subprocess.run([ADB_PATH, "shell", "pm", "grant", package_name, perm],
+                                   capture_output=True, timeout=5)
+                except Exception:
+                    pass
+
+        return tapped_any
 
     # Sanitize package_name to prevent ADB shell injections
     import re
@@ -433,7 +640,7 @@ def run_behavioral_trace(
             }
         log_event("Installation successful.")
 
-        # Pre-flight dismissal of first-launch system prompts (ReviewPermissionsActivity)
+        # Pre-flight dismissal of first-launch system prompts (ReviewPermissionsActivity and Older Version Alert)
         log_event("Pre-flight launch to dismiss guest system prompts...")
         try:
             if launcher_activity:
@@ -445,54 +652,11 @@ def run_behavioral_trace(
                 subprocess.run([ADB_PATH, "shell", "am", "start", "-n", f"{package_name}/{full_act}"], capture_output=True, timeout=15)
             else:
                 subprocess.run([ADB_PATH, "shell", f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-            time.sleep(4.0)
             
-            # Dynamically locate the Continue button on the ReviewPermissionsActivity overlay
-            dismissed = False
-            try:
-                import xml.etree.ElementTree as ET
-                import re
-                import uuid
-                
-                remote_dump = "/sdcard/kavach_pre_dump.xml"
-                local_dump = f"dump_{uuid.uuid4().hex}.xml"
-                
-                subprocess.run([ADB_PATH, "shell", "uiautomator", "dump", remote_dump], capture_output=True, timeout=10)
-                subprocess.run([ADB_PATH, "pull", remote_dump, local_dump], capture_output=True, timeout=10)
-                subprocess.run([ADB_PATH, "shell", "rm", "-f", remote_dump], capture_output=True, timeout=10)
-                
-                if os.path.exists(local_dump):
-                    tree = ET.parse(local_dump)
-                    root = tree.getroot()
-                    for node in root.iter("node"):
-                        text = node.get("text", "")
-                        res_id = node.get("resource-id", "")
-                        if "continue_button" in res_id or text == "Continue":
-                            bounds = node.get("bounds", "")
-                            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
-                            if m:
-                                x = (int(m.group(1)) + int(m.group(3))) // 2
-                                y = (int(m.group(2)) + int(m.group(4))) // 2
-                                log_event(f"Dynamically tapping Continue button at ({x}, {y}) to dismiss first-launch permissions dialog.")
-                                subprocess.run([ADB_PATH, "shell", "input", "tap", str(x), str(y)], capture_output=True, timeout=5)
-                                dismissed = True
-                                break
-                    try:
-                        os.remove(local_dump)
-                    except Exception:
-                        pass
-            except Exception as e:
-                log_event(f"XML parse for permissions dismissal failed: {e}", is_warn=True)
-            
-            if not dismissed:
-                # Heuristic fallback coordinates based on default emulator screen ratios
-                log_event("Dismissal layout check bypassed or fallback engaged. Tapping Continue bounds at (280, 616).")
-                subprocess.run([ADB_PATH, "shell", "input", "tap", "280", "616"], capture_output=True, timeout=5)
-            
-            time.sleep(1.5)
-        except Exception as pre_err:
-            log_event(f"Pre-flight prompt dismissal warning (non-fatal): {pre_err}", is_warn=True)
-        
+            dismiss_guest_system_overlays()
+        except Exception as pre_dismiss_err:
+            log_event(f"Pre-flight dismiss non-fatal error: {pre_dismiss_err}", is_warn=True)
+
         # Force-stop the app to clear the slate for Frida spawn
         try:
             log_event("Force-stopping package to clear the slate for Frida spawn...")
@@ -547,9 +711,10 @@ def run_behavioral_trace(
                     capture_output=True, timeout=20
                 )
             
-            # Robust retry loop to locate the PID while the process boots (up to 15 attempts, sleeping 2s between checks)
-            for check_attempt in range(15):
-                time.sleep(2.0)
+            # Robust retry loop to locate the PID while the process boots (up to 8 attempts, sleeping 0.5s between checks)
+            for check_attempt in range(8):
+                dismiss_guest_system_overlays()
+                time.sleep(0.5)
                 
                 # 1. Try ADB pidof
                 try:
@@ -650,6 +815,7 @@ def run_behavioral_trace(
         script.load()
         device.resume(pid)
         log_event(f"Process {pid} resumed. Instrumentation active.")
+        dismiss_guest_system_overlays()
 
         # Explicit launcher launch
         if launcher_activity:

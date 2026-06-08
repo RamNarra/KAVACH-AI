@@ -145,7 +145,7 @@ def analyze_jadx(jadx_sources: Dict[str, str], jadx_out: str = None, package_nam
                 sub_pkg = sub_rel.replace(os.sep, ".")
                 is_lib = False
                 for p in _PRUNED_LIBS:
-                    if sub_pkg.startswith(p) or d == p:
+                    if sub_pkg.startswith(p) or f".{p}" in sub_pkg or d == p:
                         is_lib = True
                         break
                 if not is_lib:
@@ -434,7 +434,7 @@ def analyze_network_security_config(apktool_out: str, manifest_content: str) -> 
                 sub_pkg = sub_rel.replace(os.sep, ".")
                 is_lib = False
                 for p in _PRUNED_LIBS:
-                    if sub_pkg.startswith(p) or d == p:
+                    if sub_pkg.startswith(p) or f".{p}" in sub_pkg or d == p:
                         is_lib = True
                         break
                 if not is_lib:
@@ -518,8 +518,8 @@ def analyze_secrets(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
         if os.path.isdir(package_dir):
             sources_dir = package_dir
 
+    java_files = []
     for root_dir, dirs, files in os.walk(sources_dir):
-        # Prune third-party library paths
         rel_root = os.path.relpath(root_dir, sources_dir)
         pruned_dirs = []
         for d in dirs:
@@ -527,7 +527,7 @@ def analyze_secrets(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             sub_pkg = sub_rel.replace(os.sep, ".")
             is_lib = False
             for p in _PRUNED_LIBS:
-                if sub_pkg.startswith(p) or d == p:
+                if sub_pkg.startswith(p) or f".{p}" in sub_pkg or d == p:
                     is_lib = True
                     break
             if not is_lib:
@@ -535,39 +535,50 @@ def analyze_secrets(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
         dirs[:] = pruned_dirs
 
         for fname in files:
-            if not fname.endswith(".java"):
-                continue
-            fpath = os.path.join(root_dir, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                    content = fh.read()
-            except Exception as e:
-                logger.debug(f"Failed to read JADX source for secrets search {fpath}: {e}")
-                continue
+            if fname.endswith(".java"):
+                java_files.append(os.path.join(root_dir, fname))
 
-            rel = os.path.relpath(fpath, jadx_out)
-            for label, pattern, score in _SECRET_PATTERNS:
-                try:
-                    matches = re.findall(pattern, content)
-                except re.error as e:
-                    logger.warning(f"Regex error scanning secrets pattern {label}: {e}")
-                    continue
-                for m in matches:
-                    val = m if isinstance(m, str) else str(m)
-                    dedup_key = f"{label}:{val[:30]}"
-                    if dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
-                    # Redact the actual secret value in the evidence
-                    redacted = val[:6] + "****" + val[-3:] if len(val) > 12 else "****"
-                    findings["credential_leaks"].append({
-                        "type": label,
-                        "file": rel,
-                        "risk_score": score,
-                        "severity": "CRITICAL" if score >= 25 else "HIGH",
-                        "description": f"{label} detected in source ({redacted})"
-                    })
-                    findings["score"] += score
+    import concurrent.futures
+
+    def scan_file(fpath):
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception as e:
+            logger.debug(f"Failed to read JADX source for secrets search {fpath}: {e}")
+            return []
+
+        rel = os.path.relpath(fpath, jadx_out)
+        local_leaks = []
+        for label, pattern, score in _SECRET_PATTERNS:
+            try:
+                matches = re.findall(pattern, content)
+            except re.error as e:
+                logger.warning(f"Regex error scanning secrets pattern {label}: {e}")
+                continue
+            for m in matches:
+                val = m if isinstance(m, str) else str(m)
+                local_leaks.append((label, val, rel, score))
+        return local_leaks
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = executor.map(scan_file, java_files)
+
+    for file_leaks in results:
+        for label, val, rel, score in file_leaks:
+            dedup_key = f"{label}:{val[:30]}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            redacted = val[:6] + "****" + val[-3:] if len(val) > 12 else "****"
+            findings["credential_leaks"].append({
+                "type": label,
+                "file": rel,
+                "risk_score": score,
+                "severity": "CRITICAL" if score >= 25 else "HIGH",
+                "description": f"{label} detected in source ({redacted})"
+            })
+            findings["score"] += score
     return findings
 
 
@@ -593,7 +604,7 @@ _DANGEROUS_API_CHAINS = [
     ("getRunningAppProcesses","openConnection",    "Dynamic Process Tracking & Exfil",    20),
     ("loadLibrary",         "exec",               "Native Bytecode Execution / Shell",   30),
     ("getLine1Number",      "openConnection",     "Phone Number Exfiltration to Net",    25),
-    ("SimTelephoneManager", "sendMultipartTextMessage", "Multipart SMS Evasion Risk",     25),
+    ("SmsManager",          "sendMultipartTextMessage", "Multipart SMS Evasion Risk",          25),
     ("getNetworkOperator",  "openConnection",     "Network Carrier Info Exfiltration",   15),
 ]
 
@@ -631,7 +642,7 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
         python_bin = sys.executable
         
         cmd = [python_bin, analyzer_script, apk_path, output_json]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         
         if proc.returncode == 0 and os.path.exists(output_json):
             with open(output_json, "r") as f:
@@ -653,6 +664,7 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
     """
     import os
     import httpx
+    import hashlib
     
     findings = {
         "mobsf_scan": False,
@@ -660,32 +672,76 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
         "score": 0
     }
     
-    api_url = os.environ.get("MOBSF_API_URL")
+    api_url = os.environ.get("MOBSF_API_URL", "http://localhost:8000")
     api_key = os.environ.get("MOBSF_API_KEY")
     
     if api_url and api_key and apk_path and os.path.exists(apk_path):
         try:
-            headers = {"Authorization": api_key}
-            files = {"file": (os.path.basename(apk_path), open(apk_path, "rb"), "application/octet-stream")}
+            # Generate MD5 of the APK file to query the scorecard directly
+            hasher = hashlib.md5()
+            with open(apk_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    hasher.update(chunk)
+            file_hash = hasher.hexdigest()
             
-            # 1. Upload APK
+            headers = {"Authorization": api_key}
+            scorecard_url = f"{api_url.rstrip('/')}/api/v1/scorecard"
+            
+            # 1. Check if scan already exists by fetching scorecard directly
+            with httpx.Client(timeout=5.0) as client:
+                try:
+                    score_resp = client.post(scorecard_url, data={"hash": file_hash}, headers=headers)
+                    if score_resp.status_code == 200:
+                        score_data = score_resp.json()
+                        scorecard_data = score_data.get("scorecard")
+                        if scorecard_data:
+                            logger.info(f"MobSF cache hit for MD5 {file_hash}. Restoring report scorecard...")
+                            findings["mobsf_scan"] = True
+                            for issue in scorecard_data:
+                                title = issue.get("title", "OWASP Security Warning")
+                                desc = issue.get("description", "")
+                                severity = issue.get("severity", "medium").upper()
+                                findings["scorecard"].append({
+                                    "title": f"MobSF: {title}",
+                                    "description": desc,
+                                    "severity": severity,
+                                    "type": "OWASP Compliance"
+                                })
+                                findings["score"] += 10 if severity == "HIGH" else 5
+                            return findings
+                except Exception as cache_err:
+                    logger.debug(f"MobSF direct scorecard check failed: {cache_err}")
+
+            # 2. Verify MobSF service health before uploading (max 3.0s timeout)
+            try:
+                with httpx.Client(timeout=3.0) as client:
+                    health_resp = client.get(f"{api_url.rstrip('/')}/api/v1/scans", headers=headers)
+                    if health_resp.status_code != 200:
+                        logger.warning(f"MobSF health check returned status code {health_resp.status_code}. Skipping scan.")
+                        return findings
+            except Exception as health_err:
+                logger.warning(f"MobSF API unreachable: {health_err}. Skipping scan.")
+                return findings
+
+            # 3. Upload and trigger scan if caching check missed
+            files = {"file": (os.path.basename(apk_path), open(apk_path, "rb"), "application/octet-stream")}
             upload_url = f"{api_url.rstrip('/')}/api/v1/upload"
-            with httpx.Client(timeout=60.0) as client:
+            
+            with httpx.Client(timeout=25.0) as client:
+                logger.info("Uploading APK to MobSF for a fresh scan...")
                 up_resp = client.post(upload_url, files=files, headers=headers)
                 if up_resp.status_code == 200:
-                    file_hash = up_resp.json().get("hash")
-                    if file_hash:
-                        # 2. Trigger Scan
+                    up_hash = up_resp.json().get("hash")
+                    if up_hash:
+                        # 4. Trigger Scan
                         scan_url = f"{api_url.rstrip('/')}/api/v1/scan"
-                        client.post(scan_url, data={"hash": file_hash}, headers=headers)
+                        client.post(scan_url, data={"hash": up_hash}, headers=headers)
                         
-                        # 3. Fetch Scorecard
-                        scorecard_url = f"{api_url.rstrip('/')}/api/v1/scorecard"
-                        score_resp = client.post(scorecard_url, data={"hash": file_hash}, headers=headers)
+                        # 5. Fetch Scorecard
+                        score_resp = client.post(scorecard_url, data={"hash": up_hash}, headers=headers)
                         if score_resp.status_code == 200:
                             score_data = score_resp.json()
                             findings["mobsf_scan"] = True
-                            # Extract MobSF warnings
                             for issue in score_data.get("scorecard", []):
                                 title = issue.get("title", "OWASP Security Warning")
                                 desc = issue.get("description", "")
@@ -701,25 +757,6 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Failed to query MobSF: {e}")
 
-    # High-Fidelity Local Fallback: Generates standardized OWASP Mobile Top 10 indicators
-    findings["scorecard"].append({
-        "title": "OWASP M1: Improper Credential Usage",
-        "description": "Verifying secure storage flags inside standard shared preference structures.",
-        "severity": "MEDIUM",
-        "type": "OWASP Compliance"
-    })
-    findings["scorecard"].append({
-        "title": "OWASP M3: Insecure Communication Channels",
-        "description": "Checking cleartext configuration overrides within local network security overrides.",
-        "severity": "HIGH",
-        "type": "OWASP Compliance"
-    })
-    findings["scorecard"].append({
-        "title": "OWASP M8: Code Tampering Detection",
-        "description": "Validating binary integrity and signature validity configurations.",
-        "severity": "INFO",
-        "type": "OWASP Compliance"
-    })
     return findings
 
 
@@ -759,7 +796,10 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     package_dir = os.path.join(jadx_out, "src", *package_name.split("."))
                 if os.path.isdir(package_dir):
                     target_scan_dir = package_dir
-            cmd = [semgrep_bin, "--config", "p/android", "--json", target_scan_dir]
+            backend_dir = os.path.dirname(os.path.abspath(__file__))
+            config_path = os.path.join(backend_dir, "tools", "semgrep-rules")
+            config_arg = config_path if os.path.isdir(config_path) else "p/android"
+            cmd = [semgrep_bin, "--config", config_arg, "--json", target_scan_dir]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
             if res.returncode == 0 and res.stdout:
                 data = json.loads(res.stdout)
@@ -807,8 +847,8 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     ]
     
     seen = set(v["rule"] + ":" + v["file"] for v in findings["violations"])
+    java_files = []
     for root_dir, dirs, files in os.walk(sources_dir):
-        # Prune third-party library paths during traversal
         rel_root = os.path.relpath(root_dir, sources_dir)
         pruned_dirs = []
         for d in dirs:
@@ -816,7 +856,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             sub_pkg = sub_rel.replace(os.sep, ".")
             is_lib = False
             for p in _PRUNED_LIBS:
-                if sub_pkg.startswith(p) or d == p:
+                if sub_pkg.startswith(p) or f".{p}" in sub_pkg or d == p:
                     is_lib = True
                     break
             if not is_lib:
@@ -824,33 +864,45 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
         dirs[:] = pruned_dirs
 
         for fname in files:
-            if not fname.endswith(".java"):
-                continue
-            fpath = os.path.join(root_dir, fname)
-            try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                    content = fh.read()
-            except Exception as e:
-                logger.debug(f"Failed to read JADX source for Semgrep search {fpath}: {e}")
-                continue
-                
-            rel = os.path.relpath(fpath, jadx_out)
-            for pattern, desc, score, sev in rules:
-                import re
-                if re.search(pattern, content):
-                    rule_id = f"semgrep-{desc.lower().replace(' ', '-')}"
-                    dedup_key = f"{rule_id}:{rel}"
-                    if dedup_key not in seen:
-                        seen.add(dedup_key)
-                        findings["violations"].append({
-                            "rule": rule_id,
-                            "description": f"AST Heuristic Match: {desc}",
-                            "file": rel,
-                            "severity": sev,
-                            "risk_score": score,
-                            "type": "semgrep"
-                        })
-                        findings["score"] += score
+            if fname.endswith(".java"):
+                java_files.append(os.path.join(root_dir, fname))
+
+    import concurrent.futures
+
+    def scan_heuristics(fpath):
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                content = fh.read()
+        except Exception as e:
+            logger.debug(f"Failed to read JADX source for Semgrep search {fpath}: {e}")
+            return []
+
+        rel = os.path.relpath(fpath, jadx_out)
+        local_violations = []
+        for pattern, desc, score, sev in rules:
+            import re
+            if re.search(pattern, content):
+                local_violations.append((desc, rel, score, sev))
+        return local_violations
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = executor.map(scan_heuristics, java_files)
+
+    for file_violations in results:
+        for desc, rel, score, sev in file_violations:
+            rule_id = f"semgrep-{desc.lower().replace(' ', '-')}"
+            dedup_key = f"{rule_id}:{rel}"
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                findings["violations"].append({
+                    "rule": rule_id,
+                    "description": f"AST Heuristic Match: {desc}",
+                    "file": rel,
+                    "severity": sev,
+                    "risk_score": score,
+                    "type": "semgrep"
+                })
+                findings["score"] += score
     return findings
 
 
@@ -943,7 +995,7 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             sub_pkg = sub_rel.replace(os.sep, ".")
             is_lib = False
             for p in _PRUNED_LIBS:
-                if sub_pkg.startswith(p) or d == p:
+                if sub_pkg.startswith(p) or f".{p}" in sub_pkg or d == p:
                     is_lib = True
                     break
             if not is_lib:
@@ -1000,6 +1052,7 @@ def calculate_deterministic_score(
     truffle_res: Dict[str, Any] = None,
     semgrep_res: Dict[str, Any] = None,
     package_name: str = "",
+    mobsf_res: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     import math
     m_res = analyze_manifest(manifest_content)
@@ -1013,7 +1066,7 @@ def calculate_deterministic_score(
     logger = logging.getLogger("kavach")
 
     tasks = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         if sec_res is not None:
             pass
         elif jadx_out:
@@ -1049,6 +1102,15 @@ def calculate_deterministic_score(
             tasks["trufflehog"] = executor.submit(analyze_trufflehog, jadx_out, package_name)
         else:
             truffle_res = {"secrets": [], "score": 0}
+
+        if mobsf_res is not None:
+            pass
+        elif apk_path and os.environ.get("MOBSF_API_KEY"):
+            if progress_callback:
+                progress_callback("androguard", "RUNNING", "Querying MobSF REST API for static security audit scorecard...")
+            tasks["mobsf"] = executor.submit(analyze_mobsf, apk_path)
+        else:
+            mobsf_res = {"mobsf_scan": False, "scorecard": [], "score": 0}
 
         # Retrieve results safely with individual exception bounds
         if "secrets" in tasks:
@@ -1087,8 +1149,18 @@ def calculate_deterministic_score(
                 logger.error(f"TruffleHog analysis failed: {e}")
                 truffle_res = {"secrets": [], "score": 0}
 
+        if "mobsf" in tasks:
+            try:
+                mobsf_res = tasks["mobsf"].result()
+                if progress_callback:
+                    progress_callback("androguard", "COMPLETED", "MobSF static audit completed.")
+            except Exception as e:
+                logger.error(f"MobSF analysis failed: {e}")
+                mobsf_res = {"mobsf_scan": False, "scorecard": [], "score": 0}
+
     if progress_callback:
-        progress_callback("trufflehog", "COMPLETED", "All deep static security engines successfully completed.")
+        progress_callback("androguard", "COMPLETED", "All deep static security engines successfully completed.")
+
 
     # -------------------------------------------------------------------------
     # Unified Multi-Dimensional Vulnerability Accumulation (MVSA) Scoring Engine
@@ -1208,6 +1280,20 @@ def calculate_deterministic_score(
     for hit in ag_res_clean.get("risky_classes", []):
         medium_findings.append({"type": "Risky Class Marker", "detail": hit.get("type"), "weight": 12, "severity": "MEDIUM"})
 
+    # 9. MobSF scorecard findings
+    mobsf_res_clean = mobsf_res if mobsf_res else {}
+    for issue in mobsf_res_clean.get("scorecard", []):
+        sev = str(issue.get("severity", "")).upper()
+        title = issue.get("title", "OWASP Security Warning")
+        desc = issue.get("description", "")
+        if sev in ["HIGH", "CRITICAL"]:
+            high_findings.append({"type": "MobSF Alert", "detail": f"{title}: {desc}", "weight": 15, "severity": "HIGH"})
+        elif sev == "MEDIUM":
+            medium_findings.append({"type": "MobSF Warning", "detail": f"{title}: {desc}", "weight": 8, "severity": "MEDIUM"})
+        else:
+            low_findings.append({"type": "MobSF Info", "detail": f"{title}: {desc}", "weight": 2, "severity": "LOW"})
+
+
     # A. Calculate Base Exposure Score (representing footprint)
     exposure_sum = 0
     for f in (low_findings + medium_findings):
@@ -1295,6 +1381,7 @@ def calculate_deterministic_score(
         "reflection_dynamic_loading": j_res["reflection_dynamic_loading"] + ag_res["dangerous_api_chains"],
         "obfuscation_signals": j_res["obfuscation_signals"] + a_res["obfuscator_packer"] + a_res["compiler_manipulator"] + ag_res["risky_classes"],
         "malware_rule_hits": a_res["anti_vm"] + q_res["rule_hits"],
+        "mobsf_scorecard": mobsf_res_clean.get("scorecard", []),
     }
 
     # Merge Semgrep AST warnings into malware_rule_hits
@@ -1320,6 +1407,7 @@ def calculate_deterministic_score(
             jadx_details.append(f"- {finding_type}{file_str} ({item.get('description', '')})")
 
     evasion_details = [f"- {hit['description']}" for hit in evidence["malware_rule_hits"]]
+    mobsf_details = [f"- [{item.get('severity', 'INFO')}] {item.get('title', 'MobSF Alert')}: {item.get('description', '')}" for item in evidence["mobsf_scorecard"]]
 
     return {
         "risk_score": clamped_score,
@@ -1332,5 +1420,7 @@ def calculate_deterministic_score(
             "manifest": manifest_details,
             "jadx": jadx_details,
             "evasion": evasion_details,
+            "mobsf": mobsf_details,
         },
     }
+

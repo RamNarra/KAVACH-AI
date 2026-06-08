@@ -15,8 +15,8 @@ def build_risk_decomposition(
     profile: str = "default",
 ) -> Dict[str, Any]:
     """Produce weighted breakdown and top contributors for UI."""
-    # independent_ai_score: zero if Gemini was forced to equal det_score (no independent signal)
-    independent_ai_score = ai_score if ai_score != static_score else 0
+    # Use the AI score directly without artificial dilution when it matches the static score
+    independent_ai_score = ai_score
 
     # Build weights based on profile
     if profile == "frontline":
@@ -73,7 +73,10 @@ def build_risk_decomposition(
     }
 
     weighted = {k: round(components[k] * weights[k], 1) for k in components}
-    composite = min(100, round(sum(weighted.values())))
+    composite_base = min(100, round(sum(weighted.values())))
+    # Conservative risk rating: ensure severe risks are never diluted
+    composite = max(composite_base, static_score, dynamic_score, fraud_score)
+    composite = min(100, max(0, composite))
 
 
     top = sorted(contributors or [], key=lambda x: x.get("weight", 0), reverse=True)[:5]

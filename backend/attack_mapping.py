@@ -36,11 +36,16 @@ def load_mitre_techniques():
         "T1629.001": {"name": "Prevent User Interaction", "tactic": "Defense Evasion"},
         "T1406": {"name": "Obfuscated Files or Information", "tactic": "Defense Evasion"},
         "T1633": {"name": "Virtualization Solution Discovery", "tactic": "Discovery"},
+        "T1422": {"name": "System Information Discovery", "tactic": "Discovery"},
         "T1430": {"name": "Location Tracking", "tactic": "Collection"},
         "T1521": {"name": "Encrypted Channel", "tactic": "Command and Control"},
         "T1437": {"name": "Application Layer Protocol", "tactic": "Command and Control"},
         "T1407": {"name": "Download New Code at Runtime", "tactic": "Defense Evasion"},
         "T1627": {"name": "Execution Guardrails", "tactic": "Execution"},
+        "T1521.002": {"name": "Encrypted Channel: Asymmetric Cryptography", "tactic": "Command and Control"},
+        "T1577": {"name": "Compromise Application Executable", "tactic": "Persistence"},
+        "T1603": {"name": "Scheduled Task/Job", "tactic": "Execution"},
+        "T1628.003": {"name": "Hide Artifacts: Suppress Application Icon", "tactic": "Defense Evasion"},
     })
 
 load_mitre_techniques()
@@ -62,6 +67,18 @@ CODE_PATTERNS = [
     ("http://", ["T1437"]),
     ("AccessibilityService", ["T1417"]),
     ("ClipboardManager", ["T1417"]),
+    ("rsa", ["T1521.002"]),
+    ("asymmetric", ["T1521.002"]),
+    ("setcomponentenabledsetting", ["T1628.003"]),
+    ("component_enabled_state_disabled", ["T1628.003"]),
+    ("alarmmanager", ["T1603"]),
+    ("jobscheduler", ["T1603"]),
+    ("jobservice", ["T1603"]),
+    ("workmanager", ["T1603"]),
+    ("patch", ["T1577"]),
+    ("build.fingerprint", ["T1422", "T1633"]),
+    ("build.model", ["T1422"]),
+    ("build.manufacturer", ["T1422"]),
 ]
 
 

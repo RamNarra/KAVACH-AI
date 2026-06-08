@@ -6,50 +6,63 @@
 # Build:  docker build -t kavach-sandbox:latest -f Dockerfile-sandbox .
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM eclipse-temurin:17-jre-jammy AS base
+# --- Build Stage ---
+FROM eclipse-temurin:17-jre-jammy AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget unzip CA-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and verify APKTool
+ARG APKTOOL_VERSION=2.9.3
+RUN wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" \
+    -O /tmp/apktool.jar && \
+    echo "7956eb04194300ce0d0a84ad18771eebc94b89fb8d1ddcce8ea4c056818646f4  /tmp/apktool.jar" | sha256sum -c -
+
+# Download and verify JADX
+ARG JADX_VERSION=1.5.0
+RUN wget -q "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" \
+    -O /tmp/jadx.zip && \
+    echo "c5a713fa4800cbb9e6df85ced1bef95ba329040c95cb87d54465f108483e4ef9  /tmp/jadx.zip" | sha256sum -c - && \
+    mkdir -p /opt/jadx && \
+    unzip -q /tmp/jadx.zip -d /opt/jadx
+
+# --- Final Stage ---
+FROM eclipse-temurin:17-jre-jammy AS final
 
 LABEL org.opencontainers.image.title="kavach-sandbox"
 LABEL org.opencontainers.image.description="Isolated APK analysis sandbox for KAVACH AI"
 
-# Install system deps
+# Install runtime dependencies (no build tools like git, curl, wget, or unzip)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip wget unzip curl git \
+    python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python analysis tools
+# Install pinned Python analysis tools
 RUN pip3 install --no-cache-dir \
     apkid==2.1.3 \
     androguard==3.3.5 \
     quark-engine==23.2.1 \
-    semgrep \
-    trufflehog3
+    semgrep==1.70.0 \
+    trufflehog3==3.5.2
 
-# Install APKTool
-ARG APKTOOL_VERSION=2.9.3
-RUN wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" \
-    -O /usr/local/lib/apktool.jar && \
-    echo '#!/bin/sh\nexec java -jar /usr/local/lib/apktool.jar "$@"' > /usr/local/bin/apktool && \
+# Copy APKTool from builder
+COPY --from=builder /tmp/apktool.jar /usr/local/lib/apktool.jar
+RUN echo '#!/bin/sh\nexec java -jar /usr/local/lib/apktool.jar "$@"' > /usr/local/bin/apktool && \
     chmod +x /usr/local/bin/apktool
 
-# Install JADX
-ARG JADX_VERSION=1.5.0
-RUN wget -q "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip" \
-    -O /tmp/jadx.zip && \
-    unzip -q /tmp/jadx.zip -d /opt/jadx && \
-    rm /tmp/jadx.zip && \
-    ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx
+# Copy JADX from builder
+COPY --from=builder /opt/jadx /opt/jadx
+RUN ln -s /opt/jadx/bin/jadx /usr/local/bin/jadx
 
 # Create non-root sandbox user
 RUN useradd -r -s /bin/false sandbox && \
     mkdir -p /sandbox/input /sandbox/output /sandbox/tmp && \
     chown -R sandbox:sandbox /sandbox
 
-# Security: drop all Linux capabilities except what's needed for JVM
-RUN apt-get purge -y wget curl git 2>/dev/null || true
-
 USER sandbox
 WORKDIR /sandbox
 
-# Default entrypoint — caller passes the actual command
 ENTRYPOINT []
 CMD ["echo", "kavach-sandbox ready"]
