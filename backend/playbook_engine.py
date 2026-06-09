@@ -617,7 +617,18 @@ def _step_vision_guided_play(
         
         context_parts = []
         if permissions:
-            context_parts.append(f"- Requested Permissions: {', '.join(permissions)}")
+            perm_names = []
+            for p in permissions:
+                if isinstance(p, dict):
+                    name = p.get("name") or p.get("permission")
+                    if name:
+                        perm_names.append(str(name))
+                elif isinstance(p, str):
+                    perm_names.append(p)
+                else:
+                    perm_names.append(str(p))
+            if perm_names:
+                context_parts.append(f"- Requested Permissions: {', '.join(perm_names)}")
         if hits:
             hit_names = []
             for h in hits:

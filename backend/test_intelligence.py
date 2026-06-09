@@ -357,7 +357,7 @@ def test_vision_guided_play_static_context():
             "has_anti_vm": True,
             "has_login_fields": True,
             "static_evidence": {
-                "permissions": ["android.permission.RECEIVE_SMS", "android.permission.READ_PHONE_STATE"],
+                "permissions": ["android.permission.RECEIVE_SMS", {"name": "android.permission.READ_PHONE_STATE"}, {"permission": "android.permission.RECORD_AUDIO"}],
                 "malware_rule_hits": [{"rule_name": "RansomwareBehavior"}, "BankingTrojanInfo"],
                 "suspicious_urls": [{"url": "http://evil-c2.com/exfil"}],
                 "network_indicators": ["evil-c2.com"]
@@ -376,6 +376,8 @@ def test_vision_guided_play_static_context():
         assert len(captured_prompts) > 0
         prompt = captured_prompts[0]
         assert "RECEIVE_SMS" in prompt
+        assert "READ_PHONE_STATE" in prompt
+        assert "RECORD_AUDIO" in prompt
         assert "RansomwareBehavior" in prompt
         assert "evil-c2.com" in prompt
         assert "CONTEXT FROM STATIC ANALYSIS" in prompt
