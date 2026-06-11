@@ -20,7 +20,7 @@ logger = logging.getLogger("kavach-api")
 DOCKER_SANDBOX_ENV = os.getenv("KAVACH_DOCKER_SANDBOX")
 if DOCKER_SANDBOX_ENV is None:
     DOCKER_SANDBOX_ENABLED = True
-    STRICT_SANDBOX = False
+    STRICT_SANDBOX = True
 else:
     DOCKER_SANDBOX_ENABLED = DOCKER_SANDBOX_ENV in ("1", "true", "True")
     STRICT_SANDBOX = DOCKER_SANDBOX_ENABLED
@@ -73,11 +73,18 @@ def sandboxed_run(
     The container is disposable (--rm), has no network access (--network none),
     has a memory cap (--memory 3g), and runs as a non-root user (--user nobody).
     """
+    if DOCKER_SANDBOX_ENABLED:
+        if os.path.abspath(input_path) == os.path.abspath(output_path):
+            raise ValueError(
+                f"Security violation: input_path '{input_path}' and output_path '{output_path}' "
+                "must be separate directories on the host to prevent input file tampering."
+            )
+
     use_sandbox = DOCKER_SANDBOX_ENABLED
     if use_sandbox:
         if not _check_docker():
             if STRICT_SANDBOX:
-                raise RuntimeError("Docker daemon is not reachable but KAVACH_DOCKER_SANDBOX=1 is configured. Refusing to run bare host execution fallback in sandbox mode.")
+                raise RuntimeError("Docker daemon is not reachable. Refusing to run bare host execution fallback when STRICT_SANDBOX is enabled.")
             else:
                 logger.warning("Docker daemon is not reachable. Falling back to bare host execution (SANDBOX INACTIVE).")
                 use_sandbox = False
@@ -128,11 +135,18 @@ def sandboxed_popen(
     """
     Popen variant for streaming output (used by JADX which runs long).
     """
+    if DOCKER_SANDBOX_ENABLED:
+        if os.path.abspath(input_path) == os.path.abspath(output_path):
+            raise ValueError(
+                f"Security violation: input_path '{input_path}' and output_path '{output_path}' "
+                "must be separate directories on the host to prevent input file tampering."
+            )
+
     use_sandbox = DOCKER_SANDBOX_ENABLED
     if use_sandbox:
         if not _check_docker():
             if STRICT_SANDBOX:
-                raise RuntimeError("Docker daemon is not reachable but KAVACH_DOCKER_SANDBOX=1 is configured. Refusing to run bare host execution fallback in sandbox mode.")
+                raise RuntimeError("Docker daemon is not reachable. Refusing to run bare host execution fallback when STRICT_SANDBOX is enabled.")
             else:
                 logger.warning("Docker daemon is not reachable. Falling back to bare host execution (SANDBOX INACTIVE).")
                 use_sandbox = False

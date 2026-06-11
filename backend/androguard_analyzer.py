@@ -525,6 +525,71 @@ def run_analysis(apk_path: str, output_path: str):
         except Exception:
             pass
 
+    # 4. Advanced Behavioral Signatures
+    findings["behavioral_signatures"] = []
+    
+    # Check for Dynamic Dex/Jar loading
+    has_dynamic_loading = False
+    for d in d_list:
+        for val_raw in d.get_strings():
+            if isinstance(val_raw, bytes):
+                val = val_raw.decode('utf-8', errors='ignore')
+            else:
+                val = str(val_raw)
+            if "DexClassLoader" in val or "PathClassLoader" in val:
+                has_dynamic_loading = True
+                break
+        if has_dynamic_loading:
+            break
+            
+    if has_dynamic_loading:
+        findings["behavioral_signatures"].append({
+            "type": "Dynamic Class Loading Detected",
+            "risk_score": 25,
+            "severity": "HIGH",
+            "description": "App references DexClassLoader or PathClassLoader, which allows loading external bytecode at runtime (evasion technique)."
+        })
+        findings["score"] += 25
+
+    # Check for System Overlay usage
+    has_overlay_reference = False
+    for d in d_list:
+        for val_raw in d.get_strings():
+            if isinstance(val_raw, bytes):
+                val = val_raw.decode('utf-8', errors='ignore')
+            else:
+                val = str(val_raw)
+            if "TYPE_APPLICATION_OVERLAY" in val or "TYPE_SYSTEM_ALERT_WINDOW" in val or "system_alert_window" in val:
+                has_overlay_reference = True
+                break
+        if has_overlay_reference:
+            break
+            
+    if has_overlay_reference:
+        findings["behavioral_signatures"].append({
+            "type": "System Overlay Creation API",
+            "risk_score": 30,
+            "severity": "CRITICAL",
+            "description": "App references WindowManager Overlay constants (used by banking trojans for overlay phishing screens)."
+        })
+        findings["score"] += 30
+
+    # Check for SMS Interception receiver intent
+    has_sms_receiver_intent = False
+    if findings.get("manifest_content"):
+        manifest_str = findings["manifest_content"]
+        if "SMS_RECEIVED" in manifest_str or "RECEIVE_SMS" in manifest_str:
+            has_sms_receiver_intent = True
+            
+    if has_sms_receiver_intent:
+        findings["behavioral_signatures"].append({
+            "type": "SMS Interception Receiver",
+            "risk_score": 35,
+            "severity": "CRITICAL",
+            "description": "App declares an intent receiver or permission for SMS_RECEIVED (used to intercept banking OTPs)."
+        })
+        findings["score"] += 35
+
     with open(output_path, "w") as f:
         json.dump(findings, f)
 

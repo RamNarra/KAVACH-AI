@@ -3,6 +3,73 @@
 from banking_fraud import analyze_banking_fraud
 from attack_mapping import map_evidence_to_attack
 from risk_engine import build_risk_decomposition, derive_dynamic_score
+import threading
+import uuid
+
+class MockSnapshot:
+    def __init__(self, doc_id, data):
+        self.id = doc_id
+        self._data = data
+        self.exists = data is not None
+    def to_dict(self):
+        return dict(self._data) if self._data else {}
+
+class MockDocRef:
+    def __init__(self, col, doc_id, storage, lock):
+        self.col = col
+        self.id = doc_id
+        self.storage = storage
+        self.lock = lock
+        self.key = f"{col}/{doc_id}"
+    def get(self):
+        with self.lock:
+            return MockSnapshot(self.id, self.storage.get(self.key))
+    def set(self, data):
+        with self.lock:
+            self.storage[self.key] = data
+    def delete(self):
+        with self.lock:
+            if self.key in self.storage:
+                del self.storage[self.key]
+    def update(self, updates):
+        with self.lock:
+            data = self.storage.setdefault(self.key, {})
+            for k, v in updates.items():
+                if hasattr(v, "values"):
+                    data[k] = data.get(k, []) + v.values
+                else:
+                    data[k] = v
+    def check_and_update_rate_limit(self, now, window_secs, requests_limit):
+        with self.lock:
+            data = self.storage.setdefault(self.key, {})
+            timestamps = data.get("timestamps", [])
+            if not isinstance(timestamps, list):
+                timestamps = []
+            timestamps = [t for t in timestamps if now - t < window_secs]
+            if len(timestamps) >= requests_limit:
+                return False
+            timestamps.append(now)
+            data["timestamps"] = timestamps
+            return True
+
+class MockColRef:
+    def __init__(self, name, storage, lock):
+        self.name = name
+        self.storage = storage
+        self.lock = lock
+    def document(self, doc_id=None):
+        if doc_id is None:
+            doc_id = uuid.uuid4().hex
+        return MockDocRef(self.name, doc_id, self.storage, self.lock)
+
+class MockDB:
+    def __init__(self):
+        self.storage = {}
+        self.lock = threading.Lock()
+    def collection(self, name):
+        return MockColRef(name, self.storage, self.lock)
+
+
 
 
 MANIFEST_SMS = """<?xml version="1.0" encoding="utf-8"?>
@@ -68,12 +135,36 @@ def test_zipbomb_prevention_on_download():
 
 
 def test_rate_limiter():
-    from routes import InMemRateLimiter
-    limiter = InMemRateLimiter(2, 60)
+    import routes
+    if routes.db is not None:
+        try:
+            routes.db.collection("rate_limit_default").document("ip1").delete()
+            routes.db.collection("rate_limit_default").document("ip2").delete()
+        except Exception:
+            pass
+    limiter = routes.InMemRateLimiter(2, 60)
     assert limiter.check("ip1") is True
     assert limiter.check("ip1") is True
     assert limiter.check("ip1") is False  # 3rd time within 60s is blocked
     assert limiter.check("ip2") is True  # other key/IP is not blocked
+
+
+def test_rate_limiter_db_fallback():
+    import routes
+    original_db = routes.db
+    routes.db = MockDB()
+    try:
+        limiter = routes.HybridRateLimiter("test_db_rate_limiter", 2, 60)
+        # Clear database records if any
+        routes.db.collection("rate_limit_test_db_rate_limiter").document("ip1").delete()
+        routes.db.collection("rate_limit_test_db_rate_limiter").document("ip2").delete()
+
+        assert limiter.check("ip1") is True
+        assert limiter.check("ip1") is True
+        assert limiter.check("ip1") is False  # Blocked by DB rate limiter
+        assert limiter.check("ip2") is True
+    finally:
+        routes.db = original_db
 
 
 def test_calculate_deterministic_score_fast_scan():
@@ -386,6 +477,242 @@ def test_vision_guided_play_static_context():
     finally:
         playbook_engine._get_genai_client = original_getter
         playbook_engine._run = original_run
+
+
+def test_sandbox_runner_path_separation():
+    import pytest
+    from sandbox_runner import sandboxed_run, sandboxed_popen
+    import os
+    
+    # Enable sandboxing temporarily
+    import sandbox_runner
+    original_enabled = sandbox_runner.DOCKER_SANDBOX_ENABLED
+    sandbox_runner.DOCKER_SANDBOX_ENABLED = True
+    try:
+        # Same path should raise ValueError
+        with pytest.raises(ValueError) as exc:
+            sandboxed_run(["echo"], input_path="/tmp/same", output_path="/tmp/same")
+        assert "must be separate directories" in str(exc.value)
+
+        with pytest.raises(ValueError) as exc:
+            sandboxed_popen(["echo"], input_path="/tmp/same", output_path="/tmp/same")
+        assert "must be separate directories" in str(exc.value)
+    finally:
+        sandbox_runner.DOCKER_SANDBOX_ENABLED = original_enabled
+
+
+def test_auth_verify_request_uid_with_firebase_mock():
+    import os
+    import pytest
+    from fastapi import Request
+    from auth import verify_request_uid
+    from unittest.mock import Mock
+    
+    # Create a mock Request
+    mock_request = Mock(spec=Request)
+    mock_request.headers = {"Authorization": "Bearer fake_firebase_token"}
+    
+    # Mock firebase_admin._apps so that it tries to verify token
+    import firebase_admin
+    original_apps = firebase_admin._apps
+    
+    class FakeApp:
+        pass
+    firebase_admin._apps = [FakeApp()]
+    
+    try:
+        # We also mock firebase_admin.auth.verify_id_token
+        from firebase_admin import auth as firebase_auth
+        # Cache original verification method if present, else default to None
+        original_verify = getattr(firebase_auth, 'verify_id_token', None)
+        
+        firebase_auth.verify_id_token = lambda token: {"uid": "mocked_firebase_uid"}
+        
+        uid = verify_request_uid(mock_request, claimed_uid=None)
+        assert uid == "mocked_firebase_uid"
+    finally:
+        firebase_admin._apps = original_apps
+        if original_verify is not None:
+            firebase_auth.verify_id_token = original_verify
+        else:
+            delattr(firebase_auth, 'verify_id_token')
+
+
+def test_supabase_db_mocked():
+    from unittest.mock import patch, Mock
+    import os
+    import pytest
+    from supabase_db import SupabaseDB, ArrayUnion
+    
+    # Temporarily set credentials
+    os.environ["SUPABASE_URL"] = "https://mock.supabase.co"
+    os.environ["SUPABASE_KEY"] = "mock_key"
+    
+    try:
+        db = SupabaseDB()
+        doc_ref = db.collection("scans").document("test_doc")
+        
+        # Test get()
+        mock_response_get = Mock()
+        mock_response_get.status_code = 200
+        mock_response_get.json.return_value = [{"data": {"status": "RUNNING", "test_field": "val"}}]
+        
+        with patch("requests.get", return_value=mock_response_get) as mock_get:
+            snap = doc_ref.get()
+            assert snap.exists is True
+            assert snap.to_dict() == {"status": "RUNNING", "test_field": "val"}
+            mock_get.assert_called_once()
+            
+        # Test set()
+        mock_response_post = Mock()
+        mock_response_post.status_code = 201
+        
+        with patch("requests.post", return_value=mock_response_post) as mock_post:
+            doc_ref.set({"status": "COMPLETED"})
+            mock_post.assert_called_once()
+            
+        # Test update()
+        mock_response_get_update = Mock()
+        mock_response_get_update.status_code = 200
+        mock_response_get_update.json.return_value = [{"data": {"logs": ["log1"]}}]
+        
+        with patch("requests.get", return_value=mock_response_get_update), \
+             patch("requests.post", return_value=mock_response_post) as mock_post_update:
+            doc_ref.update({"logs": ArrayUnion(["log2"])})
+            mock_post_update.assert_called_once()
+            
+    finally:
+        del os.environ["SUPABASE_URL"]
+        del os.environ["SUPABASE_KEY"]
+
+
+def test_supabase_jwt_verification():
+    import os
+    import jwt
+    from fastapi import Request
+    from unittest.mock import Mock
+    from auth import verify_request_uid
+    
+    # Configure mock Supabase JWT environment
+    os.environ["SUPABASE_JWT_SECRET"] = "super_secret_supabase_key"
+    
+    try:
+        # Create token
+        token_payload = {"sub": "supabase_user_12345", "role": "authenticated"}
+        encoded_token = jwt.encode(token_payload, "super_secret_supabase_key", algorithm="HS256")
+        
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {"Authorization": f"Bearer {encoded_token}"}
+        
+        uid = verify_request_uid(mock_request, claimed_uid=None)
+        assert uid == "supabase_user_12345"
+        
+    finally:
+        del os.environ["SUPABASE_JWT_SECRET"]
+
+
+def test_custom_auth_login_test123():
+    import routes
+    from routes import login, register, LoginRequest, RegisterRequest
+    
+    original_db = routes.db
+    routes.db = MockDB()
+    try:
+        reg_req = RegisterRequest(
+            email="test123@example.com",
+            password="test123",
+            first_name="Test",
+            last_name="User"
+        )
+        register(reg_req)
+        
+        req = LoginRequest(email="test123@example.com", password="test123")
+        res = login(req)
+        assert res["username"] == "test123@example.com"
+        assert "uid" in res
+        assert "token" in res
+    finally:
+        routes.db = original_db
+
+
+def test_rate_limiter_concurrency_atomic():
+    import routes
+    import threading
+    import time
+
+    db = MockDB()
+    col_name = "rate_limit_concurrency_test"
+    doc_id = "test_ip_atomic"
+    
+    try:
+        db.collection(col_name).document(doc_id).delete()
+    except Exception:
+        pass
+
+    doc_ref = db.collection(col_name).document(doc_id)
+    max_requests = 5
+    window_seconds = 10
+
+    results = []
+    def worker():
+        allowed = doc_ref.check_and_update_rate_limit(time.time(), window_seconds, max_requests)
+        results.append(allowed)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Out of 8 concurrent requests, exactly 5 must be True and 3 must be False
+    assert results.count(True) == 5
+    assert results.count(False) == 3
+
+
+def test_emulator_pool_file_locking():
+    from unittest.mock import patch, Mock
+    from dynamic_engine import EmulatorPoolManager
+
+    pool = EmulatorPoolManager()
+    
+    mock_run_res = Mock()
+    mock_run_res.stdout = "emulator-5554\tdevice\nemulator-5556\tdevice\n"
+    mock_run_res.returncode = 0
+
+    with patch("dynamic_engine._orig_subprocess_run", return_value=mock_run_res):
+        # 1. Lease the first device
+        dev1 = pool.get_available_device()
+        assert dev1 == "emulator-5554"
+        assert dev1 in pool.busy_devices
+        
+        # 2. Try to lease again - should get the second device
+        dev2 = pool.get_available_device()
+        assert dev2 == "emulator-5556"
+        assert dev2 in pool.busy_devices
+
+        # 3. Try to lease a third time - should return None
+        dev3 = pool.get_available_device()
+        assert dev3 is None
+
+        # 4. Now simulate another EmulatorPoolManager instance in another process trying to lease
+        pool_other = EmulatorPoolManager()
+        dev_other = pool_other.get_available_device()
+        assert dev_other is None
+
+        # 5. Release dev1
+        pool.release_device(dev1)
+        assert dev1 not in pool.busy_devices
+
+        # 6. Now the other pool instance should be able to lease dev1
+        dev_other_leased = pool_other.get_available_device()
+        assert dev_other_leased == "emulator-5554"
+
+        # Cleanup
+        pool.release_device(dev2)
+        pool_other.release_device(dev_other_leased)
+
+
+
 
 
 

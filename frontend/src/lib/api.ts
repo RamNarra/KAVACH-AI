@@ -96,7 +96,7 @@ class IndexedDBCache {
     });
   }
 
-  async put(doc: any): Promise<void> {
+  async put(doc: AnalysisDoc): Promise<void> {
     try {
       const db = await this.openDB();
       return new Promise((resolve, reject) => {
@@ -111,7 +111,7 @@ class IndexedDBCache {
     }
   }
 
-  async get(id: string): Promise<any | null> {
+  async get(id: string): Promise<AnalysisDoc | null> {
     try {
       const db = await this.openDB();
       return new Promise((resolve, reject) => {
@@ -127,7 +127,7 @@ class IndexedDBCache {
     }
   }
 
-  async getAll(): Promise<any[]> {
+  async getAll(): Promise<AnalysisDoc[]> {
     try {
       const db = await this.openDB();
       return new Promise((resolve, reject) => {
@@ -279,6 +279,13 @@ export function uploadApkDirect(
     xhr.open('POST', url, true);
     xhr.setRequestHeader(SESSION_HEADER, getClientSessionId());
 
+    if (typeof window !== 'undefined') {
+      const jwtToken = window.localStorage.getItem('KAVACH_JWT_TOKEN');
+      if (jwtToken) {
+        xhr.setRequestHeader('Authorization', `Bearer ${jwtToken}`);
+      }
+    }
+
     if (onProgress) {
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable) {
@@ -293,7 +300,7 @@ export function uploadApkDirect(
         try {
           const data = JSON.parse(xhr.responseText);
           resolve(data as AnalysisStartResponse);
-        } catch (err) {
+        } catch {
           reject(new Error('Invalid JSON response from server'));
         }
       } else {
@@ -529,6 +536,19 @@ export function printExecutiveReport(doc: AnalysisDoc) {
         border-color: #222244 !important;
       }
     }
+    @media (max-width: 640px) {
+      .header-container {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 20px;
+      }
+      .glass-card {
+        grid-template-columns: 1fr !important;
+      }
+      body {
+        margin: 15px;
+      }
+    }
     
     .btn-print {
       display: inline-flex;
@@ -725,4 +745,77 @@ export function isTokenValid(token: string): boolean {
   } catch {
     return false;
   }
+}
+
+export async function loginUser(email: string, password: string): Promise<{ token: string; uid: string; username: string }> {
+  const res = await fetch(`${API}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to login');
+  }
+  const data = await res.json();
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem('KAVACH_JWT_TOKEN', data.token);
+    window.localStorage.setItem('KAVACH_USERNAME', data.username);
+  }
+  return data;
+}
+
+export async function registerUser(
+  email: string,
+  password: string,
+  firstName: string,
+  lastName: string,
+  geminiApiKey?: string
+): Promise<{ token: string; uid: string; username: string }> {
+  const res = await fetch(`${API}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email,
+      password,
+      first_name: firstName,
+      last_name: lastName,
+      gemini_api_key: geminiApiKey || null
+    }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to register');
+  }
+  const data = await res.json();
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem('KAVACH_JWT_TOKEN', data.token);
+    window.localStorage.setItem('KAVACH_USERNAME', data.username);
+  }
+  return data;
+}
+
+export async function updateGeminiApiKey(geminiApiKey: string | null): Promise<any> {
+  const token = getAuthToken();
+  const res = await fetch(`${API}/api/auth/update-key`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      gemini_api_key: geminiApiKey
+    }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Failed to update Gemini API Key');
+  }
+  return res.json();
+}
+
+
+export function getAnalysisStreamUrl(analysisId: string): string {
+  const token = getAuthToken() || '';
+  return `${API}/api/analysis/${analysisId}/stream?token=${token}`;
 }

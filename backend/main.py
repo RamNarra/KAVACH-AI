@@ -35,7 +35,8 @@ except Exception:  # pragma: no cover - dependency may be absent in minimal demo
     gcs_storage = None
 from google import genai
 from google.genai import types as genai_types
-from local_db import LocalDB, ArrayUnion as LocalArrayUnion, Query_Direction
+
+from supabase_db import SupabaseDB, ArrayUnion as SupabaseArrayUnion, is_supabase_configured
 
 from analysis_engine import calculate_deterministic_score
 from banking_fraud import analyze_banking_fraud
@@ -380,18 +381,99 @@ except FileNotFoundError as tool_err:
     JADX_BIN = "jadx"
     APKTOOL_CMD = ["apktool"]
 
-# Use local JSON-file storage instead of Firestore (Firebase suspended)
-db = LocalDB()
+# Enforce Supabase database storage
+if is_supabase_configured():
+    logger.info("Supabase credentials detected. Using Supabase cloud database.")
+    db = SupabaseDB()
+    class _FirestoreShim:
+        @staticmethod
+        def ArrayUnion(values):
+            return SupabaseArrayUnion(values)
 
-# Shim: replace firestore.ArrayUnion with our local equivalent
-class _FirestoreShim:
-    @staticmethod
-    def ArrayUnion(values):
-        return LocalArrayUnion(values)
+        class Query:
+            DESCENDING = "DESCENDING"
+            ASCENDING = "ASCENDING"
+else:
+    import sys
+    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+        logger.info("Running in test environment: Using in-memory MockDB.")
+        
+        class MockSnapshot:
+            def __init__(self, doc_id, data):
+                self.id = doc_id
+                self._data = data
+                self.exists = data is not None
+            def to_dict(self):
+                return dict(self._data) if self._data else {}
 
-    class Query:
-        DESCENDING = Query_Direction.DESCENDING
-        ASCENDING = Query_Direction.ASCENDING
+        class MockDocRef:
+            def __init__(self, col, doc_id, storage, lock):
+                self.col = col
+                self.id = doc_id
+                self.storage = storage
+                self.lock = lock
+                self.key = f"{col}/{doc_id}"
+            def get(self):
+                with self.lock:
+                    return MockSnapshot(self.id, self.storage.get(self.key))
+            def set(self, data):
+                with self.lock:
+                    self.storage[self.key] = data
+            def delete(self):
+                with self.lock:
+                    if self.key in self.storage:
+                        del self.storage[self.key]
+            def update(self, updates):
+                with self.lock:
+                    data = self.storage.setdefault(self.key, {})
+                    for k, v in updates.items():
+                        if hasattr(v, "values"):
+                            data[k] = data.get(k, []) + v.values
+                        else:
+                            data[k] = v
+            def check_and_update_rate_limit(self, now, window_secs, requests_limit):
+                with self.lock:
+                    data = self.storage.setdefault(self.key, {})
+                    timestamps = data.get("timestamps", [])
+                    if not isinstance(timestamps, list):
+                        timestamps = []
+                    timestamps = [t for t in timestamps if now - t < window_secs]
+                    if len(timestamps) >= requests_limit:
+                        return False
+                    timestamps.append(now)
+                    data["timestamps"] = timestamps
+                    return True
+
+        class MockColRef:
+            def __init__(self, name, storage, lock):
+                self.name = name
+                self.storage = storage
+                self.lock = lock
+            def document(self, doc_id=None):
+                if doc_id is None:
+                    import uuid
+                    doc_id = uuid.uuid4().hex
+                return MockDocRef(self.name, doc_id, self.storage, self.lock)
+
+        class MockDB:
+            def __init__(self):
+                self.storage = {}
+                self.lock = threading.Lock()
+            def collection(self, name):
+                return MockColRef(name, self.storage, self.lock)
+
+        db = MockDB()
+        class _FirestoreShim:
+            @staticmethod
+            def ArrayUnion(values):
+                return SupabaseArrayUnion(values)
+
+            class Query:
+                DESCENDING = "DESCENDING"
+                ASCENDING = "ASCENDING"
+    else:
+        logger.error("Database configuration missing: Supabase credentials not found and SQLite has been completely decommissioned.")
+        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables must be configured to run KAVACH AI.")
 
 firestore = _FirestoreShim()
 
@@ -411,6 +493,24 @@ try:
 except Exception as e:
     logger.error(f"Error initializing Google Gen AI client: {e}")
     genai_client = None
+
+
+def _get_genai_client_by_uid(uid: str | None) -> Any:
+    if not uid:
+        return genai_client
+    try:
+        snaps = db.collection("users").where("uid", "==", uid).stream()
+        if snaps:
+            custom_key = snaps[0].to_dict().get("gemini_api_key")
+            if custom_key:
+                return genai.Client(
+                    api_key=custom_key,
+                    http_options=genai_types.HttpOptions(timeout=60000)
+                )
+    except Exception as e:
+        logger.warning(f"Failed to initialize user client for uid {uid}: {e}")
+    return genai_client
+
 
 class GeminiRateLimiter:
     def __init__(self, rpm: int = 15):
@@ -440,60 +540,53 @@ def generate_content_with_fallback(
     model: str,
     contents: Any,
     config: Any,
-    fallback_model: str = "gemini-3.1-flash-lite"
+    **kwargs
 ) -> Any:
     """
-    Executes GenAI content generation using a primary model with custom timeouts.
-    Falls back to secondary and tertiary recovery models to prevent hangs.
+    Executes GenAI content generation sequentially using model fallback chain:
+    1. gemini-3.5-flash
+    2. gemini-3.1-flash-lite
+    3. gemini-3.1-pro
+    4. gemini-2.5-flash
+    5. gemini-2.5-pro
+    6. gemini-2.0-flash
     """
     if not client:
         raise Exception("GenAI client is not initialized")
         
-    gemini_limiter.wait_if_needed()
-    try:
-        logger.info(f"Generating content using primary model: {model} (20s timeout)")
-        return client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-            http_options=genai_types.HttpOptions(timeout=20000)
-        )
-    except Exception as exc:
-        logger.warning(
-            f"Primary model {model} failed or timed out: {exc}. "
-            f"Engaging secondary fallback model: {fallback_model} (30s timeout)..."
-        )
+    # The user's requested fallback sequence
+    models_to_try = [
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash"
+    ]
+    
+    # Ensure the parameterized model is at the front of the try list if not already
+    if model not in models_to_try:
+        models_to_try.insert(0, model)
+        
+    last_exc = None
+    for target_model in models_to_try:
         gemini_limiter.wait_if_needed()
         try:
+            logger.info(f"Generating content using model: {target_model}")
             return client.models.generate_content(
-                model=fallback_model,
+                model=target_model,
                 contents=contents,
-                config=config,
-                http_options=genai_types.HttpOptions(timeout=30000)
+                config=config
             )
-        except Exception as fallback_exc:
-            recovery_model = "gemini-1.5-flash"
-            if fallback_model != recovery_model and model != recovery_model:
-                logger.warning(
-                    f"Fallback model {fallback_model} failed: {fallback_exc}. "
-                    f"Engaging ultra-stable recovery model: {recovery_model}..."
-                )
-                gemini_limiter.wait_if_needed()
-                try:
-                    return client.models.generate_content(
-                        model=recovery_model,
-                        contents=contents,
-                        config=config,
-                        http_options=genai_types.HttpOptions(timeout=30000)
-                    )
-                except Exception as rec_exc:
-                    logger.error(f"Recovery model {recovery_model} also failed: {rec_exc}")
-                    raise rec_exc
-            else:
-                logger.error(
-                    f"Secondary fallback model {fallback_model} also failed: {fallback_exc}."
-                )
-                raise fallback_exc
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"Model {target_model} failed: {exc}. "
+                f"Trying next fallback..."
+            )
+            
+    logger.error("All models in the fallback chain failed to generate content.")
+    raise last_exc
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -520,7 +613,14 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_event():
-    _cleanup_stale_scan_artifacts(SCAN_TEMP_DIR)
+    # Run cleanup in a background daemon thread to avoid blocking API startup
+    cleanup_thread = threading.Thread(
+        target=_cleanup_stale_scan_artifacts,
+        args=(SCAN_TEMP_DIR,),
+        daemon=True,
+        name="kavach-startup-cleanup"
+    )
+    cleanup_thread.start()
 
     # Programmatically start MobSF Docker container if docker-compose / docker compose is available
     try:
@@ -1422,10 +1522,14 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
 
     temp_dir = tempfile.mkdtemp(dir=SCAN_TEMP_DIR)
     os.chmod(temp_dir, 0o700) # Lock down temp directory permissions to prevent local read access
-    apk_path = os.path.join(temp_dir, "target.apk")
-    apktool_out = os.path.join(temp_dir, "apktool_out")
-    jadx_out = os.path.join(temp_dir, "jadx_out")
-    apkid_json_path = os.path.join(temp_dir, "apkid_report.json")
+    input_dir = os.path.join(temp_dir, "input")
+    output_dir = os.path.join(temp_dir, "output")
+    os.makedirs(input_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+    apk_path = os.path.join(input_dir, "target.apk")
+    apktool_out = os.path.join(output_dir, "apktool_out")
+    jadx_out = os.path.join(output_dir, "jadx_out")
+    apkid_json_path = os.path.join(output_dir, "apkid_report.json")
 
     package_name = ""
     launcher_activity = ""
@@ -1511,8 +1615,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                     sandbox_apktool_cmd if os.getenv("KAVACH_DOCKER_SANDBOX", "0") in ("1", "true", "True") else apktool_cmd,
                     "APKTool",
                     doc_ref,
-                    sandbox_input_path=temp_dir,
-                    sandbox_output_path=temp_dir,
+                    sandbox_input_path=input_dir,
+                    sandbox_output_path=output_dir,
                 )
                 if process.returncode != 0:
                     raise Exception("APKTool decoding failed")
@@ -1594,8 +1698,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                     "JADX",
                     doc_ref,
                     timeout=JADX_TIMEOUT_SECS,
-                    sandbox_input_path=temp_dir,
-                    sandbox_output_path=temp_dir,
+                    sandbox_input_path=input_dir,
+                    sandbox_output_path=output_dir,
                 )
                 rc = proc.returncode
                 if rc != 0:
@@ -1624,8 +1728,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 sandbox_apkid_cmd = ["apkid", "-j", "-t", "30", "--entry-max-scan-size", "10485760", "/sandbox/input/target.apk"]
                 proc = sandboxed_run(
                     sandbox_apkid_cmd if os.getenv("KAVACH_DOCKER_SANDBOX", "0") in ("1", "true", "True") else apkid_cmd,
-                    input_path=temp_dir,
-                    output_path=temp_dir,
+                    input_path=input_dir,
+                    output_path=output_dir,
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -1644,7 +1748,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 logger.warning(f"APKiD failed: {e}")
                 update_progress("apkid", "FAILED", f"APKiD failed: {str(e)}")
 
-        quark_json_path = os.path.join(temp_dir, "quark_report.json")
+        quark_json_path = os.path.join(output_dir, "quark_report.json")
         quark_error = None
         def run_quark():
             nonlocal quark_error
@@ -1684,8 +1788,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                     "Quark",
                     doc_ref,
                     timeout=QUARK_TIMEOUT_SECS,
-                    sandbox_input_path=temp_dir,
-                    sandbox_output_path=temp_dir,
+                    sandbox_input_path=input_dir,
+                    sandbox_output_path=output_dir,
                 )
                 if proc.returncode == 0 or os.path.exists(quark_json_path):
                     update_progress("quark", "COMPLETED", "Quark-Engine behavioral analysis complete.")
@@ -1708,15 +1812,31 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 import sys
                 import subprocess
                 import json
+                import shutil
                 
-                output_json = os.path.join(temp_dir, "androguard_result.json")
+                output_json = os.path.join(output_dir, "androguard_result.json")
                 analyzer_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "androguard_analyzer.py")
-                python_bin = sys.executable
                 
-                cmd = [python_bin, analyzer_script, apk_path, output_json]
-                logger.info(f"Running Androguard subprocess: {' '.join(cmd)}")
+                # Copy the analyzer script to the host's output directory so it is mounted in the container
+                shutil.copy2(analyzer_script, os.path.join(output_dir, "androguard_analyzer.py"))
                 
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if os.getenv("KAVACH_DOCKER_SANDBOX", "0") in ("1", "true", "True"):
+                    cmd = ["python3", "/sandbox/output/androguard_analyzer.py", "/sandbox/input/target.apk", "/sandbox/output/androguard_result.json"]
+                    logger.info(f"Running Androguard inside sandbox: {' '.join(cmd)}")
+                    proc = sandboxed_run(
+                        cmd,
+                        input_path=input_dir,
+                        output_path=output_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=300
+                    )
+                else:
+                    python_bin = sys.executable
+                    cmd = [python_bin, analyzer_script, apk_path, output_json]
+                    logger.info(f"Running Androguard subprocess: {' '.join(cmd)}")
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                
                 if proc.returncode == 0 and os.path.exists(output_json):
                     with open(output_json, "r") as f:
                         androguard_result = json.load(f)
@@ -2102,10 +2222,11 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         ai_score_for_decomp: int = 0  # default; overwritten on success path
 
         try:
-            if not genai_client:
+            active_client = _get_genai_client_by_uid(request.uid)
+            if not active_client:
                 raise Exception("GenAI client is not initialized")
             ai_response = generate_content_with_fallback(
-                client=genai_client,
+                client=active_client,
                 model=STATIC_MODEL,
                 contents=prompt,
                 config=gen_config,

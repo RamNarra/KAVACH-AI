@@ -4,6 +4,7 @@ import os
 import xml.etree.ElementTree as ET
 import logging
 from typing import Dict, Any, List
+from sandbox_runner import DOCKER_SANDBOX_ENABLED
 
 logger = logging.getLogger("kavach")
 
@@ -634,22 +635,44 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
         import subprocess
         import json
         import tempfile
+        import shutil
+        from sandbox_runner import sandboxed_run
         
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-            output_json = tmp.name
+        temp_dir = tempfile.mkdtemp()
+        input_dir = os.path.join(temp_dir, "input")
+        output_dir = os.path.join(temp_dir, "output")
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
         
+        # Copy the target APK to the input directory
+        shutil.copy2(apk_path, os.path.join(input_dir, "target.apk"))
+        
+        output_json = os.path.join(output_dir, "androguard_result.json")
         analyzer_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "androguard_analyzer.py")
-        python_bin = sys.executable
+        shutil.copy2(analyzer_script, os.path.join(output_dir, "androguard_analyzer.py"))
         
-        cmd = [python_bin, analyzer_script, apk_path, output_json]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        
+        if DOCKER_SANDBOX_ENABLED:
+            cmd = ["python3", "/sandbox/output/androguard_analyzer.py", "/sandbox/input/target.apk", "/sandbox/output/androguard_result.json"]
+            logger.info(f"Running Androguard inside sandbox: {' '.join(cmd)}")
+            proc = sandboxed_run(
+                cmd,
+                input_path=input_dir,
+                output_path=output_dir,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+        else:
+            python_bin = sys.executable
+            cmd = [python_bin, analyzer_script, os.path.join(input_dir, "target.apk"), output_json]
+            logger.info(f"Running Androguard subprocess: {' '.join(cmd)}")
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
         if proc.returncode == 0 and os.path.exists(output_json):
             with open(output_json, "r") as f:
                 findings = json.load(f)
                 
-        if os.path.exists(output_json):
-            os.remove(output_json)
+        shutil.rmtree(temp_dir, ignore_errors=True)
     except Exception as e:
         import logging
         logging.getLogger("kavach").error(f"In-process Androguard analyzer subprocess execution failed: {e}")
@@ -798,16 +821,53 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     target_scan_dir = package_dir
             backend_dir = os.path.dirname(os.path.abspath(__file__))
             config_path = os.path.join(backend_dir, "tools", "semgrep-rules")
-            config_arg = config_path if os.path.isdir(config_path) else "p/android"
-            cmd = [semgrep_bin, "--config", config_arg, "--json", target_scan_dir]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
-            if res.returncode == 0 and res.stdout:
-                data = json.loads(res.stdout)
+            
+            if DOCKER_SANDBOX_ENABLED:
+                import tempfile
+                from sandbox_runner import sandboxed_run
+                temp_dir = tempfile.mkdtemp()
+                input_dir = os.path.join(temp_dir, "input")
+                output_dir = os.path.join(temp_dir, "output")
+                os.makedirs(input_dir, exist_ok=True)
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Copy target sources into input_dir/sources
+                shutil.copytree(target_scan_dir, os.path.join(input_dir, "sources"), dirs_exist_ok=True)
+                
+                config_in_sandbox = "p/android"
+                if os.path.isdir(config_path):
+                    shutil.copytree(config_path, os.path.join(input_dir, "semgrep-rules"), dirs_exist_ok=True)
+                    config_in_sandbox = "/sandbox/input/semgrep-rules"
+                
+                cmd = ["semgrep", "--config", config_in_sandbox, "--json", "/sandbox/input/sources"]
+                logger.info(f"Running Semgrep inside sandbox: {' '.join(cmd)}")
+                proc = sandboxed_run(
+                    cmd,
+                    input_path=input_dir,
+                    output_path=output_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60.0
+                )
+                stdout_data = proc.stdout
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            else:
+                config_arg = config_path if os.path.isdir(config_path) else "p/android"
+                cmd = [semgrep_bin, "--config", config_arg, "--json", target_scan_dir]
+                logger.info(f"Running Semgrep subprocess: {' '.join(cmd)}")
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
+                stdout_data = res.stdout if res.returncode == 0 else ""
+                
+            if stdout_data:
+                data = json.loads(stdout_data)
                 if data.get("results"):
                     findings["semgrep_scan"] = True
                     for result in data.get("results", []):
                         path = result.get("path", "")
-                        rel = os.path.relpath(path, jadx_out) if jadx_out in path else path
+                        if path.startswith("/sandbox/input/sources/"):
+                            rel = path[len("/sandbox/input/sources/"):]
+                        else:
+                            rel = os.path.relpath(path, jadx_out) if jadx_out in path else path
                         extra = result.get("extra", {})
                         msg = extra.get("message", "Semgrep security warning")
                         sev = extra.get("severity", "warning").upper()
@@ -821,7 +881,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                         })
                         findings["score"] += 10 if sev == "ERROR" else 5
         except Exception as e:
-            logger.warning(f"Failed to run Semgrep subprocess: {e}")
+            logger.warning(f"Failed to run Semgrep: {e}")
 
     # High-Fidelity Local Heuristics: Scans Java files for MASTG violations.
     # Runs always to augment/supplement Semgrep with JADX-compiled integer-literal equivalents.
@@ -935,22 +995,74 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     package_dir = os.path.join(jadx_out, "src", *package_name.split("."))
                 if os.path.isdir(package_dir):
                     target_scan_dir = package_dir
-            cmd = [trufflehog_bin, "filesystem", target_scan_dir, "--json"]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
-            if res.stdout:
+            
+            # If Docker sandboxing is enabled, we run inside the sandbox.
+            # Note that the sandbox image has trufflehog3 installed.
+            if DOCKER_SANDBOX_ENABLED:
+                import tempfile
+                from sandbox_runner import sandboxed_run
+                temp_dir = tempfile.mkdtemp()
+                input_dir = os.path.join(temp_dir, "input")
+                output_dir = os.path.join(temp_dir, "output")
+                os.makedirs(input_dir, exist_ok=True)
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Copy target sources into input_dir/sources
+                shutil.copytree(target_scan_dir, os.path.join(input_dir, "sources"), dirs_exist_ok=True)
+                
+                cmd = ["trufflehog3", "/sandbox/input/sources", "--json"]
+                logger.info(f"Running TruffleHog inside sandbox: {' '.join(cmd)}")
+                proc = sandboxed_run(
+                    cmd,
+                    input_path=input_dir,
+                    output_path=output_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60.0
+                )
+                stdout_data = proc.stdout
+                shutil.rmtree(temp_dir, ignore_errors=True)
                 findings["trufflehog_scan"] = True
-                for line in res.stdout.splitlines():
+            elif trufflehog_bin:
+                cmd = [trufflehog_bin, "filesystem", target_scan_dir, "--json"]
+                logger.info(f"Running TruffleHog subprocess: {' '.join(cmd)}")
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
+                stdout_data = res.stdout
+                findings["trufflehog_scan"] = True
+            else:
+                stdout_data = ""
+
+            if stdout_data:
+                for line in stdout_data.splitlines():
                     if not line:
                         continue
                     try:
                         data = json.loads(line)
-                        src = data.get("SourceMetadata", {}).get("Filesystem", {})
-                        fpath = src.get("file", "")
-                        rel = os.path.relpath(fpath, jadx_out) if jadx_out in fpath else fpath
-                        cred = data.get("Raw", "Sensitive Credential")
+                        fpath = ""
+                        if "path" in data:
+                            fpath = data["path"]
+                        elif "file" in data:
+                            fpath = data["file"]
+                        else:
+                            src = data.get("SourceMetadata", {}).get("Filesystem", {})
+                            fpath = src.get("file", "")
+                        
+                        if fpath.startswith("/sandbox/input/sources/"):
+                            rel = fpath[len("/sandbox/input/sources/"):]
+                        else:
+                            rel = os.path.relpath(fpath, jadx_out) if (fpath and jadx_out in fpath) else fpath or "unknown_file"
+                        
+                        # Get raw finding or reason
+                        cred = data.get("Raw", "") or data.get("reason", "")
+                        if not cred and "stringsFound" in data:
+                            sf = data["stringsFound"]
+                            cred = sf[0] if isinstance(sf, list) and sf else str(sf)
+                        if not cred:
+                            cred = "Sensitive Credential"
+                            
                         redacted = cred[:6] + "****" + cred[-3:] if len(cred) > 12 else "****"
                         findings["secrets"].append({
-                            "type": "TruffleHog: Verified Key",
+                            "type": data.get("type") or "TruffleHog: Verified Key",
                             "file": rel,
                             "risk_score": 15,
                             "severity": "CRITICAL",
@@ -960,7 +1072,7 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     except Exception as e:
                         logger.debug(f"Failed to parse TruffleHog JSON line: {e}")
         except Exception as e:
-            logger.warning(f"Failed to run TruffleHog subprocess: {e}")
+            logger.warning(f"Failed to run TruffleHog: {e}")
 
     # High-Fidelity Local Heuristics: Traces high-entropy strings (Shannon Entropy > 4.5)
     def calculate_shannon_entropy(data: str) -> float:
@@ -1279,6 +1391,23 @@ def calculate_deterministic_score(
         medium_findings.append({"type": "Dangerous API Call Chain", "detail": hit.get("type"), "weight": 12, "severity": "MEDIUM"})
     for hit in ag_res_clean.get("risky_classes", []):
         medium_findings.append({"type": "Risky Class Marker", "detail": hit.get("type"), "weight": 12, "severity": "MEDIUM"})
+    for hit in ag_res_clean.get("behavioral_signatures", []):
+        sev = str(hit.get("severity", "HIGH")).upper()
+        weight = hit.get("risk_score", 15)
+        finding = {
+            "type": hit.get("type", "Behavioral Match"),
+            "detail": hit.get("description", ""),
+            "weight": weight,
+            "severity": sev
+        }
+        if sev == "CRITICAL":
+            critical_findings.append(finding)
+        elif sev == "HIGH":
+            high_findings.append(finding)
+        elif sev == "MEDIUM":
+            medium_findings.append(finding)
+        else:
+            low_findings.append(finding)
 
     # 9. MobSF scorecard findings
     mobsf_res_clean = mobsf_res if mobsf_res else {}

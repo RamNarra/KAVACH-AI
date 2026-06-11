@@ -75,6 +75,7 @@ class EmulatorPoolManager:
     def __init__(self):
         self.lock = threading.Lock()
         self.busy_devices = set()
+        self._lock_files = {}
 
     def get_available_device(self) -> Optional[str]:
         try:
@@ -85,12 +86,34 @@ class EmulatorPoolManager:
                     serial = line.split()[0]
                     devices.append(serial)
             
+            # Create a locks directory for cross-process coordination
+            lock_dir = "/tmp/kavach_emulator_locks"
+            os.makedirs(lock_dir, exist_ok=True)
+            
+            import fcntl
             with self.lock:
                 for dev in devices:
                     if dev not in self.busy_devices:
-                        self.busy_devices.add(dev)
-                        logger.info(f"[Pool] Leased emulator device: {dev}")
-                        return dev
+                        # Try to acquire file lock for this specific serial
+                        lock_path = os.path.join(lock_dir, f"{dev}.lock")
+                        try:
+                            f = open(lock_path, "w")
+                            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            # Success! We acquired the file lock.
+                            self.busy_devices.add(dev)
+                            self._lock_files[dev] = f
+                            logger.info(f"[Pool] Leased emulator device (cross-process file lock): {dev}")
+                            return dev
+                        except (BlockingIOError, PermissionError):
+                            # Lock is held by another process
+                            try:
+                                f.close()
+                            except Exception:
+                                pass
+                            continue
+                        except Exception as lock_err:
+                            logger.warning(f"[Pool] Error locking device file for {dev}: {lock_err}")
+                            continue
             return None
         except Exception as e:
             logger.warning(f"[Pool] Error querying adb devices for pool: {e}")
@@ -105,7 +128,16 @@ class EmulatorPoolManager:
         except Exception as e:
             logger.warning(f"[Pool] Failed to restore SELinux for {serial}: {e}")
 
+        import fcntl
         with self.lock:
+            # Release file lock
+            f = self._lock_files.pop(serial, None)
+            if f:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+                    f.close()
+                except Exception as e:
+                    logger.warning(f"[Pool] Error releasing file lock for {serial}: {e}")
             if serial in self.busy_devices:
                 self.busy_devices.remove(serial)
                 logger.info(f"[Pool] Released emulator device: {serial}")
@@ -275,6 +307,7 @@ def run_behavioral_trace(
     static_signals: Optional[Dict[str, Any]] = None,
     log_callback=None,
     device_serial: Optional[str] = None,
+    gemini_api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the full behavioral trace pipeline:
@@ -527,6 +560,13 @@ def run_behavioral_trace(
                 "duration_seconds": duration,
                 "error_message": "Android emulator is offline or unreachable."
             }
+
+        # Restore guest SELinux boundaries at dynamic session start to proactively revert any stale dynamic trace state
+        try:
+            subprocess.run([ADB_PATH, "shell", "setenforce", "1"], capture_output=True, timeout=10)
+            log_event("Enforced guest SELinux boundaries for clean session start.")
+        except Exception as se_err:
+            log_event(f"Failed to enforce guest SELinux boundaries at session start (non-fatal): {se_err}", is_warn=True)
 
         # Ensure Frida server is running
         log_event("Ensuring Frida server is running in sandbox...")
@@ -847,6 +887,7 @@ def run_behavioral_trace(
                 launcher_activity=launcher_activity or None,
                 static_signals=signals,
                 log_callback=log_callback,
+                gemini_api_key=gemini_api_key,
             )
             trigger_transcript = play_result["transcript"]
             coverage_map = play_result["coverage_map"]

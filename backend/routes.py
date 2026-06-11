@@ -8,6 +8,7 @@ which is registered onto the main FastAPI app.
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request, File, UploadFile, Form
 from pydantic import BaseModel
+from typing import Any
 import os
 import re
 import datetime
@@ -18,9 +19,34 @@ import tempfile
 import shutil
 import httpx
 import time
+import hashlib
+import uuid
+import jwt
 from auth import is_admin_request
 
 logger = logging.getLogger("kavach-api")
+
+import sys
+_supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
+if not _supabase_jwt_secret:
+    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+        JWT_SECRET = "super_secret_kavach_jwt_security_token_1337"
+    else:
+        raise RuntimeError("SUPABASE_JWT_SECRET environment variable is missing on the host!")
+else:
+    JWT_SECRET = _supabase_jwt_secret.strip()
+
+def hash_password(password: str, salt: str = "kavach_salt_1337") -> str:
+    return hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
+
+def create_jwt_token(uid: str, username: str) -> str:
+    payload = {
+        "sub": uid,
+        "username": username,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(days=7),
+        "iat": datetime.datetime.utcnow(),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 def get_client_ip(request: Request) -> str | None:
     x_forwarded_for = request.headers.get("X-Forwarded-For")
@@ -95,14 +121,39 @@ class HybridRateLimiter:
                 pipe = r.pipeline()
                 pipe.zremrangebyscore(redis_key, 0, now - self.window_secs)
                 pipe.zcard(redis_key)
-                pipe.zadd(redis_key, {str(now): now})
-                pipe.expire(redis_key, self.window_secs + 10)
-                _, count, _, _ = pipe.execute()
+                _, count = pipe.execute()
                 if count >= self.requests_limit:
                     return False
+                pipe2 = r.pipeline()
+                pipe2.zadd(redis_key, {str(now): now})
+                pipe2.expire(redis_key, self.window_secs + 10)
+                pipe2.execute()
                 return True
             except Exception as e:
-                logger.warning(f"Redis rate limit check failed: {e}. Falling back to local in-memory.")
+                logger.warning(f"Redis rate limit check failed: {e}. Falling back to database/local.")
+
+        now = time.time()
+        # Fallback to local DB cross-process rate limiting if db is available
+        if db is not None:
+            try:
+                doc_ref = db.collection(f"rate_limit_{self.name}").document(key)
+                if hasattr(doc_ref, "check_and_update_rate_limit"):
+                    return doc_ref.check_and_update_rate_limit(now, self.window_secs, self.requests_limit)
+                
+                # Legacy fallback just in case
+                doc = doc_ref.get()
+                if doc.exists:
+                    timestamps = doc.to_dict().get("timestamps", [])
+                else:
+                    timestamps = []
+                timestamps = [t for t in timestamps if now - t < self.window_secs]
+                if len(timestamps) >= self.requests_limit:
+                    return False
+                timestamps.append(now)
+                doc_ref.set({"timestamps": timestamps})
+                return True
+            except Exception as db_err:
+                logger.warning(f"Database rate limit check failed: {db_err}. Falling back to local in-memory.")
 
         now = time.time()
         with self.local_lock:
@@ -169,6 +220,65 @@ def _request_owner(request: Request, claimed_uid: str | None = None) -> str:
     return verify_request_uid(request, claimed_uid)
 
 
+def _get_user_gemini_key(request: Request) -> str | None:
+    try:
+        auth_header = (request.headers.get("Authorization") or "").strip()
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
+            try:
+                decoded = jwt.decode(token, options={"verify_signature": False})
+                email = decoded.get("username")
+                if email:
+                    snap = db.collection("users").document(email).get()
+                    if snap.exists:
+                        return snap.to_dict().get("gemini_api_key")
+                uid = decoded.get("sub") or decoded.get("uid")
+                if uid:
+                    snaps = db.collection("users").where("uid", "==", str(uid)).stream()
+                    if snaps:
+                        return snaps[0].to_dict().get("gemini_api_key")
+            except Exception as e:
+                logger.debug(f"Error decoding token for custom api key lookup: {e}")
+    except Exception as e:
+        logger.error(f"Error in _get_user_gemini_key: {e}")
+    return None
+
+
+def _get_genai_client_for_user(request: Request) -> Any:
+    custom_key = _get_user_gemini_key(request)
+    if custom_key:
+        try:
+            import google.genai as genai_sdk
+            client = genai_sdk.Client(
+                api_key=custom_key,
+                http_options=genai_types.HttpOptions(timeout=60000)
+            )
+            return client
+        except Exception as e:
+            logger.warning(f"Failed to initialize user custom Gemini client: {e}. Falling back to default.")
+    return genai_client
+
+
+def _get_genai_client_by_uid(uid: str | None) -> Any:
+    if not uid:
+        return genai_client
+    try:
+        snaps = db.collection("users").where("uid", "==", uid).stream()
+        if snaps:
+            custom_key = snaps[0].to_dict().get("gemini_api_key")
+            if custom_key:
+                import google.genai as genai_sdk
+                return genai_sdk.Client(
+                    api_key=custom_key,
+                    http_options=genai_types.HttpOptions(timeout=60000)
+                )
+    except Exception as e:
+        logger.warning(f"Failed to initialize user client for uid {uid}: {e}")
+    return genai_client
+
+
+
+
 def _assert_doc_access(request: Request, doc_data: dict) -> str:
     if is_admin_request(request):
         return doc_data.get("uid", "admin")
@@ -222,6 +332,114 @@ def queue_dynamic_analysis(doc_id: str, apk_url: str, uid: str, background_tasks
     else:
         import threading
         threading.Thread(target=run_dynamic_analysis_pipeline, args=(doc_id, apk_url, uid)).start()
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    first_name: str
+    last_name: str
+    gemini_api_key: str | None = None
+
+@router.post("/api/auth/login")
+def login(req: LoginRequest):
+    email = req.email.strip().lower()
+    password = req.password
+    
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required")
+    
+
+    # 2. Fetch user from DB
+    try:
+        snap = db.collection("users").document(email).get()
+    except Exception as e:
+        logger.error(f"Database error fetching user {email}: {e}")
+        raise HTTPException(status_code=500, detail="Database access error")
+        
+    if not snap.exists:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+    user_data = snap.to_dict()
+    expected_hash = hash_password(password)
+    if user_data.get("password_hash") != expected_hash:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+    uid = user_data.get("uid", f"user_{email}")
+    token = create_jwt_token(uid, email)
+    return {"token": token, "uid": uid, "username": email}
+
+@router.post("/api/auth/register")
+def register(req: RegisterRequest):
+    email = req.email.strip().lower()
+    password = req.password
+    first_name = req.first_name.strip()
+    last_name = req.last_name.strip()
+    gemini_api_key = req.gemini_api_key.strip() if req.gemini_api_key else None
+    
+    if not email or not password or not first_name or not last_name:
+        raise HTTPException(status_code=400, detail="All fields are required")
+    
+    if not re.match(r"^[\w\.\-]+@[\w\.\-]+\.[a-zA-Z]{2,10}$", email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+        
+    try:
+        snap = db.collection("users").document(email).get()
+        if snap.exists:
+            raise HTTPException(status_code=400, detail="Email already registered")
+            
+        uid = f"user_{uuid.uuid4().hex[:12]}"
+        user_doc = {
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "password_hash": hash_password(password),
+            "uid": uid
+        }
+        if gemini_api_key:
+            user_doc["gemini_api_key"] = gemini_api_key
+
+        db.collection("users").document(email).set(user_doc)
+        token = create_jwt_token(uid, email)
+        return {"token": token, "uid": uid, "username": email}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to register user: {e}")
+        raise HTTPException(status_code=500, detail="Database access error")
+
+
+class UpdateKeyRequest(BaseModel):
+    gemini_api_key: str | None = None
+
+
+@router.post("/api/auth/update-key")
+def update_gemini_key(req: UpdateKeyRequest, http_request: Request):
+    verified_uid = _request_owner(http_request)
+    try:
+        snaps = db.collection("users").where("uid", "==", verified_uid).stream()
+        if not snaps:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        email = snaps[0].id
+        user_data = snaps[0].to_dict()
+        if req.gemini_api_key is not None and req.gemini_api_key.strip():
+            user_data["gemini_api_key"] = req.gemini_api_key.strip()
+        else:
+            user_data.pop("gemini_api_key", None)
+            
+        db.collection("users").document(email).set(user_data)
+        return {"status": "success", "message": "Gemini API key updated successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update Gemini API key: {e}")
+        raise HTTPException(status_code=500, detail="Database access error")
+
 
 
 # ─── Route Handlers ────────────────────────────────────────────────────────────
@@ -390,6 +608,15 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
                 "static_evidence": static_evidence
             }
 
+            user_gemini_key = None
+            if uid:
+                try:
+                    snaps = db.collection("users").where("uid", "==", uid).stream()
+                    if snaps:
+                        user_gemini_key = snaps[0].to_dict().get("gemini_api_key")
+                except Exception as e:
+                    logger.debug(f"Error fetching custom key for trace: {e}")
+
             from dynamic_engine import run_behavioral_trace
             dynamic_result = run_behavioral_trace(
                 apk_path,
@@ -399,7 +626,8 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
                 active_packs=select_packs_from_signals(static_signals),
                 static_signals=static_signals,
                 log_callback=dynamic_log_callback,
-                device_serial=device_serial
+                device_serial=device_serial,
+                gemini_api_key=user_gemini_key
             )
             logger.info(f"Dynamic trace complete: status={dynamic_result.get('status')}, events={dynamic_result.get('event_count', 0)}")
             update_progress("dynamic_sandbox", "COMPLETED", f"Dynamic analysis complete. Events traced: {dynamic_result.get('event_count', 0)}")
@@ -590,10 +818,11 @@ def run_dynamic_analysis_pipeline(doc_id: str, apk_url: str, uid: str):
 
         analysis_json = None
         try:
-            if not genai_client:
+            active_client = _get_genai_client_by_uid(uid)
+            if not active_client:
                 raise Exception("GenAI client is not initialized")
             ai_response = generate_content_with_fallback(
-                client=genai_client,
+                client=active_client,
                 model=DYNAMIC_MODEL,
                 contents=prompt,
                 config=gen_config,
@@ -806,6 +1035,65 @@ def get_history(http_request: Request, uid: str | None = None):
         logger.error(f"Error fetching history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/analysis/{id}/stream")
+async def stream_analysis(id: str, http_request: Request, token: str | None = None):
+    # Enforce auth
+    # If token is passed in query params, we use it, otherwise we check Authorization header
+    auth_header = http_request.headers.get("Authorization")
+    if not auth_header and token:
+        # Construct header injection safely
+        http_request.headers.__dict__["_list"].append((b"authorization", f"Bearer {token}".encode("utf-8")))
+    
+    verified_uid = _request_owner(http_request)
+    doc_ref = db.collection("apkanalysisresults").document(id)
+    
+    from fastapi.responses import StreamingResponse
+    import asyncio
+
+    async def event_generator():
+        last_data_str = None
+        while True:
+            if await http_request.is_disconnected():
+                logger.info(f"SSE client disconnected for scan {id}")
+                break
+                
+            try:
+                from fastapi.concurrency import run_in_threadpool
+                snap = await run_in_threadpool(doc_ref.get)
+                if not snap.exists:
+                    yield "event: error\ndata: {\"detail\": \"Analysis not found\"}\n\n"
+                    break
+                
+                doc_data = snap.to_dict()
+                if doc_data.get("uid") != verified_uid and not is_admin_request(http_request):
+                    yield "event: error\ndata: {\"detail\": \"Unauthorized\"}\n\n"
+                    break
+                
+                # Deduplicate payloads: only send on changes to status, progress, or logs count
+                check_payload = {
+                    "status": doc_data.get("status"),
+                    "progress": doc_data.get("progress"),
+                    "logs_count": len(doc_data.get("logs", []))
+                }
+                curr_data_str = json.dumps(check_payload)
+                if curr_data_str != last_data_str:
+                    last_data_str = curr_data_str
+                    if "created_at" in doc_data and isinstance(doc_data["created_at"], datetime.datetime):
+                        doc_data["created_at"] = doc_data["created_at"].isoformat() + "Z"
+                    yield f"data: {json.dumps(doc_data)}\n\n"
+                
+                if doc_data.get("status") in ("COMPLETED", "FAILED"):
+                    break
+            except Exception as exc:
+                logger.error(f"SSE event generator error: {exc}")
+                yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+                break
+                
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @router.get("/api/analysis/{id}")
 def get_analysis(id: str, http_request: Request):
     try:
@@ -897,10 +1185,11 @@ Please address the user in high-quality (IELTS 7.5 standard) clear English. Be r
 """
         
         try:
-            if not genai_client:
+            active_client = _get_genai_client_for_user(http_request)
+            if not active_client:
                 raise Exception("GenAI client is not initialized")
             ai_response = generate_content_with_fallback(
-                client=genai_client,
+                client=active_client,
                 model=CHAT_MODEL,
                 contents=prompt,
                 config=None,

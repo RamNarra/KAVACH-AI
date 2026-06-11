@@ -30,21 +30,53 @@ _ADB_TIMEOUT = 10   # seconds per ADB command
 _SWIPE_DELAY = 0.3  # seconds between touch events
 
 
-def _get_genai_client():
+def _get_genai_client(api_key: str | None = None):
     try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            logger.warning("GEMINI_API_KEY not found in environment variables. Playbook GenAI will be disabled.")
+        key_to_use = api_key or os.environ.get("GEMINI_API_KEY")
+        if not key_to_use:
+            logger.warning("No Gemini API key available. Playbook GenAI will be disabled.")
             return None
         client = genai.Client(
-            api_key=api_key,
+            api_key=key_to_use,
             http_options=genai_types.HttpOptions(timeout=30000)
         )
-        logger.info("GenAI client initialized in playbook using Google AI Studio Free Tier (30s timeout)")
+        logger.info("GenAI client initialized in playbook using Google AI Studio API key (30s timeout)")
         return client
     except Exception as e:
         logger.warning(f"Failed to initialize GenAI client in playbook: {e}")
         return None
+
+
+def _generate_content_with_fallback(client, contents, config, primary_model="gemini-3.5-flash"):
+    models_to_try = [
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash"
+    ]
+    if primary_model not in models_to_try:
+        models_to_try.insert(0, primary_model)
+    
+    last_exc = None
+    for target_model in models_to_try:
+        # Enforce rate limit delay before dynamic play API requests
+        time.sleep(2.0)
+        try:
+            logger.info(f"Playbook GenAI trying model: {target_model}")
+            return client.models.generate_content(
+                model=target_model,
+                contents=contents,
+                config=config
+            )
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(f"Playbook GenAI model {target_model} failed: {exc}. Trying next fallback...")
+    
+    logger.error("All models in the playbook fallback chain failed.")
+    raise last_exc
+
 
 
 import threading
@@ -134,12 +166,71 @@ def _dump_ui_ocr(adb: str, tmp_dir: str) -> List[Dict[str, Any]]:
         return []
 
 
+def _dismiss_system_dialogs(adb: str, tmp_dir: str) -> bool:
+    """
+    Checks if there is a known system dialog (like runtime permissions, Play Protect warnings,
+    or Google sign-in prompts) visible and dismisses it dynamically using UI hierarchy parsing.
+    Returns True if a dialog was dismissed.
+    """
+    remote = "/sdcard/kavach_system_dump.xml"
+    local  = os.path.join(tmp_dir, "system_dump.xml")
+
+    r = _run([adb, "shell", "uiautomator", "dump", remote])
+    if r.returncode != 0:
+        return False
+
+    _run([adb, "pull", remote, local])
+    _run([adb, "shell", "rm", "-f", remote])
+    try:
+        tree = ET.parse(local)
+        root = tree.getroot()
+    except Exception:
+        return False
+
+    nodes_to_click = []
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip()
+        resource_id = (node.get("resource-id") or "").strip()
+        content_desc = (node.get("content-desc") or "").strip()
+        
+        is_match = False
+        text_lower = text.lower()
+        
+        # We want to dismiss common permission prompts and installation warning popups
+        if text_lower in ("allow", "accept", "install anyway", "install", "ok", "agree", "continue", "yes", "confirm", "allow all the time", "allow only while using the app"):
+            is_match = True
+        elif "install_anyway" in resource_id or "allow_button" in resource_id:
+            is_match = True
+            
+        if is_match:
+            bounds = node.get("bounds", "")
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+            if m:
+                x = (int(m.group(1)) + int(m.group(3))) // 2
+                y = (int(m.group(2)) + int(m.group(4))) // 2
+                nodes_to_click.append((x, y, text or resource_id))
+                
+    if nodes_to_click:
+        x, y, label = nodes_to_click[0]
+        logger.info(f"[UI_AUTOMATION] Dynamically detected system dialog element '{label}' at ({x}, {y}). Tapping to dismiss...")
+        _tap(adb, x, y)
+        time.sleep(1.0)
+        return True
+        
+    return False
+
+
 def _dump_ui(adb: str, tmp_dir: str) -> Optional[ET.Element]:
     """
     Use uiautomator dump to capture current UI hierarchy.
     Falls back to Tesseract OCR if uiautomator yields no clickable elements.
     Returns the root Element or None on failure.
     """
+    # Proactively dismiss up to 2 consecutive blocking system popups/dialogs first
+    for _ in range(2):
+        if not _dismiss_system_dialogs(adb, tmp_dir):
+            break
+
     remote = "/sdcard/kavach_ui_dump.xml"
     local  = os.path.join(tmp_dir, "ui_dump.xml")
 
@@ -398,7 +489,7 @@ def _step_deep_link(adb: str, package: str, schemes: List[str],
 
 
 def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
-                            coverage: Dict, log_callback=None) -> None:
+                            coverage: Dict, log_callback=None, gemini_api_key: Optional[str] = None) -> None:
     """
     Find EditText fields in the current UI and type test credentials.
     Uses Gemini AI if available to dynamically classify fields and enter appropriate dummy data,
@@ -407,15 +498,19 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
     def _log(msg: str):
         if log_callback:
             try:
-                log_callback(f"[PLAYBOOK_AI] {msg}")
+                log_callback(f"[PLAYBOOK_LOGIN] {msg}")
             except Exception:
                 pass
         logger.info(msg)
 
-    coverage["login_simulation_attempted"] = True
-    root = _dump_ui(adb, tmp_dir)
-    elements = _clickable_elements(root)
-    
+    # Dump current window layout hierarchy
+    xml_path = os.path.join(tmp_dir, "window_dump.xml")
+    ok = _dump_ui(adb, xml_path)
+    if not ok:
+        transcript.append(_step("login_simulation", "UI layout dump failed", "failed"))
+        return
+
+    elements = parse_uiautomator_xml(xml_path)
     fields = [e for e in elements if _is_edittext(e)]
     if not elements or not fields:
         transcript.append(_step("login_simulation",
@@ -426,7 +521,10 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
     _log(f"Detected {len(fields)} EditText fields. Initiating dynamic UI classification...")
 
     # Attempt AI-driven simulation
-    client = _get_genai_client()
+    try:
+        client = _get_genai_client(api_key=gemini_api_key)
+    except TypeError:
+        client = _get_genai_client()
     ai_success = False
     
     if client:
@@ -459,28 +557,17 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
                 "Ensure you return ONLY raw JSON. No markdown wraps."
             )
             
-            _log("Dispatching UI layout to Gemini Flash for input classification...")
-            try:
-                ai_response = client.models.generate_content(
-                    model="gemini-3.5-flash",
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.4,
-                    ),
-                    http_options=genai_types.HttpOptions(timeout=20000)
-                )
-            except Exception as exc:
-                _log(f"Primary model gemini-3.5-flash failed in playbook: {exc}. Engaging secondary fallback model gemini-3.1-flash-lite...")
-                ai_response = client.models.generate_content(
-                    model="gemini-3.1-flash-lite",
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.4,
-                    ),
-                    http_options=genai_types.HttpOptions(timeout=30000)
-                )
+            _log("Dispatching UI layout to Gemini Flash for input classification with fallback chain...")
+            ai_response = _generate_content_with_fallback(
+                client=client,
+                contents=prompt,
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.4,
+                ),
+                primary_model="gemini-3.5-flash"
+            )
+
             
             # Clean and parse response
             import json as py_json
@@ -567,7 +654,8 @@ def _step_vision_guided_play(
     transcript: list,
     static_signals: Optional[Dict[str, Any]] = None,
     log_callback=None,
-    max_steps: Optional[int] = None
+    max_steps: Optional[int] = None,
+    gemini_api_key: Optional[str] = None
 ) -> None:
     """
     Take a screenshot of the running emulator screen, send it directly to Gemini
@@ -588,7 +676,10 @@ def _step_vision_guided_play(
         except Exception:
             max_steps = 8
 
-    client = _get_genai_client()
+    try:
+        client = _get_genai_client(api_key=gemini_api_key)
+    except TypeError:
+        client = _get_genai_client()
     if not client:
         _log("Gemini client not initialized, skipping vision-guided play.")
         return
@@ -735,30 +826,17 @@ def _step_vision_guided_play(
 
             _log(f"Sending screenshot {step_idx} to Gemini Vision...")
             
-            # Enforce rate limit delay before dynamic play API requests
-            time.sleep(4.0)
+            _log("Sending screenshot to Gemini Vision with fallback chain...")
+            ai_response = _generate_content_with_fallback(
+                client=client,
+                contents=[img, prompt],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.2,
+                ),
+                primary_model="gemini-3.5-flash"
+            )
 
-            try:
-                ai_response = client.models.generate_content(
-                    model="gemini-3.5-flash",
-                    contents=[img, prompt],
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.2,
-                    ),
-                    http_options=genai_types.HttpOptions(timeout=20000)
-                )
-            except Exception as exc:
-                _log(f"Primary vision model gemini-3.5-flash failed: {exc}. Engaging secondary fallback model gemini-3.1-flash-lite...")
-                ai_response = client.models.generate_content(
-                    model="gemini-3.1-flash-lite",
-                    contents=[img, prompt],
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.2,
-                    ),
-                    http_options=genai_types.HttpOptions(timeout=30000)
-                )
 
             # Clean and parse response
             text_resp = ai_response.text.strip()
@@ -912,6 +990,7 @@ def run_playbook(
     launcher_activity: Optional[str],
     static_signals: Dict[str, Any],
     log_callback=None,
+    gemini_api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute the trigger playbook against a running emulator.
@@ -993,14 +1072,14 @@ def run_playbook(
         # Step 12: login simulation (if EditText fields are present)
         _log("Step 12/14: Login field simulation")
         if has_login_fields:
-            _step_login_simulation(adb, tmp_dir, transcript, coverage, log_callback=_log)
+            _step_login_simulation(adb, tmp_dir, transcript, coverage, log_callback=_log, gemini_api_key=gemini_api_key)
         else:
             transcript.append(_step("login_simulation",
                                     "Skipped (no login field signal in static analysis)", "skipped"))
 
         # Step 13: Vision-guided dynamic play
         _log("Step 13/15: Vision-guided dynamic play")
-        _step_vision_guided_play(adb, tmp_dir, transcript, static_signals=static_signals, log_callback=_log)
+        _step_vision_guided_play(adb, tmp_dir, transcript, static_signals=static_signals, log_callback=_log, gemini_api_key=gemini_api_key)
 
         # Step 14: wait for background jobs + network
         _log("Step 14/15: Background job wait")

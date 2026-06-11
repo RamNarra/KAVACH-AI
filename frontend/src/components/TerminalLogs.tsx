@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface TerminalLogsProps {
   logs: string[];
@@ -8,9 +8,10 @@ interface TerminalLogsProps {
 
 export default function TerminalLogs({ logs }: TerminalLogsProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const [apiPort, setApiPort] = useState('8080');
 
-  let apiPort = '8080';
-  if (typeof window !== 'undefined') {
+  useEffect(() => {
+    let port = '8080';
     const savedApi = window.localStorage.getItem('KAVACH_API_URL');
     const hostname = window.location.hostname;
     let apiEndpoint = savedApi || '';
@@ -21,19 +22,20 @@ export default function TerminalLogs({ logs }: TerminalLogsProps) {
       try {
         const url = new URL(apiEndpoint);
         if (url.port) {
-          apiPort = url.port;
+          port = url.port;
         } else if (url.protocol === 'https:') {
-          apiPort = '443';
+          port = '443';
         } else if (url.protocol === 'http:') {
-          apiPort = '80';
+          port = '80';
         }
-      } catch (e) {
+      } catch {
         // ignore
       }
     } else {
-      apiPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+      port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
     }
-  }
+    setApiPort(port);
+  }, []);
 
   useEffect(() => {
     if (containerRef.current) {
@@ -49,7 +51,7 @@ export default function TerminalLogs({ logs }: TerminalLogsProps) {
           <span className="w-3 h-3 rounded-full bg-yellow-500/80" />
           <span className="w-3 h-3 rounded-full bg-green-500/80" />
           <span className="text-[12.5px] font-bold font-mono tracking-widest text-[var(--muted)] ml-2 uppercase">
-            LIVE TELEMETRY LAB LOGS
+            Live Scan Log Output
           </span>
         </div>
         <div className="flex items-center gap-1.5 text-[10px] font-mono text-[var(--blue)] font-bold tracking-wider bg-[var(--blue)]/10 px-2 py-0.5 rounded-full">
