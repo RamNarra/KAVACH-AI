@@ -1368,173 +1368,200 @@ export default function Home() {
                             <div className="space-y-2">
                               <div className="h-12 bg-zinc-800 rounded"></div>
                               <div className="h-12 bg-zinc-800 rounded"></div>
-                              <div className="h-12 bg-zinc-800 rounded"></div>
                             </div>
                           </div>
                         </div>
                       ) : (
                       <>
-                        {!showAdvancedStatic ? (
-                          <div className="space-y-6 animate-fadeIn">
-                            {/* APK Metadata Grid */}
-                            <div className="security-card p-6 border border-[var(--border)] relative overflow-hidden bg-[var(--surface)]/40 backdrop-blur-md rounded-3xl">
-                              <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-bold mb-4">APK General Overview</p>
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                                <div className="space-y-1">
-                                  <span className="text-[11px] uppercase tracking-wider text-[var(--muted)] font-semibold">APK Target File</span>
-                                  <p className="text-[14px] font-semibold text-zinc-100 truncate">{current.filename || 'Unknown APK'}</p>
+                        {/* Unified High-Fidelity Static Audit Control Center */}
+                        <div className="space-y-6 animate-fadeIn text-left">
+                          
+                          {/* 1. Forensic Pipeline Status Stepper */}
+                          <div className="security-card p-5 border border-zinc-800/80 bg-zinc-950/40 backdrop-blur-xl rounded-3xl relative overflow-hidden">
+                            <div className="absolute top-0 left-0 w-24 h-[1px] bg-gradient-to-r from-transparent via-blue-500 to-transparent" />
+                            <div className="flex items-center justify-between mb-3">
+                              <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-bold">Static Analysis Engine Pipeline</p>
+                              <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-blue-950/40 border border-blue-500/20 text-blue-400 animate-pulse">Orchestrator Active</span>
+                            </div>
+                            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                              {[
+                                { name: "Decompilation", engine: "JADX & Apktool", status: "COMPLETED" },
+                                { name: "Signature Auditing", engine: "APKiD VM Check", status: "COMPLETED" },
+                                { name: "Heuristic Assembly", engine: "Androguard DEX", status: "COMPLETED" },
+                                { name: "Behavior Mapping", engine: "Quark ATT&CK", status: "COMPLETED" },
+                                { name: "GenAI Analyst Gate", engine: "Gemini Engine", status: current?.status === "PROCESSING" ? "PROCESSING" : "COMPLETED" }
+                              ].map((step, idx) => (
+                                <div key={idx} className="p-3 rounded-2xl bg-zinc-900/30 border border-zinc-850 flex flex-col justify-between h-20 relative">
+                                  <div>
+                                    <p className="text-[11px] font-bold text-zinc-200 truncate">{step.name}</p>
+                                    <p className="text-[9px] text-zinc-500 font-mono mt-0.5">{step.engine}</p>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 text-[10px] font-bold">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${step.status === 'COMPLETED' ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-blue-500 animate-ping'}`} />
+                                    <span className={step.status === 'COMPLETED' ? 'text-emerald-400' : 'text-blue-400'}>
+                                      {step.status === 'COMPLETED' ? 'Online' : 'Active'}
+                                    </span>
+                                  </div>
                                 </div>
-                                <div className="space-y-1">
-                                  <span className="text-[11px] uppercase tracking-wider text-[var(--muted)] font-semibold">Package Identifier</span>
-                                  <p className="text-[13px] font-mono text-zinc-300 truncate">{current.package_name || 'N/A'}</p>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* 2. Visual Multi-Metric Risk Dashboard */}
+                          <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+                            
+                            {/* Left Box: Premium Metadata & Progress Metrics (8 cols) */}
+                            <div className="md:col-span-8 security-card p-6 border border-zinc-800/80 bg-zinc-950/40 backdrop-blur-xl rounded-3xl space-y-6 flex flex-col justify-between">
+                              <div>
+                                <div className="flex justify-between items-center mb-4">
+                                  <h3 className="text-[13px] uppercase tracking-widest text-zinc-400 font-bold">Static Evaluation Overview</h3>
+                                  <span className="text-[9px] font-mono font-bold bg-zinc-900 border border-zinc-800 px-2.5 py-0.5 rounded text-zinc-400 select-none">
+                                    Verified Scan
+                                  </span>
                                 </div>
-                                <div className="space-y-1">
-                                  <span className="text-[11px] uppercase tracking-wider text-[var(--muted)] font-semibold">Scan Date & Time</span>
-                                  <p className="text-[13px] text-zinc-300">
-                                    {current.created_at ? new Date(current.created_at).toLocaleString('en-US', {
-                                      year: 'numeric',
-                                      month: 'short',
-                                      day: 'numeric',
-                                      hour: '2-digit',
-                                      minute: '2-digit'
-                                    }) : 'N/A'}
-                                  </p>
+                                <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+                                  <div className="space-y-1">
+                                    <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold block">Target Package</span>
+                                    <p className="text-[13.5px] font-mono text-zinc-300 truncate" title={current.package_name}>{current.package_name || 'N/A'}</p>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold block">APK Target File</span>
+                                    <p className="text-[13.5px] font-semibold text-zinc-100 truncate" title={current.filename}>{current.filename || 'Unknown APK'}</p>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold block">Static Risk Verdict</span>
+                                    <p className="text-[13.5px] font-extrabold" style={{ color: accent }}>{level} THREAT VERDICT</p>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold block">Scan Mapped At</span>
+                                    <p className="text-[13px] text-zinc-350">
+                                      {current.created_at ? new Date(current.created_at).toLocaleString('en-US', {
+                                        year: 'numeric',
+                                        month: 'short',
+                                        day: 'numeric',
+                                        hour: '2-digit',
+                                        minute: '2-digit'
+                                      }) : 'N/A'}
+                                    </p>
+                                  </div>
                                 </div>
-                                <div className="space-y-1">
-                                  <span className="text-[11px] uppercase tracking-wider text-[var(--muted)] font-semibold">Submitted By</span>
-                                  <p className="text-[13px] text-zinc-300 truncate">{current.email || 'System Forensic Agent'}</p>
-                                </div>
+                              </div>
+
+                              {/* Static Metric Progress Bars */}
+                              <div className="border-t border-zinc-900/60 pt-4 space-y-3.5">
+                                {[
+                                  { label: "Compiler Obfuscation Intensity", val: staticTelemetryData?.obfuscationSignals.length ? 75 : 15, color: "from-blue-500 to-indigo-500" },
+                                  { label: "Dangerous Permission Footprint", val: Math.min(100, (staticTelemetryData?.permissions.length || 0) * 8), color: "from-amber-500 to-orange-500" },
+                                  { label: "Static Code Vulnerability Score", val: Math.min(100, (staticTelemetryData?.quarkHits.length || 0) * 15), color: "from-rose-500 to-red-500" }
+                                ].map((bar, idx) => (
+                                  <div key={idx} className="space-y-1.5">
+                                    <div className="flex justify-between text-[11px] font-semibold">
+                                      <span className="text-zinc-400">{bar.label}</span>
+                                      <span className="text-zinc-300 tabular-nums">{bar.val}%</span>
+                                    </div>
+                                    <div className="h-2 w-full bg-zinc-950/60 rounded-full overflow-hidden border border-zinc-800/40 p-0.5">
+                                      <div className={`h-full bg-gradient-to-r ${bar.color} rounded-full`} style={{ width: `${bar.val}%` }} />
+                                    </div>
+                                  </div>
+                                ))}
                               </div>
                             </div>
 
-                            {/* Threat Level Circle Gauge */}
-                            <div className="security-card p-6 border border-[var(--border)] flex flex-col md:flex-row items-center gap-6 bg-[var(--surface)]/40 backdrop-blur-md rounded-3xl">
-                              <div className="relative w-32 h-32 flex items-center justify-center shrink-0">
+                            {/* Right Box: Absolute Static Risk Dial Gauge (4 cols) */}
+                            <div className="md:col-span-4 security-card p-6 border border-zinc-800/80 bg-zinc-950/40 backdrop-blur-xl rounded-3xl flex flex-col items-center justify-center text-center space-y-4">
+                              <div className="relative w-36 h-36 flex items-center justify-center shrink-0">
                                 <svg className="w-full h-full transform -rotate-90">
                                   <circle
-                                    cx="64"
-                                    cy="64"
-                                    r="52"
+                                    cx="72"
+                                    cy="72"
+                                    r="58"
                                     stroke="var(--border)"
                                     strokeWidth="8"
                                     fill="transparent"
-                                    className="opacity-20"
+                                    className="opacity-10"
                                   />
                                   <circle
-                                    cx="64"
-                                    cy="64"
-                                    r="52"
+                                    cx="72"
+                                    cy="72"
+                                    r="58"
                                     stroke={accent}
                                     strokeWidth="8"
                                     fill="transparent"
-                                    strokeDasharray={2 * Math.PI * 52}
-                                    strokeDashoffset={2 * Math.PI * 52 * (1 - (current.static_analysis?.risk_score ?? current.risk_score ?? 0) / 100)}
+                                    strokeDasharray={2 * Math.PI * 58}
+                                    strokeDashoffset={2 * Math.PI * 58 * (1 - (current.static_analysis?.risk_score ?? current.risk_score ?? 0) / 100)}
                                     className="transition-all duration-1000 ease-out"
                                   />
                                 </svg>
                                 <div className="absolute flex flex-col items-center justify-center">
-                                  <span className="text-[28px] font-extrabold tracking-tight tabular-nums" style={{ color: accent }}>
+                                  <span className="text-[32px] font-black tracking-tight tabular-nums" style={{ color: accent }}>
                                     {current.static_analysis?.risk_score ?? current.risk_score ?? 0}
                                   </span>
-                                  <span className="text-[9px] uppercase tracking-widest text-[var(--muted)] font-bold">Static Risk</span>
+                                  <span className="text-[9px] uppercase tracking-widest text-zinc-500 font-bold">Static Risk</span>
                                 </div>
                               </div>
-
-                              <div className="space-y-2 flex-1 text-center md:text-left">
-                                <div className="flex flex-col md:flex-row items-center gap-3">
-                                  <span className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-bold">Heuristic Classification</span>
-                                  <span
-                                    className="text-[11px] font-extrabold px-3 py-1 rounded-full border shadow-sm transition-all duration-300"
-                                    style={{
-                                      backgroundColor: `${accent}15`,
-                                      borderColor: `${accent}40`,
-                                      color: accent
-                                    }}
-                                  >
-                                    {level} RISK VERDICT
-                                  </span>
-                                </div>
-                                <p className="text-[14px] font-medium text-zinc-200">
+                              <div className="space-y-1">
+                                <h4 className="text-[13px] font-bold text-zinc-200">Heuristic Classification</h4>
+                                <p className="text-[11.5px] text-zinc-400 leading-relaxed max-w-[200px]">
                                   {level === 'CRITICAL' || level === 'HIGH'
-                                    ? 'Severe structural threats, vulnerable extensions, or suspicious API hooks were identified statically.'
-                                    : level === 'MEDIUM'
-                                    ? 'Moderate risk score. Contains sensitive permission requests and cleartext traffic capabilities.'
-                                    : 'Static checks did not identify any immediate dangerous malware indicators or evasion capabilities.'}
+                                    ? 'Severe static triggers, vulnerable extensions, or suspicious API hooks detected.'
+                                    : 'No immediate critical threats detected via static decompilation.'}
                                 </p>
                               </div>
                             </div>
-
-                            {/* AI Story Summary Briefing */}
-                            {activeSummaryText && (
-                              <div className="security-card p-6 space-y-4 border border-[var(--border)] bg-[var(--surface)]/40 backdrop-blur-md rounded-3xl relative overflow-hidden">
-                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2 border-b border-[var(--border)]/30 pb-3">
-                                  <div className="flex items-center gap-2 text-[var(--blue)]">
-                                    <span className="text-[16px]">🔎</span>
-                                    <span className="text-[12px] uppercase tracking-wider font-bold tracking-widest">Generative AI Forensic Advisory</span>
-                                  </div>
-                                  <div className="flex bg-[var(--surface-2)]/80 p-0.5 rounded-lg border border-[var(--border)]/30 w-fit gap-1">
-                                    {(['soc', 'bank_agent', 'ciso'] as const).map((tier) => (
-                                      <button
-                                        key={tier}
-                                        type="button"
-                                        onClick={() => setReportTier(tier)}
-                                        className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 cursor-pointer border-0 ${
-                                          reportTier === tier
-                                            ? 'bg-[var(--blue)]/10 text-[var(--blue)] border border-[var(--blue)]/30 shadow-sm'
-                                            : 'text-[var(--muted)] hover:text-[var(--text)] bg-transparent'
-                                        }`}
-                                      >
-                                        {tier === 'soc' && '🔧 SOC'}
-                                        {tier === 'bank_agent' && '🏦 Alert'}
-                                        {tier === 'ciso' && '📋 CISO'}
-                                      </button>
-                                    ))}
-                                  </div>
-                                </div>
-                                <div className={summaryExpanded ? '' : 'line-clamp-[6] overflow-hidden'}>
-                                  <MarkdownBody text={activeSummaryText} />
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => setSummaryExpanded(e => !e)}
-                                  className="text-[13px] text-[var(--blue)] bg-transparent border-0 cursor-pointer p-0 hover:opacity-80 font-semibold"
-                                >
-                                  {summaryExpanded ? 'Show less ↑' : 'Show more ↓'}
-                                </button>
-                              </div>
-                            )}
-
-                            {/* CTA to Open Advanced Diagnostics */}
-                            <div className="text-center pt-2">
-                              <button
-                                type="button"
-                                onClick={() => setShowAdvancedStatic(true)}
-                                className="w-full sm:w-auto h-12 px-8 rounded-full bg-[var(--blue)] hover:bg-[var(--blue)]/90 text-white text-[14px] font-semibold cursor-pointer shadow-[0_0_25px_rgba(59,130,246,0.25)] hover:shadow-[0_0_30px_rgba(59,130,246,0.4)] transition-all duration-300 flex items-center justify-center gap-2 mx-auto border-0"
-                              >
-                                🔍 Enter Advanced Diagnostics Dashboard &rarr;
-                              </button>
-                            </div>
                           </div>
-                        ) : (
-                          <div className="space-y-6 animate-fadeIn">
-                            {/* Return Navigation */}
-                            <div className="flex items-center justify-between border-b border-[var(--border)]/20 pb-4">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[18px]">⚙️</span>
-                                <h3 className="text-[16px] font-extrabold tracking-tight uppercase tracking-wider text-zinc-100">Advanced Diagnostic Vault</h3>
+
+                          {/* 3. GenAI Forensic Analyst Advisory Briefing */}
+                          {activeSummaryText && (
+                            <div className="security-card p-6 space-y-4 border border-zinc-800/80 bg-zinc-950/40 backdrop-blur-xl rounded-3xl relative overflow-hidden">
+                              <div className="absolute top-0 left-0 w-24 h-[1px] bg-gradient-to-r from-transparent via-indigo-500 to-transparent" />
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2 border-b border-zinc-900/60 pb-3">
+                                <div className="flex items-center gap-2 text-indigo-400">
+                                  <span className="text-[16px]">🔎</span>
+                                  <span className="text-[11.5px] uppercase tracking-wider font-bold tracking-widest">Generative AI Forensic Advisory</span>
+                                </div>
+                                <div className="flex bg-zinc-900/60 p-0.5 rounded-lg border border-zinc-800 w-fit gap-1">
+                                  {(['soc', 'bank_agent', 'ciso'] as const).map((tier) => (
+                                    <button
+                                      key={tier}
+                                      type="button"
+                                      onClick={() => setReportTier(tier)}
+                                      className={`px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 cursor-pointer border-0 ${
+                                        reportTier === tier
+                                          ? 'bg-indigo-600/15 text-indigo-400 border border-indigo-500/30 shadow-sm font-extrabold'
+                                          : 'text-zinc-500 hover:text-zinc-300 bg-transparent'
+                                      }`}
+                                    >
+                                      {tier === 'soc' && '🔧 SOC'}
+                                      {tier === 'bank_agent' && '🏦 Alert'}
+                                      {tier === 'ciso' && '📋 CISO'}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                              <div className={summaryExpanded ? '' : 'line-clamp-[6] overflow-hidden'}>
+                                <MarkdownBody text={activeSummaryText} />
                               </div>
                               <button
                                 type="button"
-                                onClick={() => setShowAdvancedStatic(false)}
-                                className="px-4 py-2 rounded-full border border-[var(--border)] bg-[var(--surface-2)]/50 hover:bg-[var(--border)]/20 text-[12px] font-semibold transition-all duration-200 cursor-pointer text-[var(--text)]"
+                                onClick={() => setSummaryExpanded(e => !e)}
+                                className="text-[13px] text-indigo-400 bg-transparent border-0 cursor-pointer p-0 hover:opacity-85 font-semibold"
                               >
-                                &larr; Back to Simple Overview
+                                {summaryExpanded ? 'Show less ↑' : 'Show more ↓'}
                               </button>
                             </div>
+                          )}
 
-                            {/* 9 Box Interactive Grid */}
+                          {/* 4. Interactive Diagnostic Auditing Workstation */}
+                          <div className="space-y-4">
+                            <div className="border-b border-zinc-900/60 pb-2 flex items-center justify-between">
+                              <h3 className="text-[14px] font-extrabold tracking-tight uppercase tracking-wider text-zinc-200 flex items-center gap-2">
+                                <span>⚙️</span> Interactive Code & Telemetry Audits
+                              </h3>
+                              <span className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Click any module to inspect details</span>
+                            </div>
+
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                              {/* 1. AndroidManifest Inspector */}
+                              {/* Card 1: AndroidManifest Inspector */}
                               <StaticToolCard
                                 title="AndroidManifest Inspector"
                                 icon="📦"
@@ -1551,56 +1578,56 @@ export default function Home() {
                                 isExpanded={!!expandedTools['manifest']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, manifest: !prev.manifest }))}
                               >
-                                <div className="space-y-4">
+                                <div className="space-y-4 text-left">
                                   {staticTelemetryData?.permissions && staticTelemetryData.permissions.length > 0 ? (
                                     <div className="space-y-2 flex flex-col">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Permissions Requested</p>
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Permissions Requested</p>
                                       {((staticTelemetryData.permissions.length > 6 && !showAllPermissions)
                                         ? staticTelemetryData.permissions.slice(0, 6)
                                         : staticTelemetryData.permissions
                                       ).map((p, i) => (
-                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
+                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
                                           <div>
-                                            <p className="text-[13px] font-mono text-[var(--text)] break-all">{p.name}</p>
-                                            {p.description && <p className="text-[11px] text-[var(--muted)] mt-0.5">{p.description}</p>}
+                                            <p className="text-[12.5px] font-mono text-zinc-200 break-all">{p.name}</p>
+                                            {p.description && <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">{p.description}</p>}
                                           </div>
-                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{p.risk_score}</span>
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0 border border-[var(--red)]/15">+{p.risk_score}</span>
                                         </div>
                                       ))}
                                       {staticTelemetryData.permissions.length > 6 && (
                                         <button
                                           type="button"
                                           onClick={() => setShowAllPermissions(!showAllPermissions)}
-                                          className="text-[12px] text-[var(--blue)] font-semibold bg-transparent border-0 cursor-pointer hover:underline mt-1.5 self-start"
+                                          className="text-[12px] text-blue-400 font-semibold bg-transparent border-0 cursor-pointer hover:underline mt-1.5 self-start"
                                         >
                                           {showAllPermissions ? 'Show Less ↑' : `Show All (${staticTelemetryData.permissions.length}) ↓`}
                                         </button>
                                       )}
                                     </div>
                                   ) : (
-                                    <p className="text-[12px] text-[var(--muted)]">No dangerous permissions requested.</p>
+                                    <p className="text-[12px] text-zinc-500">No dangerous permissions requested.</p>
                                   )}
 
                                   {staticTelemetryData?.exportedComponents && staticTelemetryData.exportedComponents.length > 0 && (
-                                    <div className="space-y-2 border-t border-[var(--border)]/30 pt-3 flex flex-col">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Exported Components</p>
+                                    <div className="space-y-2 border-t border-zinc-900/60 pt-3 flex flex-col">
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Exported Components</p>
                                       {((staticTelemetryData.exportedComponents.length > 5 && !showAllComponents)
                                         ? staticTelemetryData.exportedComponents.slice(0, 5)
                                         : staticTelemetryData.exportedComponents
                                       ).map((ec, i) => (
-                                        <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
+                                        <div key={i} className="py-2.5 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
                                           <div className="flex justify-between items-start gap-2">
-                                            <p className="text-[13px] font-mono break-all font-semibold text-[var(--text)]">{ec.name}</p>
-                                            <span className="text-[10px] uppercase px-1.5 py-0.5 rounded bg-[var(--surface)] text-[var(--muted)] border border-[var(--border)] shrink-0 font-semibold">{ec.type}</span>
+                                            <p className="text-[12.5px] font-mono break-all font-semibold text-zinc-200">{ec.name}</p>
+                                            <span className="text-[9px] uppercase px-1.5 py-0.5 rounded bg-zinc-950 text-zinc-400 border border-zinc-850 shrink-0 font-bold">{ec.type}</span>
                                           </div>
-                                          {ec.description && <p className="text-[11px] text-[var(--muted)] mt-1">{ec.description}</p>}
+                                          {ec.description && <p className="text-[11px] text-zinc-500 mt-1.5 leading-snug">{ec.description}</p>}
                                         </div>
                                       ))}
                                       {staticTelemetryData.exportedComponents.length > 5 && (
                                         <button
                                           type="button"
                                           onClick={() => setShowAllComponents(!showAllComponents)}
-                                          className="text-[12px] text-[var(--blue)] font-semibold bg-transparent border-0 cursor-pointer hover:underline mt-1.5 self-start"
+                                          className="text-[12px] text-blue-400 font-semibold bg-transparent border-0 cursor-pointer hover:underline mt-1.5 self-start"
                                         >
                                           {showAllComponents ? 'Show Less ↑' : `Show All (${staticTelemetryData.exportedComponents.length}) ↓`}
                                         </button>
@@ -1609,15 +1636,15 @@ export default function Home() {
                                   )}
 
                                   {staticTelemetryData?.manifestFlags && staticTelemetryData.manifestFlags.length > 0 && (
-                                    <div className="space-y-2 border-t border-[var(--border)]/30 pt-3">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Dangerous Flags</p>
+                                    <div className="space-y-2 border-t border-zinc-900/60 pt-3">
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Dangerous Flags</p>
                                       {staticTelemetryData.manifestFlags.map((f, i) => (
-                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
+                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
                                           <div>
-                                            <p className="text-[13px] font-mono font-semibold text-[var(--text)]">{f.flag}</p>
-                                            {f.description && <p className="text-[11px] text-[var(--muted)] mt-0.5">{f.description}</p>}
+                                            <p className="text-[12.5px] font-mono font-semibold text-zinc-200">{f.flag}</p>
+                                            {f.description && <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">{f.description}</p>}
                                           </div>
-                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{f.risk_score}</span>
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0 border border-[var(--red)]/15">+{f.risk_score}</span>
                                         </div>
                                       ))}
                                     </div>
@@ -1625,7 +1652,7 @@ export default function Home() {
                                 </div>
                               </StaticToolCard>
 
-                              {/* 2. APKiD VM Scanner */}
+                              {/* Card 2: APKiD VM Scanner */}
                               <StaticToolCard
                                 title="APKiD VM Scanner"
                                 icon="🛡"
@@ -1648,44 +1675,44 @@ export default function Home() {
                                 isExpanded={!!expandedTools['apkid']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, apkid: !prev.apkid }))}
                               >
-                                <div className="space-y-4">
+                                <div className="space-y-4 text-left">
                                   {staticTelemetryData?.evasionChecks && staticTelemetryData.evasionChecks.length > 0 && (
                                     <div className="space-y-2">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Evasion Checks</p>
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Evasion Checks</p>
                                       {staticTelemetryData.evasionChecks.map((a, i) => (
-                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
+                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
                                           <div>
-                                            <p className="text-[14px] font-semibold">{a.match || "Anti-VM Indicator"}</p>
-                                            <p className="text-[11px] text-[var(--muted)] mt-0.5">{a.description}</p>
+                                            <p className="text-[13.5px] font-semibold text-zinc-200">{a.match || "Anti-VM Indicator"}</p>
+                                            <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">{a.description}</p>
                                           </div>
-                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)]">+{a.risk_score}</span>
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] border border-[var(--red)]/15">+{a.risk_score}</span>
                                         </div>
                                       ))}
                                     </div>
                                   )}
 
                                   {staticTelemetryData?.obfuscationSignals && staticTelemetryData.obfuscationSignals.length > 0 && (
-                                    <div className="space-y-2 border-t border-[var(--border)]/30 pt-3">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Obfuscation & Packing</p>
+                                    <div className="space-y-2 border-t border-zinc-900/60 pt-3">
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Obfuscation & Packing</p>
                                       {staticTelemetryData.obfuscationSignals.map((o, i) => (
-                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
+                                        <div key={i} className="flex justify-between items-center py-2 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
                                           <div>
-                                            <p className="text-[14px] font-semibold">{o.match || "Obfuscated Target"}</p>
-                                            <p className="text-[11px] text-[var(--muted)] mt-0.5">{o.description}</p>
+                                            <p className="text-[13.5px] font-semibold text-zinc-200">{o.match || "Obfuscated Target"}</p>
+                                            <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">{o.description}</p>
                                           </div>
-                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)]">+{o.risk_score}</span>
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-900/20 text-blue-400 border border-blue-500/15">+{o.risk_score}</span>
                                         </div>
                                       ))}
                                     </div>
                                   )}
 
                                   {(!staticTelemetryData?.evasionChecks.length && !staticTelemetryData?.obfuscationSignals.length) && (
-                                    <p className="text-[12px] text-[var(--muted)]">No packer, compiler manipulation, or VM evasion signatures detected.</p>
+                                    <p className="text-[12px] text-zinc-500">No packer, compiler manipulation, or VM evasion signatures detected.</p>
                                   )}
                                 </div>
                               </StaticToolCard>
 
-                              {/* 3. Androguard DEX Auditor */}
+                              {/* Card 3: Androguard DEX Auditor */}
                               <StaticToolCard
                                 title="Androguard DEX Auditor"
                                 icon="🔍"
@@ -1709,59 +1736,59 @@ export default function Home() {
                                 isExpanded={!!expandedTools['androguard']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, androguard: !prev.androguard }))}
                               >
-                                <div className="space-y-4">
+                                <div className="space-y-4 text-left">
                                   {staticTelemetryData?.apiChains && staticTelemetryData.apiChains.length > 0 && (
                                     <div className="space-y-2">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">API Call Chains</p>
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">API Call Chains</p>
                                       {staticTelemetryData.apiChains.map((c, i) => (
-                                        <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)] flex justify-between items-center gap-3">
+                                        <div key={i} className="py-2.5 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850 flex justify-between items-center gap-3">
                                           <div>
-                                            <p className="text-[13px] font-semibold">{c.type}</p>
-                                            <p className="text-[11px] text-[var(--muted)] mt-0.5">{c.description}</p>
+                                            <p className="text-[13px] font-semibold text-zinc-200">{c.type}</p>
+                                            <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">{c.description}</p>
                                           </div>
-                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{c.risk_score}</span>
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0 border border-[var(--red)]/15">+{c.risk_score}</span>
                                         </div>
                                       ))}
                                     </div>
                                   )}
 
                                   {staticTelemetryData?.extendedClasses && staticTelemetryData.extendedClasses.length > 0 && (
-                                    <div className="space-y-2 border-t border-[var(--border)]/30 pt-3">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Extended Classes</p>
+                                    <div className="space-y-2 border-t border-zinc-900/60 pt-3">
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Extended Classes</p>
                                       {staticTelemetryData.extendedClasses.map((s, i) => (
-                                        <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
+                                        <div key={i} className="py-2.5 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
                                           <div className="flex justify-between items-start gap-2">
-                                            <p className="text-[12px] font-mono break-all font-semibold">{s.class}</p>
-                                            <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] shrink-0">+{s.risk_score}</span>
+                                            <p className="text-[12px] font-mono break-all font-semibold text-zinc-200">{s.class}</p>
+                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-900/20 text-blue-400 border border-blue-500/15 shrink-0">+{s.risk_score}</span>
                                           </div>
-                                          {s.description && <p className="text-[11px] text-[var(--muted)] mt-1">{s.description}</p>}
+                                          {s.description && <p className="text-[11px] text-zinc-500 mt-1.5 leading-snug">{s.description}</p>}
                                         </div>
                                       ))}
                                     </div>
                                   )}
 
                                   {staticTelemetryData?.bytecodePatterns && staticTelemetryData.bytecodePatterns.length > 0 && (
-                                    <div className="space-y-2 border-t border-[var(--border)]/30 pt-3">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Bytecode Patterns</p>
+                                    <div className="space-y-2 border-t border-zinc-900/60 pt-3">
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Bytecode Patterns</p>
                                       {staticTelemetryData.bytecodePatterns.map((str, i) => (
-                                        <div key={i} className="py-2.5 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)] flex justify-between items-start gap-3">
+                                        <div key={i} className="py-2.5 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850 flex justify-between items-start gap-3">
                                           <div>
-                                            <p className="text-[13px] font-semibold">{str.type}</p>
-                                            <p className="text-[11px] font-mono text-[var(--muted)] break-all mt-0.5">{str.value}</p>
+                                            <p className="text-[13px] font-semibold text-zinc-200">{str.type}</p>
+                                            <p className="text-[11px] font-mono text-zinc-550 break-all mt-0.5">{str.value}</p>
                                           </div>
-                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{str.risk_score}</span>
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0 border border-[var(--red)]/15">+{str.risk_score}</span>
                                         </div>
                                       ))}
                                     </div>
                                   )}
 
                                   {(!staticTelemetryData?.apiChains.length && !staticTelemetryData?.extendedClasses.length && !staticTelemetryData?.bytecodePatterns.length) && (
-                                    <p className="text-[12px] text-[var(--muted)]">No suspicious static bytecode call chains or patterns matched.</p>
+                                    <p className="text-[12px] text-zinc-500">No suspicious static bytecode call chains or patterns matched.</p>
                                   )}
                                 </div>
                               </StaticToolCard>
 
-                              {/* 4. Quark Behavioral Heuristics */}
+                              {/* Card 4: Quark Behavioral Heuristics */}
                               <StaticToolCard
                                 title="Quark Behavioral Heuristics"
                                 icon="🧠"
@@ -1775,30 +1802,30 @@ export default function Home() {
                                 isExpanded={!!expandedTools['quark']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, quark: !prev.quark }))}
                               >
-                                <div className="space-y-3">
+                                <div className="space-y-3 text-left">
                                   {staticTelemetryData?.quarkHits && staticTelemetryData.quarkHits.length > 0 ? (
                                     staticTelemetryData.quarkHits.map((q, i) => (
-                                      <div key={i} className="py-3 px-4 bg-[var(--surface-2)]/30 rounded-2xl border border-[var(--border)] space-y-1.5">
+                                      <div key={i} className="py-3 px-4 bg-zinc-900/40 rounded-2xl border border-zinc-850 space-y-1.5">
                                         <div className="flex justify-between items-start gap-3">
-                                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--blue)]/15 text-[var(--blue)] border border-[var(--blue)]/20 font-semibold">{q.rule}</span>
-                                          <span className="text-[11px] px-2 py-0.5 rounded bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)] font-medium">
+                                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-900/20 text-blue-400 border border-blue-500/15 font-bold">{q.rule}</span>
+                                          <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-950 border border-zinc-850 text-zinc-400 font-semibold">
                                             Confidence: {q.confidence || '100%'}
                                           </span>
                                         </div>
-                                        <p className="text-[13px] font-semibold leading-snug">{q.description}</p>
-                                        <div className="flex justify-between items-center text-[11px] text-[var(--muted)] pt-1 border-t border-[var(--border)]/30">
+                                        <p className="text-[13px] font-semibold leading-snug text-zinc-200">{q.description}</p>
+                                        <div className="flex justify-between items-center text-[11px] text-zinc-500 pt-1 border-t border-zinc-900/60">
                                           <span>Severity: {q.severity || 'HIGH'}</span>
-                                          <span className="text-[var(--red)] font-semibold">+{q.risk_score} pts</span>
+                                          <span className="text-[var(--red)] font-bold">+{q.risk_score} pts</span>
                                         </div>
                                       </div>
                                     ))
                                   ) : (
-                                    <p className="text-[12px] text-[var(--muted)]">No Quark behavioral rules triggered.</p>
+                                    <p className="text-[12px] text-zinc-500">No Quark behavioral rules triggered.</p>
                                   )}
                                 </div>
                               </StaticToolCard>
 
-                              {/* 5. Semgrep AST Compliance */}
+                              {/* Card 5: Semgrep AST Compliance */}
                               <StaticToolCard
                                 title="Semgrep AST Compliance"
                                 icon="🚨"
@@ -1812,25 +1839,25 @@ export default function Home() {
                                 isExpanded={!!expandedTools['compliance']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, compliance: !prev.compliance }))}
                               >
-                                <div className="space-y-3">
+                                <div className="space-y-3 text-left">
                                   {staticTelemetryData?.semgrepViolations && staticTelemetryData.semgrepViolations.length > 0 ? (
                                     staticTelemetryData.semgrepViolations.map((s, i) => (
-                                      <div key={i} className="py-3 px-4 bg-[var(--surface-2)]/30 rounded-2xl border border-[var(--border)] space-y-1.5">
+                                      <div key={i} className="py-3 px-4 bg-zinc-900/40 rounded-2xl border border-zinc-850 space-y-1.5">
                                         <div className="flex justify-between items-start gap-3">
-                                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20 shrink-0">{s.severity || "HIGH"}</span>
-                                          <span className="text-[12px] font-semibold text-[var(--red)]">+{s.risk_score || 10} pts</span>
+                                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20 shrink-0">{s.severity || "HIGH"}</span>
+                                          <span className="text-[12px] font-bold text-[var(--red)]">+{s.risk_score || 10} pts</span>
                                         </div>
-                                        <p className="text-[13px] font-semibold">{s.description || s.rule}</p>
-                                        {s.file && <p className="text-[10px] font-mono text-[var(--muted)] break-all bg-[var(--surface)] py-1 px-2 rounded">{s.file}</p>}
+                                        <p className="text-[13px] font-semibold text-zinc-200">{s.description || s.rule}</p>
+                                        {s.file && <p className="text-[10px] font-mono text-zinc-500 break-all bg-zinc-950 py-1 px-2 rounded border border-zinc-900/50">{s.file}</p>}
                                       </div>
                                     ))
                                   ) : (
-                                    <p className="text-[12px] text-[var(--muted)]">No Semgrep AST compliance violations found.</p>
+                                    <p className="text-[12px] text-zinc-500">No Semgrep AST compliance violations found.</p>
                                   )}
                                 </div>
                               </StaticToolCard>
 
-                              {/* 6. Deep Secrets Scanner */}
+                              {/* Card 6: Deep Secrets Scanner */}
                               <StaticToolCard
                                 title="Deep Secrets Scanner"
                                 icon="🔑"
@@ -1844,26 +1871,26 @@ export default function Home() {
                                 isExpanded={!!expandedTools['secrets']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, secrets: !prev.secrets }))}
                               >
-                                <div className="space-y-3">
+                                <div className="space-y-3 text-left">
                                   {staticTelemetryData?.hardcodedSecrets && staticTelemetryData.hardcodedSecrets.length > 0 ? (
                                     staticTelemetryData.hardcodedSecrets.map((s, i) => (
-                                      <div key={i} className="py-3 px-4 bg-[var(--surface-2)]/30 rounded-2xl border border-[var(--border)] space-y-1.5">
+                                      <div key={i} className="py-3 px-4 bg-zinc-900/40 rounded-2xl border border-zinc-850 space-y-1.5">
                                         <div className="flex justify-between items-start gap-3">
-                                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20">{s.severity}</span>
-                                          <span className="text-[12px] font-semibold text-[var(--red)]">+{s.risk_score} pts</span>
+                                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--red)]/15 text-[var(--red)] font-bold border border-[var(--red)]/20">{s.severity}</span>
+                                          <span className="text-[12px] font-bold text-[var(--red)]">+{s.risk_score} pts</span>
                                         </div>
-                                        <p className="text-[14px] font-semibold">{s.type}</p>
-                                        {s.file && <p className="text-[10px] font-mono text-[var(--muted)] break-all bg-[var(--surface)] py-1 px-2 rounded">{s.file}</p>}
-                                        <p className="text-[13px] text-[var(--muted)] pt-0.5 leading-relaxed">{s.description}</p>
+                                        <p className="text-[13.5px] font-semibold text-zinc-200">{s.type}</p>
+                                        {s.file && <p className="text-[10px] font-mono text-zinc-500 break-all bg-zinc-950 py-1 px-2 rounded border border-zinc-900/50">{s.file}</p>}
+                                        <p className="text-[12.5px] text-zinc-400 mt-1 leading-relaxed">{s.description}</p>
                                       </div>
                                     ))
                                   ) : (
-                                    <p className="text-[12px] text-[var(--muted)]">No credentials, keys, or hardcoded tokens leaked.</p>
+                                    <p className="text-[12px] text-zinc-500">No credentials, keys, or hardcoded tokens leaked.</p>
                                   )}
                                 </div>
                               </StaticToolCard>
 
-                              {/* 7. Network Config & HTTP Auditor */}
+                              {/* Card 7: Network Config & HTTP Auditor */}
                               <StaticToolCard
                                 title="Network Config Auditor"
                                 icon="🌐"
@@ -1885,45 +1912,45 @@ export default function Home() {
                                 isExpanded={!!expandedTools['network']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, network: !prev.network }))}
                               >
-                                <div className="space-y-4">
+                                <div className="space-y-4 text-left">
                                   {staticTelemetryData?.networkConfigIssues && staticTelemetryData.networkConfigIssues.length > 0 && (
                                     <div className="space-y-2">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Network Security Config (XML)</p>
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Network Security Config (XML)</p>
                                       {staticTelemetryData.networkConfigIssues.map((c, i) => (
-                                        <div key={i} className="py-2 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)] flex justify-between items-center gap-3">
+                                        <div key={i} className="py-2 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850 flex justify-between items-center gap-3">
                                           <div>
-                                            <p className="text-[13px] font-semibold">{c.type}</p>
-                                            <p className="text-[11px] text-[var(--muted)] mt-0.5">{c.description}</p>
+                                            <p className="text-[13px] font-semibold text-zinc-200">{c.type}</p>
+                                            <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">{c.description}</p>
                                           </div>
-                                          <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{c.risk_score}</span>
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0 border border-[var(--red)]/15">+{c.risk_score}</span>
                                         </div>
                                       ))}
                                     </div>
                                   )}
 
                                   {staticTelemetryData?.networkCodeIssues && staticTelemetryData.networkCodeIssues.length > 0 && (
-                                    <div className="space-y-2 border-t border-[var(--border)]/30 pt-3">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Cleartext Protocols in Code</p>
+                                    <div className="space-y-2 border-t border-zinc-900/60 pt-3">
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Cleartext Protocols in Code</p>
                                       {staticTelemetryData.networkCodeIssues.map((c, i) => (
-                                        <div key={i} className="py-2 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
+                                        <div key={i} className="py-2 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
                                           <div className="flex justify-between items-center gap-3">
-                                            <p className="text-[13px] font-semibold">{c.type}</p>
-                                            <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0">+{c.risk_score}</span>
+                                            <p className="text-[13px] font-semibold text-zinc-200">{c.type}</p>
+                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-[var(--red)]/10 text-[var(--red)] shrink-0 border border-[var(--red)]/15">+{c.risk_score}</span>
                                           </div>
-                                          {c.file && <p className="text-[10px] font-mono text-[var(--muted)] break-all mt-1 bg-[var(--surface)] py-0.5 px-1.5 rounded inline-block">{c.file}</p>}
+                                          {c.file && <p className="text-[10px] font-mono text-zinc-500 break-all mt-1.5 bg-zinc-950 py-0.5 px-2 rounded border border-zinc-900/50 inline-block">{c.file}</p>}
                                         </div>
                                       ))}
                                     </div>
                                   )}
 
                                   {staticTelemetryData?.cleartextUrls && staticTelemetryData.cleartextUrls.length > 0 && (
-                                    <div className="space-y-2 border-t border-[var(--border)]/30 pt-3">
-                                      <p className="text-[12px] uppercase tracking-widest text-[var(--muted)] font-semibold">Suspicious / HTTP Endpoint URLs</p>
+                                    <div className="space-y-2 border-t border-zinc-900/60 pt-3">
+                                      <p className="text-[11px] uppercase tracking-widest text-zinc-400 font-semibold mb-1">Suspicious / HTTP Endpoint URLs</p>
                                       <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
                                         {staticTelemetryData.cleartextUrls.map((url, i) => (
-                                          <div key={i} className="py-2 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)]">
-                                            <p className="text-[12px] font-mono break-all text-[var(--text)] font-semibold">{url.url}</p>
-                                            {url.file && <p className="text-[10px] font-mono text-[var(--muted)] break-all mt-1 bg-[var(--surface)] py-0.5 px-1.5 rounded inline-block">{url.file}</p>}
+                                          <div key={i} className="py-2 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850">
+                                            <p className="text-[12px] font-mono break-all text-zinc-200 font-bold">{url.url}</p>
+                                            {url.file && <p className="text-[10px] font-mono text-zinc-500 break-all mt-1.5 bg-zinc-950 py-0.5 px-2 rounded border border-zinc-900/50 inline-block">{url.file}</p>}
                                           </div>
                                         ))}
                                       </div>
@@ -1931,12 +1958,12 @@ export default function Home() {
                                   )}
 
                                   {(!staticTelemetryData?.cleartextUrls.length && !staticTelemetryData?.networkConfigIssues.length && !staticTelemetryData?.networkCodeIssues.length) && (
-                                    <p className="text-[12px] text-[var(--muted)]">No cleartext HTTP permissions or domain indicators reported.</p>
+                                    <p className="text-[12px] text-zinc-500">No cleartext HTTP permissions or domain indicators reported.</p>
                                   )}
                                 </div>
                               </StaticToolCard>
 
-                              {/* 8. MobSF Scorecard */}
+                              {/* Card 8: MobSF Scorecard */}
                               <StaticToolCard
                                 title="MobSF Scorecard"
                                 icon="📈"
@@ -1950,25 +1977,25 @@ export default function Home() {
                                 isExpanded={!!expandedTools['mobsf']}
                                 onToggle={() => setExpandedTools(prev => ({ ...prev, mobsf: !prev.mobsf }))}
                               >
-                                <div className="space-y-3">
+                                <div className="space-y-3 text-left">
                                   {staticTelemetryData?.mobsfScorecard && staticTelemetryData.mobsfScorecard.length > 0 ? (
                                     staticTelemetryData.mobsfScorecard.map((item, i) => (
-                                      <div key={i} className="py-3 px-4 bg-[var(--surface-2)]/30 rounded-2xl border border-[var(--border)] space-y-1">
+                                      <div key={i} className="py-3 px-4 bg-zinc-900/40 rounded-2xl border border-zinc-850 space-y-1">
                                         <div className="flex justify-between items-start gap-2">
-                                          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-[var(--border)] text-[var(--muted)] font-semibold">{item.severity || 'INFO'}</span>
-                                          <span className="text-[11px] font-semibold text-[var(--muted)]">{item.type || 'MobSF'}</span>
+                                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-950 border border-zinc-850 text-zinc-400 font-bold">{item.severity || 'INFO'}</span>
+                                          <span className="text-[11px] font-semibold text-zinc-500">{item.type || 'MobSF'}</span>
                                         </div>
-                                        <p className="text-[13px] font-semibold leading-relaxed mt-1 text-zinc-100">{item.title}</p>
-                                        {item.description && <p className="text-[12px] text-[var(--muted)] leading-relaxed mt-0.5">{item.description}</p>}
+                                        <p className="text-[13px] font-semibold leading-relaxed mt-1.5 text-zinc-200">{item.title}</p>
+                                        {item.description && <p className="text-[12px] text-zinc-450 leading-relaxed mt-1">{item.description}</p>}
                                       </div>
                                     ))
                                   ) : (
-                                    <p className="text-[12px] text-[var(--muted)]">No MobSF scorecard warnings reported.</p>
+                                    <p className="text-[12px] text-zinc-500">No MobSF scorecard warnings reported.</p>
                                   )}
                                 </div>
                               </StaticToolCard>
 
-                              {/* 9. VirusTotal Threat Intel */}
+                              {/* Card 9: VirusTotal Threat Intel */}
                               <StaticToolCard
                                 title="VirusTotal Threat Intel"
                                 icon="🛡"
@@ -1993,18 +2020,18 @@ export default function Home() {
                                 {(() => {
                                   const vt = staticTelemetryData?.virustotal;
                                   if (!vt || vt.status === 'skipped') {
-                                    return <p className="text-[12px] text-[var(--muted)]">VirusTotal integration requires a <code className="bg-[var(--surface)] px-1 rounded">VIRUSTOTAL_API_KEY</code> env variable. Set it in your backend <code>.env</code> file.</p>;
+                                    return <p className="text-[12px] text-zinc-500 text-left">VirusTotal integration requires a <code className="bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-900">VIRUSTOTAL_API_KEY</code> env variable. Set it in your backend <code>.env</code> file.</p>;
                                   }
                                   if (vt.status === 'not_found') {
                                     return (
-                                      <div className="py-2.5 px-3 bg-[var(--surface-2)]/40 rounded-xl border border-[var(--border)] space-y-1">
-                                        <p className="text-[13px] font-semibold text-[var(--muted)]">File not previously indexed</p>
-                                        <p className="text-[12px] text-[var(--muted)]">This APK has not been scanned by VirusTotal before. It may be a novel or private sample.</p>
+                                      <div className="py-2.5 px-3 bg-zinc-900/40 rounded-xl border border-zinc-850 space-y-1 text-left">
+                                        <p className="text-[13px] font-semibold text-zinc-400">File not previously indexed</p>
+                                        <p className="text-[12.5px] text-zinc-500">This APK has not been scanned by VirusTotal before. It may be a novel or private sample.</p>
                                       </div>
                                     );
                                   }
                                   if (vt.status === 'rate_limited') {
-                                    return <p className="text-[12px] text-[var(--red)]">VirusTotal free tier rate limit hit (4 req/min). Try again shortly.</p>;
+                                    return <p className="text-[12px] text-[var(--red)] text-left">VirusTotal free tier rate limit hit (4 req/min). Try again shortly.</p>;
                                   }
                                   if (vt.status === 'success') {
                                     const malicious = vt.malicious || 0;
@@ -2012,40 +2039,40 @@ export default function Home() {
                                     const total = vt.total || 0;
                                     const permalink = vt.permalink || '#';
                                     return (
-                                      <div className="space-y-4">
+                                      <div className="space-y-4 text-left">
                                         <div className="grid grid-cols-3 gap-3">
-                                          <div className={`py-3 px-2 rounded-xl border text-center space-y-0.5 ${ malicious > 0 ? 'bg-[var(--red)]/10 border-[var(--red)]/30' : 'bg-[var(--green)]/10 border-[var(--green)]/30'}`}>
-                                            <p className={`text-[20px] font-bold tabular-nums ${ malicious > 0 ? 'text-[var(--red)]' : 'text-[var(--green)]'}`}>{malicious}</p>
-                                            <p className="text-[9px] text-[var(--muted)] uppercase tracking-wider font-bold">Malicious</p>
+                                          <div className={`py-3 px-2 rounded-xl border text-center space-y-0.5 ${ malicious > 0 ? 'bg-[var(--red)]/10 border-[var(--red)]/30' : 'bg-emerald-950/20 border-emerald-500/20'}`}>
+                                            <p className={`text-[20px] font-bold tabular-nums ${ malicious > 0 ? 'text-[var(--red)]' : 'text-emerald-400'}`}>{malicious}</p>
+                                            <p className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">Malicious</p>
                                           </div>
-                                          <div className="py-3 px-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 text-center space-y-0.5">
-                                            <p className="text-[20px] font-bold tabular-nums text-[var(--muted)]">{undetected}</p>
-                                            <p className="text-[9px] text-[var(--muted)] uppercase tracking-wider font-bold">Clean</p>
+                                          <div className="py-3 px-2 rounded-xl border border-zinc-850 bg-zinc-900/40 text-center space-y-0.5">
+                                            <p className="text-[20px] font-bold tabular-nums text-zinc-500">{undetected}</p>
+                                            <p className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">Clean</p>
                                           </div>
-                                          <div className="py-3 px-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 text-center space-y-0.5">
+                                          <div className="py-3 px-2 rounded-xl border border-zinc-850 bg-zinc-900/40 text-center space-y-0.5">
                                             <p className="text-[20px] font-bold tabular-nums text-zinc-300">{total}</p>
-                                            <p className="text-[9px] text-[var(--muted)] uppercase tracking-wider font-bold">Total</p>
+                                            <p className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">Total</p>
                                           </div>
                                         </div>
                                         {malicious > 0 && (
                                           <div className="py-2 px-3 rounded-lg bg-[var(--red)]/10 border border-[var(--red)]/20">
-                                            <p className="text-[12px] text-[var(--red)]">⚠ {malicious} of {total} antivirus engines flagged this file as malicious.</p>
+                                            <p className="text-[12.5px] text-[var(--red)]">⚠ {malicious} of {total} antivirus engines flagged this file as malicious.</p>
                                           </div>
                                         )}
                                         {permalink && permalink !== '#' && (
-                                          <a href={permalink} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-[12px] text-[var(--blue)] hover:underline">
+                                          <a href={permalink} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-[12px] text-blue-400 hover:underline">
                                             View full VirusTotal report &rarr;
                                           </a>
                                         )}
                                       </div>
                                     );
                                   }
-                                  return <p className="text-[12px] text-[var(--muted)]">VT scan status: {vt?.status || 'unknown'}. {vt?.reason || ''}</p>;
+                                  return <p className="text-[12px] text-zinc-500 text-left">VT scan status: {vt?.status || 'unknown'}. {vt?.reason || ''}</p>;
                                 })()}
                               </StaticToolCard>
                             </div>
                           </div>
-                        )}
+                        </div>
 
                         <AttackMapping
                           activeAttackTechniques={activeAttackTechniques}
