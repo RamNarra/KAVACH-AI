@@ -383,6 +383,7 @@ def login(req: LoginRequest):
     if not snap.exists:
         raise HTTPException(status_code=401, detail="Invalid email or password")
         
+    user_data = snap.to_dict()
     if not verify_password(password, user_data.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
         
