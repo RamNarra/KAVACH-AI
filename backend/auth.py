@@ -25,14 +25,41 @@ ADMIN_TOKEN_ENV = "KAVACH_ADMIN_TOKEN"
 LEGACY_UID_ENV = "KAVACH_ALLOW_LEGACY_UID"
 _SESSION_RE = re.compile(r"^[A-Za-z0-9_\-]{24,128}$")
 
-# Dynamic generation of transient RSA keypair for local fallback verification:
-_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-_PUBLIC_KEY = _PRIVATE_KEY.public_key()
+# Load JWT keys from env if provided (persistent), otherwise generate transient keypair
+_private_key_env = os.getenv("KAVACH_JWT_PRIVATE_KEY", "").strip()
+_public_key_env = os.getenv("KAVACH_JWT_PUBLIC_KEY", "").strip()
 
-_PUBLIC_PEM = _PUBLIC_KEY.public_bytes(
-    encoding=serialization.Encoding.PEM,
-    format=serialization.PublicFormat.SubjectPublicKeyInfo
-).decode('utf-8')
+_PRIVATE_KEY = None
+_PUBLIC_KEY = None
+_PUBLIC_PEM = ""
+
+if _private_key_env:
+    try:
+        _PRIVATE_KEY = serialization.load_pem_private_key(
+            _private_key_env.encode('utf-8'),
+            password=None
+        )
+        _PUBLIC_KEY = _PRIVATE_KEY.public_key()
+        _PUBLIC_PEM = _PUBLIC_KEY.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode('utf-8')
+    except Exception as e:
+        logger.error(f"Failed to load KAVACH_JWT_PRIVATE_KEY from environment: {e}. Generating transient keypair.")
+
+if not _PRIVATE_KEY:
+    if _public_key_env:
+        _PUBLIC_PEM = _public_key_env
+    else:
+        try:
+            _PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            _PUBLIC_KEY = _PRIVATE_KEY.public_key()
+            _PUBLIC_PEM = _PUBLIC_KEY.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Failed to generate transient RSA keypair: {e}")
 
 
 def get_session_header_name() -> str:
@@ -131,18 +158,22 @@ def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:
         return "admin"
 
     if os.getenv(LEGACY_UID_ENV, "0") in ("1", "true", "True"):
-        # Allow fallback to Session-based logic only if legacy mode is explicitly turned on
-        session_id = (request.headers.get(SESSION_HEADER) or "").strip()
-        if session_id:
-            if not _SESSION_RE.fullmatch(session_id):
-                raise HTTPException(status_code=400, detail="Invalid session header format.")
-            return session_id
+        # Strict control: Disable legacy bypass completely in production environment
+        if os.getenv("KAVACH_ENV", "development").strip().lower() == "production":
+            logger.warning("KAVACH_ALLOW_LEGACY_UID is enabled in environment, but KAVACH_ENV is 'production'. Legacy UID bypass disabled.")
+        else:
+            # Allow fallback to Session-based logic only if legacy mode is explicitly turned on
+            session_id = (request.headers.get(SESSION_HEADER) or "").strip()
+            if session_id:
+                if not _SESSION_RE.fullmatch(session_id):
+                    raise HTTPException(status_code=400, detail="Invalid session header format.")
+                return session_id
 
-        legacy_uid = (claimed_uid or "").strip()
-        if legacy_uid:
-            if not re.match(r"^[A-Za-z0-9_\-]{3,128}$", legacy_uid):
-                raise HTTPException(status_code=400, detail="Invalid legacy uid format.")
-            return legacy_uid
+            legacy_uid = (claimed_uid or "").strip()
+            if legacy_uid:
+                if not re.match(r"^[A-Za-z0-9_\-]{3,128}$", legacy_uid):
+                    raise HTTPException(status_code=400, detail="Invalid legacy uid format.")
+                return legacy_uid
 
     raise HTTPException(
         status_code=401,

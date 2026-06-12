@@ -17,8 +17,19 @@ import hashlib
 from cryptography.fernet import Fernet
 
 def _get_cipher():
-    # Stable encryption key derived from environment or fallback
-    key_source = os.getenv("KAVACH_DB_ENCRYPTION_KEY", "kavach_db_secure_encryption_key_default_321").strip()
+    key_source = os.getenv("KAVACH_DB_ENCRYPTION_KEY", "").strip()
+    if not key_source:
+        logger = logging.getLogger("kavach-api")
+        logger.warning(
+            "CRITICAL SECURITY WARNING: KAVACH_DB_ENCRYPTION_KEY is not defined in the environment. "
+            "Using a transient dynamically-generated session key. Encrypted database records will NOT persist across backend restarts."
+        )
+        # Fall back to SUPABASE_JWT_SECRET if available as a dynamic per-deployment secret
+        key_source = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+        if not key_source:
+            # Fall back to a completely random cryptographically secure dynamic key
+            key_source = os.urandom(32).hex()
+
     key_bytes = hashlib.sha256(key_source.encode('utf-8')).digest()
     fernet_key = base64.urlsafe_b64encode(key_bytes)
     return Fernet(fernet_key)

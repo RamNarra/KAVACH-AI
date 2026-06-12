@@ -36,8 +36,32 @@ if not _supabase_jwt_secret:
 else:
     JWT_SECRET = _supabase_jwt_secret.strip()
 
-def hash_password(password: str, salt: str = "kavach_salt_1337") -> str:
-    return hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
+def hash_password(password: str) -> str:
+    # High-entropy random salt
+    salt = os.urandom(16).hex()
+    iterations = 120000
+    hash_bytes = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), iterations)
+    return f"pbkdf2_sha256${iterations}${salt}${hash_bytes.hex()}"
+
+def verify_password(password: str, hashed: str) -> bool:
+    if not hashed:
+        return False
+    if not hashed.startswith("pbkdf2_sha256$"):
+        # Fallback to legacy SHA256 hash checking
+        legacy_hash = hashlib.sha256((password + "kavach_salt_1337").encode('utf-8')).hexdigest()
+        return legacy_hash == hashed
+        
+    try:
+        parts = hashed.split("$")
+        if len(parts) != 4:
+            return False
+        _, iterations_str, salt, hash_hex = parts
+        iterations = int(iterations_str)
+        hash_bytes = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), iterations)
+        return hash_bytes.hex() == hash_hex
+    except Exception:
+        return False
+
 
 def create_jwt_token(uid: str, username: str) -> str:
     payload = {
@@ -222,25 +246,20 @@ def _request_owner(request: Request, claimed_uid: str | None = None) -> str:
 
 def _get_user_gemini_key(request: Request) -> str | None:
     try:
-        auth_header = (request.headers.get("Authorization") or "").strip()
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            try:
-                decoded = jwt.decode(token, options={"verify_signature": False})
-                email = decoded.get("username")
-                if email:
-                    snap = db.collection("users").document(email).get()
-                    if snap.exists:
-                        return snap.to_dict().get("gemini_api_key")
-                uid = decoded.get("sub") or decoded.get("uid")
-                if uid:
-                    snaps = db.collection("users").where("uid", "==", str(uid)).stream()
-                    if snaps:
-                        return snaps[0].to_dict().get("gemini_api_key")
-            except Exception as e:
-                logger.debug(f"Error decoding token for custom api key lookup: {e}")
+        # Use signature-verified requester owner UID
+        verified_uid = _request_owner(request)
+        if verified_uid:
+            # Look up the user in Firestore using the verified UID
+            users_ref = db.collection("users")
+            snaps = list(users_ref.where("uid", "==", verified_uid).limit(1).stream())
+            if snaps:
+                return snaps[0].to_dict().get("gemini_api_key")
+            # If not found by UID, try username lookup as fallback for legacy users
+            snap = users_ref.document(verified_uid).get()
+            if snap.exists:
+                return snap.to_dict().get("gemini_api_key")
     except Exception as e:
-        logger.error(f"Error in _get_user_gemini_key: {e}")
+        logger.error(f"Error in _get_user_gemini_key secure lookup: {e}")
     return None
 
 
@@ -364,9 +383,7 @@ def login(req: LoginRequest):
     if not snap.exists:
         raise HTTPException(status_code=401, detail="Invalid email or password")
         
-    user_data = snap.to_dict()
-    expected_hash = hash_password(password)
-    if user_data.get("password_hash") != expected_hash:
+    if not verify_password(password, user_data.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Invalid email or password")
         
     uid = user_data.get("uid", f"user_{email}")
