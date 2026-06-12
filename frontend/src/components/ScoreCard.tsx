@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { FraudBadge, ThreatLevel } from '../lib/types';
 
 interface ScoreCardProps {
@@ -33,6 +34,8 @@ export function ScoreCard({
   reset,
   isAnalyzing = false,
 }: ScoreCardProps) {
+  const [rubricTab, setRubricTab] = useState<'confidence' | 'severity'>('confidence');
+
   return (
     <div className={`space-y-6 lg:sticky lg:top-6 transition-all duration-500 ${chatOpen ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
       <div className="security-card p-6 flex flex-col items-center text-center space-y-6 relative overflow-hidden">
@@ -133,22 +136,77 @@ export function ScoreCard({
         )}
       </div>
 
-      {/* Live Telemetry Log stream inside Column 1 */}
-      <div className="security-card p-5 space-y-2.5">
+      {/* Security Classification Glossary & Severity Rubric Guide */}
+      <div className="security-card p-5 space-y-3">
         <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
-          <span className="text-[11px] uppercase tracking-widest text-[var(--muted)] font-semibold">Logs Trace</span>
-          <span className="w-1.5 h-1.5 rounded-full bg-[var(--green)] animate-pulse" />
+          <span className="text-[11px] uppercase tracking-widest text-[var(--muted)] font-bold">Analysis Methodology</span>
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => setRubricTab('confidence')}
+              className={`text-[9px] font-bold px-2 py-0.5 rounded-full transition-all ${
+                rubricTab === 'confidence'
+                  ? 'bg-[var(--blue)]/20 text-[var(--blue)] border border-[var(--blue)]/30'
+                  : 'bg-transparent text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              Confidence
+            </button>
+            <button
+              onClick={() => setRubricTab('severity')}
+              className={`text-[9px] font-bold px-2 py-0.5 rounded-full transition-all ${
+                rubricTab === 'severity'
+                  ? 'bg-[var(--blue)]/20 text-[var(--blue)] border border-[var(--blue)]/30'
+                  : 'bg-transparent text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              Severity
+            </button>
+          </div>
         </div>
-        <div className="h-32 overflow-y-auto font-mono text-[11px] text-[var(--muted)] space-y-1.5 pr-1 select-none scrollbar-thin">
-          {logs && logs.length > 0 ? (
-            logs.slice(-10).map((log, i) => (
-              <p key={i} className="break-all leading-tight opacity-75">
-                <span className="text-[var(--blue)] mr-1">$</span>
-                {log}
-              </p>
-            ))
+
+        <div className="space-y-3 min-h-[140px] text-[12px] leading-relaxed">
+          {rubricTab === 'confidence' ? (
+            <div className="space-y-3.5">
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#10b981]/15 text-[#10b981] border border-[#10b981]/25">
+                    ✓ Evidence-Backed
+                  </span>
+                </div>
+                <p className="text-[11.5px] text-[var(--muted)]">
+                  Verified statically or dynamically using decompilation (APKTool, JADX) and runtime monitors. Refers to tangible artifacts like hardcoded endpoint strings, exposed components, or unencrypted cleartext configs.
+                </p>
+              </div>
+              <div className="space-y-1 pt-1.5 border-t border-[var(--border)]/40">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#eab308]/15 text-[#eab308] border border-[#eab308]/25">
+                    ⚠ AI Inferred
+                  </span>
+                </div>
+                <p className="text-[11.5px] text-[var(--muted)]">
+                  Deduced via Gemini's semantic model analyzing heuristic threat shapes, intent routing context, or matching patterns resembling known banking malware behavior (e.g. potential overlay templates, logic bypass).
+                </p>
+              </div>
+            </div>
           ) : (
-            <p className="opacity-50 italic">Logs trace complete.</p>
+            <div className="space-y-2">
+              <div className="grid grid-cols-[65px_1fr] gap-2 items-start">
+                <span className="text-[9.5px] font-extrabold text-center px-1.5 py-0.5 rounded bg-red-950/40 text-red-400 border border-red-800/40 uppercase">Critical</span>
+                <span className="text-[11.5px] text-[var(--muted)]">Active trojan indicators, SMS interception, or data exfiltration hooks. Imminent risk.</span>
+              </div>
+              <div className="grid grid-cols-[65px_1fr] gap-2 items-start pt-1.5 border-t border-[var(--border)]/30">
+                <span className="text-[9.5px] font-extrabold text-center px-1.5 py-0.5 rounded bg-orange-950/40 text-orange-400 border border-orange-800/40 uppercase">High</span>
+                <span className="text-[11.5px] text-[var(--muted)]">Cleartext transport config, exported activities with zero safety bounds, or critical key leakage.</span>
+              </div>
+              <div className="grid grid-cols-[65px_1fr] gap-2 items-start pt-1.5 border-t border-[var(--border)]/30">
+                <span className="text-[9.5px] font-extrabold text-center px-1.5 py-0.5 rounded bg-yellow-950/40 text-yellow-400 border border-yellow-800/40 uppercase">Medium</span>
+                <span className="text-[11.5px] text-[var(--muted)]">Weak cryptography parameters, insecure storage access paths, or local IP exposure.</span>
+              </div>
+              <div className="grid grid-cols-[65px_1fr] gap-2 items-start pt-1.5 border-t border-[var(--border)]/30">
+                <span className="text-[9.5px] font-extrabold text-center px-1.5 py-0.5 rounded bg-zinc-900/60 text-zinc-400 border border-zinc-800/40 uppercase">Low</span>
+                <span className="text-[11.5px] text-[var(--muted)]">Unused manifest permissions, verbose debugging logs enabled, or minor metadata anomalies.</span>
+              </div>
+            </div>
           )}
         </div>
       </div>

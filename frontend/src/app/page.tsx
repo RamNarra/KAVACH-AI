@@ -2110,31 +2110,129 @@ export default function Home() {
                       <>
                         {/* DYNAMIC EXECUTION STORIES */}
                         {current.progress?.dynamic_sandbox === "RUNNING" ? (
-                          <div className="security-card p-6 border border-[var(--blue)]/30 space-y-4">
-                            <div className="flex items-center justify-between">
-                              <p className="text-[12px] uppercase tracking-widest text-[var(--blue)] font-bold animate-pulse">⚡ Sandbox Running</p>
-                              <span className="text-[11px] font-mono text-[var(--muted)] animate-pulse">Est. remaining: {estSecondsRemaining}s | Elapsed: {elapsedSeconds}s</span>
+                          <div className="security-card p-6 border border-[var(--blue)]/30 space-y-6 relative overflow-hidden bg-zinc-950/60 backdrop-blur-md">
+                            {/* Subtle grid backdrop */}
+                            <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(14,165,233,0.08),rgba(0,0,0,0))] pointer-events-none" />
+                            
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 relative z-10 border-b border-[var(--border)] pb-4">
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="flex h-2.5 w-2.5 relative">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500"></span>
+                                  </span>
+                                  <h3 className="text-[16px] font-bold tracking-tight text-white uppercase">Active Guest Virtualization Sandbox</h3>
+                                </div>
+                                <p className="text-[12px] text-[var(--muted)]">Frida Runtime Instrumentation & Intent Replay Engine</p>
+                              </div>
+                              <div className="flex items-center gap-3 self-start sm:self-center shrink-0">
+                                <span className="text-[11px] font-mono bg-zinc-900 border border-[var(--border)] px-2.5 py-1 rounded-full text-[var(--muted)]">
+                                  Elapsed: <span className="text-white font-semibold">{elapsedSeconds}s</span>
+                                </span>
+                                <span className="text-[11px] font-mono bg-cyan-950/30 border border-cyan-800/30 px-2.5 py-1 rounded-full text-cyan-400 font-semibold animate-pulse">
+                                  Est. Left: {estSecondsRemaining}s
+                                </span>
+                              </div>
                             </div>
-                            <div className="space-y-3">
-                              <p className="text-[15px] font-semibold">Dynamic Instrumentation Tracing</p>
-                              <p className="text-[13px] text-[var(--muted)] leading-relaxed">
-                                Booting Android sandbox, preparing Frida hook packs, and initiating UI triggers. Telemetry signals are recorded in real-time.
-                              </p>
-                              <div className="relative h-2 w-full rounded-full bg-[var(--surface-2)] overflow-hidden border border-[var(--border)]">
-                                <div className="h-full bg-[var(--blue)] animate-pulse rounded-full transition-all duration-1000 ease-linear" style={{ width: `${Math.min(100, Math.max(0, Math.round(((totalSandboxSeconds - estSecondsRemaining) / totalSandboxSeconds) * 100)))}%` }} />
+
+                            {/* Main Grid: Telemetry + Virtual Device Status */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-5 relative z-10">
+                              {/* Left Pane: Hypervisor Info */}
+                              <div className="space-y-3.5 bg-zinc-900/40 p-4 rounded-2xl border border-[var(--border)]/65">
+                                <p className="text-[10px] uppercase tracking-widest text-[var(--muted)] font-bold">Host Telemetry</p>
+                                <div className="space-y-2 text-[12px]">
+                                  <div className="flex justify-between border-b border-[var(--border)]/40 pb-1.5">
+                                    <span className="text-[var(--muted)]">Hypervisor:</span>
+                                    <span className="font-mono text-zinc-300">QEMU Android AVD</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-[var(--border)]/40 pb-1.5">
+                                    <span className="text-[var(--muted)]">Guest Architecture:</span>
+                                    <span className="font-mono text-zinc-300">x86_64 (Intel VT)</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-[var(--border)]/40 pb-1.5">
+                                    <span className="text-[var(--muted)]">Instrumentation:</span>
+                                    <span className="font-mono text-cyan-400 font-medium">Frida DBus-Core</span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-[var(--border)]/40 pb-1.5">
+                                    <span className="text-[var(--muted)]">System State:</span>
+                                    <span className="font-mono text-green-400">Executing Playbook</span>
+                                  </div>
+                                  <div className="flex justify-between">
+                                    <span className="text-[var(--muted)]">Memory Allocation:</span>
+                                    <span className="font-mono text-zinc-300">3072 MB</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Center Pane: Active Verification Phases */}
+                              <div className="space-y-3.5 bg-zinc-900/40 p-4 rounded-2xl border border-[var(--border)]/65 md:col-span-2">
+                                <p className="text-[10px] uppercase tracking-widest text-[var(--muted)] font-bold">Execution Steps</p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[12px]">
+                                  <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-900 border border-[var(--border)]">
+                                    <span className="text-green-400 font-bold">✓</span>
+                                    <span className="text-zinc-300">AVD Virtualization Boot</span>
+                                  </div>
+                                  <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-all duration-300 ${elapsedSeconds > 25 ? 'bg-zinc-900 border-[var(--border)]' : 'bg-cyan-950/20 border-cyan-800/40'}`}>
+                                    <span className={elapsedSeconds > 25 ? 'text-green-400 font-bold' : 'text-cyan-400 animate-spin font-semibold'}>
+                                      {elapsedSeconds > 25 ? '✓' : '⟳'}
+                                    </span>
+                                    <span className={elapsedSeconds > 25 ? 'text-zinc-300' : 'text-cyan-200 font-medium'}>Frida Server Binding</span>
+                                  </div>
+                                  <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-all duration-300 ${elapsedSeconds > 55 ? 'bg-zinc-900 border-[var(--border)]' : elapsedSeconds > 25 ? 'bg-cyan-950/20 border-cyan-800/40' : 'bg-transparent border-[var(--border)] opacity-50'}`}>
+                                    <span className={elapsedSeconds > 55 ? 'text-green-400 font-bold' : elapsedSeconds > 25 ? 'text-cyan-400 animate-spin font-semibold' : 'text-zinc-500'}>
+                                      {elapsedSeconds > 55 ? '✓' : elapsedSeconds > 25 ? '⟳' : '○'}
+                                    </span>
+                                    <span className={elapsedSeconds > 55 ? 'text-zinc-300' : elapsedSeconds > 25 ? 'text-cyan-200 font-medium' : 'text-zinc-500'}>Playbook Activity Trigger</span>
+                                  </div>
+                                  <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-all duration-300 ${elapsedSeconds > 90 ? 'bg-zinc-900 border-[var(--border)]' : elapsedSeconds > 55 ? 'bg-cyan-950/20 border-cyan-800/40' : 'bg-transparent border-[var(--border)] opacity-50'}`}>
+                                    <span className={elapsedSeconds > 90 ? 'text-green-400 font-bold' : elapsedSeconds > 55 ? 'text-cyan-400 animate-spin font-semibold' : 'text-zinc-500'}>
+                                      {elapsedSeconds > 90 ? '✓' : elapsedSeconds > 55 ? '⟳' : '○'}
+                                    </span>
+                                    <span className={elapsedSeconds > 90 ? 'text-zinc-300' : elapsedSeconds > 55 ? 'text-cyan-200 font-medium' : 'text-zinc-500'}>Behavior Heuristics Audit</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Progress bar container */}
+                            <div className="space-y-2 relative z-10">
+                              <div className="flex justify-between text-[11px] text-[var(--muted)] font-mono">
+                                <span>INSTRUMENTING CLASS PATH</span>
+                                <span>{Math.round(((totalSandboxSeconds - estSecondsRemaining) / totalSandboxSeconds) * 100)}% COMPLETE</span>
+                              </div>
+                              <div className="relative h-2.5 w-full rounded-full bg-zinc-950 overflow-hidden border border-zinc-900 shadow-inner">
+                                <div 
+                                  className="h-full bg-gradient-to-r from-cyan-500 to-indigo-500 rounded-full transition-all duration-1000 ease-linear shadow-[0_0_8px_rgba(6,182,212,0.4)]" 
+                                  style={{ width: `${Math.min(100, Math.max(0, Math.round(((totalSandboxSeconds - estSecondsRemaining) / totalSandboxSeconds) * 100)))}%` }} 
+                                />
                               </div>
                             </div>
                             
-                            <div className="space-y-2 border-t border-[var(--border)] pt-4">
-                              <p className="text-[11px] uppercase tracking-widest text-[var(--muted)] font-semibold">Sandbox Execution Logs</p>
-                              <div className="max-h-40 overflow-y-auto font-mono text-[11px] text-[var(--blue)] space-y-1 pr-1 bg-[var(--surface-2)]/50 p-3 rounded-2xl border border-[var(--border)] scrollbar-thin select-none">
+                            {/* Live Sandbox Logs Console */}
+                            <div className="space-y-2.5 border-t border-[var(--border)] pt-5 relative z-10">
+                              <div className="flex items-center justify-between">
+                                <p className="text-[10px] uppercase tracking-widest text-[var(--muted)] font-bold">Interactive Telemetry Pipeline Stream</p>
+                                <span className="flex items-center gap-1.5 text-[10px] font-mono text-cyan-400 font-semibold uppercase bg-cyan-950/20 px-2.5 py-0.5 rounded-full border border-cyan-800/30">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                                  Live Socket Output
+                                </span>
+                              </div>
+                              <div className="h-44 overflow-y-auto font-mono text-[11px] text-cyan-400 space-y-1.5 pr-2 bg-black/90 p-4 rounded-2xl border border-zinc-800 scrollbar-thin select-none scroll-smooth">
                                 {(() => {
                                   const dynLogs = current.logs?.filter(x => x.includes("DYNAMIC") || x.includes("Frida") || x.includes("PLAYBOOK") || x.includes("download") || x.includes("sandbox")) || [];
                                   if (dynLogs.length === 0) {
-                                    return <p className="text-[11px] text-[var(--muted)] animate-pulse">Booting QEMU device image...</p>;
+                                    return (
+                                      <div className="flex flex-col items-center justify-center h-full text-[var(--muted)] space-y-2">
+                                        <span className="animate-spin text-[16px] text-cyan-400">⟳</span>
+                                        <p className="text-[12px] animate-pulse">Initializing QEMU Hypervisor guest interface...</p>
+                                      </div>
+                                    );
                                   }
                                   return dynLogs.map((log, i) => (
-                                    <p key={i} className="break-all">{log}</p>
+                                    <p key={i} className="break-all leading-relaxed opacity-90 border-l-2 border-cyan-600/40 pl-2">
+                                      <span className="text-zinc-600 mr-2">[{new Date().toLocaleTimeString()}]</span>
+                                      {log}
+                                    </p>
                                   ));
                                 })()}
                               </div>

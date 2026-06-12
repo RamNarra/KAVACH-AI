@@ -2290,19 +2290,19 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
 
             if flat_evidence:
                 summary_p += "\n#### Key Static Evidence Confirmed:\n"
-                for ev in flat_evidence[:5]:
+                for ev in flat_evidence:
                     title_val = ev.get("title") or ev.get("name") or ev.get("flag") or "Finding"
                     summary_p += f"- **{title_val}**: {ev.get('description', 'No description available.')} (Severity: *{ev.get('severity', 'UNKNOWN')}*)\n"
             
             if runtime_findings:
                 summary_p += "\n#### Dynamic/Runtime Activity Captured:\n"
-                for rf in runtime_findings[:5]:
+                for rf in runtime_findings:
                     summary_p += f"- **{rf.get('title', 'Runtime Signal')}**: {rf.get('description', 'Observation')} (Severity: *{rf.get('severity', 'UNKNOWN')}*)\n"
             
             summary_p += "\n*Note: This synthesis was generated using Kavach's offline rules engine due to the host AI API limit.*"
             
             susp_acts = []
-            for ev in flat_evidence[:10]:
+            for ev in flat_evidence:
                 title_val = ev.get("title") or ev.get("name") or ev.get("flag") or "Static Finding"
                 susp_acts.append({
                     "title": title_val,
@@ -2397,8 +2397,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                     "runtime_only_findings": [],
                     "analysis_limitations": "None. Offline fallback engaged successfully.",
                     "permissions_analysis": perms_analysis,
-                    "suspicious_activities": susp_acts[:5],
-                    "code_vulnerabilities": code_vulns[:5],
+                    "suspicious_activities": susp_acts,
+                    "code_vulnerabilities": code_vulns,
                     "recommendations": [
                         "Avoid hardcoding sensitive credentials or encryption keys.",
                         "Enforce strict transport layer security (HTTPS) with certificate pinning.",
