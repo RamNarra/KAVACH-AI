@@ -1055,13 +1055,7 @@ def get_history(http_request: Request, uid: str | None = None):
 
 @router.get("/api/analysis/{id}/stream")
 async def stream_analysis(id: str, http_request: Request, token: str | None = None):
-    # Enforce auth
-    # If token is passed in query params, we use it, otherwise we check Authorization header
-    auth_header = http_request.headers.get("Authorization")
-    if not auth_header and token:
-        # Construct header injection safely
-        http_request.headers.__dict__["_list"].append((b"authorization", f"Bearer {token}".encode("utf-8")))
-    
+    # Enforce auth (verify_request_uid will dynamically check the query param 'token' if Authorization is missing)
     verified_uid = _request_owner(http_request)
     doc_ref = db.collection("apkanalysisresults").document(id)
     

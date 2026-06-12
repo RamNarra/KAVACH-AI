@@ -75,11 +75,11 @@ export default function Home() {
 
   useEffect(() => {
     const token = getAuthToken();
-    const username = typeof window !== 'undefined' ? window.localStorage.getItem('KAVACH_USERNAME') : null;
+    const username = typeof window !== 'undefined' ? window.sessionStorage.getItem('KAVACH_USERNAME') : null;
     if (token && isTokenValid(token)) {
       setIsAuthenticated(true);
       setAuthUsername(username);
-      const hasKey = typeof window !== 'undefined' ? window.localStorage.getItem('KAVACH_HAS_CUSTOM_KEY') : null;
+      const hasKey = typeof window !== 'undefined' ? window.sessionStorage.getItem('KAVACH_HAS_CUSTOM_KEY') : null;
       if (hasKey === 'true') {
         setCustomApiKey('••••••••••••••••••••••••••••••••');
       }
@@ -92,8 +92,8 @@ export default function Home() {
   const logout = () => {
     clearAuthToken();
     if (typeof window !== 'undefined') {
-      window.localStorage.removeItem('KAVACH_USERNAME');
-      window.localStorage.removeItem('KAVACH_HAS_CUSTOM_KEY');
+      window.sessionStorage.removeItem('KAVACH_USERNAME');
+      window.sessionStorage.removeItem('KAVACH_HAS_CUSTOM_KEY');
     }
     setIsAuthenticated(false);
     setAuthUsername(null);
@@ -113,13 +113,13 @@ export default function Home() {
       await updateGeminiApiKey(keyVal || null);
       if (keyVal) {
         if (typeof window !== 'undefined') {
-          window.localStorage.setItem('KAVACH_HAS_CUSTOM_KEY', 'true');
+          window.sessionStorage.setItem('KAVACH_HAS_CUSTOM_KEY', 'true');
         }
         setKeyStatus('API Key saved successfully!');
         setCustomApiKey('••••••••••••••••••••••••••••••••');
       } else {
         if (typeof window !== 'undefined') {
-          window.localStorage.removeItem('KAVACH_HAS_CUSTOM_KEY');
+          window.sessionStorage.removeItem('KAVACH_HAS_CUSTOM_KEY');
         }
         setKeyStatus('API Key removed.');
       }
@@ -165,7 +165,7 @@ export default function Home() {
       try {
         const data = await registerUser(authFormEmail, authFormPassword, authFormFirstName, authFormLastName, regGeminiKey);
         if (regGeminiKey && typeof window !== 'undefined') {
-          window.localStorage.setItem('KAVACH_HAS_CUSTOM_KEY', 'true');
+          window.sessionStorage.setItem('KAVACH_HAS_CUSTOM_KEY', 'true');
         }
         setIsAuthenticated(true);
         setAuthUsername(data.username);

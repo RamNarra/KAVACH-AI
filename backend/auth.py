@@ -94,8 +94,13 @@ def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:
     Supports JWT validation via Firebase Admin SDK, Supabase JWT, or local Authorization bearer tokens,
     falling back to X-Kavach-Session headers and legacy query params.
     """
-    # 1. Check dynamic JWT Bearer token in Authorization header
+    # 1. Check dynamic JWT Bearer token in Authorization header or token query parameter
     auth_header = (request.headers.get("Authorization") or "").strip()
+    if not auth_header:
+        query_token = request.query_params.get("token")
+        if query_token:
+            auth_header = f"Bearer {query_token.strip()}"
+            
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
         

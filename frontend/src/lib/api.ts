@@ -158,7 +158,7 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
   }
   // Inject dynamic JWT authorization header if present
   if (typeof window !== 'undefined') {
-    const jwtToken = window.localStorage.getItem('KAVACH_JWT_TOKEN');
+    const jwtToken = window.sessionStorage.getItem('KAVACH_JWT_TOKEN');
     if (jwtToken && !headers.has('Authorization')) {
       headers.set('Authorization', `Bearer ${jwtToken}`);
     }
@@ -280,7 +280,7 @@ export function uploadApkDirect(
     xhr.setRequestHeader(SESSION_HEADER, getClientSessionId());
 
     if (typeof window !== 'undefined') {
-      const jwtToken = window.localStorage.getItem('KAVACH_JWT_TOKEN');
+      const jwtToken = window.sessionStorage.getItem('KAVACH_JWT_TOKEN');
       if (jwtToken) {
         xhr.setRequestHeader('Authorization', `Bearer ${jwtToken}`);
       }
@@ -714,20 +714,20 @@ export function printExecutiveReport(doc: AnalysisDoc) {
 
 export function setAuthToken(token: string) {
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem('KAVACH_JWT_TOKEN', token);
+    window.sessionStorage.setItem('KAVACH_JWT_TOKEN', token);
   }
 }
 
 export function getAuthToken(): string | null {
   if (typeof window !== 'undefined') {
-    return window.localStorage.getItem('KAVACH_JWT_TOKEN');
+    return window.sessionStorage.getItem('KAVACH_JWT_TOKEN');
   }
   return null;
 }
 
 export function clearAuthToken() {
   if (typeof window !== 'undefined') {
-    window.localStorage.removeItem('KAVACH_JWT_TOKEN');
+    window.sessionStorage.removeItem('KAVACH_JWT_TOKEN');
   }
 }
 
@@ -759,8 +759,8 @@ export async function loginUser(email: string, password: string): Promise<{ toke
   }
   const data = await res.json();
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem('KAVACH_JWT_TOKEN', data.token);
-    window.localStorage.setItem('KAVACH_USERNAME', data.username);
+    window.sessionStorage.setItem('KAVACH_JWT_TOKEN', data.token);
+    window.sessionStorage.setItem('KAVACH_USERNAME', data.username);
   }
   return data;
 }
@@ -789,8 +789,8 @@ export async function registerUser(
   }
   const data = await res.json();
   if (typeof window !== 'undefined') {
-    window.localStorage.setItem('KAVACH_JWT_TOKEN', data.token);
-    window.localStorage.setItem('KAVACH_USERNAME', data.username);
+    window.sessionStorage.setItem('KAVACH_JWT_TOKEN', data.token);
+    window.sessionStorage.setItem('KAVACH_USERNAME', data.username);
   }
   return data;
 }
