@@ -54,7 +54,7 @@ When fraud occurs, time-to-response is critical. However, Security Operations Ce
 
 | Vector | Existing Solutions (e.g., MobSF, VirusTotal) | KAVACH AI Advantage |
 | :--- | :--- | :--- |
-| **Analysis Latency** | Sequential analysis blocks, taking 5+ minutes to process. | **Parallel GIL-free static analysis pool** completes scans in under 35 seconds. |
+| **Analysis Latency** | Sequential analysis blocks, taking 5+ minutes to process. | **GIL-free decompiler queue** scales dynamically (runs sequentially on standard laptops to prevent thermal throttling; taking ~2-3 minutes depending on host specifications). |
 | **TLS/HTTPS Intercept** | Standard socket traces capture encrypted binary streams. | **Frida intercepts at application-level** (`okhttp3.RealCall`), capturing decrypted network payloads. |
 | **Sandbox Execution** | Fragile UI scripts fail when encountering system alerts or overlays. | **Playbook UI explorer engine** uses element hierarchies to dismiss warning prompts. |
 | **Explainable Scoring** | Cryptic risk indicators or speculative LLM summaries. | **OWASP Likelihood x Impact matrix** combined with evidence-validated LLM reports. |
@@ -91,7 +91,7 @@ When fraud occurs, time-to-response is critical. However, Security Operations Ce
 ```
 
 KAVACH AI addresses mobile threat analysis through a three-stage automated pipeline:
-1.  **Secure Parallel Static Analysis**: Extracts Android Manifest files, runs Semgrep rule sets, and performs bytecode constant pool scans in under 35 seconds.
+1.  **Secure Static Analysis**: Extracts Android Manifest files, runs Semgrep rule sets, and performs bytecode constant pool scans (processed sequentially on consumer hardware to prevent CPU and memory exhaustion; taking approx. 2–3 minutes for a typical 10MB APK depending on system specifications).
 2.  **Isolated Dynamic Sandbox**: Installs the APK into an Android emulator, runs automated UI playbooks to bypass initial prompts, and uses Frida hooks to capture decrypted HTTP network traffic and file system operations.
 3.  **Explainable Risk Aggregator**: Evaluates all findings using a deterministic OWASP Risk Rating matrix and generates explainable, citizen-facing reports via a resilient Gemini API fallback gateway.
 
