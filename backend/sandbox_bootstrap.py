@@ -259,7 +259,7 @@ def bootstrap_worker():
                 stderr=subprocess.DEVNULL,
             )
 
-        boot_timeout = int(os.environ.get("SANDBOX_BOOT_TIMEOUT_SECS", "120"))
+        boot_timeout = int(os.environ.get("SANDBOX_BOOT_TIMEOUT_SECS", "300"))
         booted = False
         start_time = time.time()
         logger.info(f"[sandbox] waiting for boot completion ({boot_timeout}s timeout)...")

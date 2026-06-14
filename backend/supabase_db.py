@@ -554,6 +554,9 @@ class DocumentReference:
 
 # ─── Query (supports where + orderBy + limit) ─────────────────────────────────
 class Query:
+    DESCENDING = "DESCENDING"
+    ASCENDING = "ASCENDING"
+
     def __init__(self, collection_name: str, docs: Optional[List[Dict]] = None):
         self._col = collection_name
         self._docs = docs
@@ -666,7 +669,7 @@ class CollectionReference:
         return self._make_query().get()
 
 
-# ─── Supabase DB Client ───────────────────────────────────────────────────────
+# ─── Supabase DB Client (mimics firestore.client()) ───────────────────────────
 class SupabaseDB:
     ArrayUnion = ArrayUnion
     Query = Query
