@@ -1,6 +1,6 @@
 /**
  * Pure helpers for dynamic-analysis UI state.
- * Extracted for regression tests against live Firestore document shapes.
+ * Extracted for regression tests against live database document shapes.
  */
 
 export type PartialNoticeKind = 'no_dynamic' | 'unavailable' | 'partial_decompile';

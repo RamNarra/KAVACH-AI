@@ -296,6 +296,33 @@ def _clickable_elements(root: Optional[ET.Element]) -> List[Dict[str, Any]]:
     return elements
 
 
+def parse_uiautomator_xml(xml_path: str) -> List[Dict[str, Any]]:
+    """Parse uiautomator XML dump and return all nodes with bounds and coordinates."""
+    elements = []
+    if not os.path.exists(xml_path):
+        return elements
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        for node in root.iter("node"):
+            bounds = node.get("bounds", "")
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+            if m:
+                x = (int(m.group(1)) + int(m.group(3))) // 2
+                y = (int(m.group(2)) + int(m.group(4))) // 2
+                elements.append({
+                    "x": x, "y": y,
+                    "text": node.get("text", ""),
+                    "class": node.get("class", ""),
+                    "content_desc": node.get("content-desc") or node.get("content_desc") or "",
+                    "clickable": node.get("clickable", ""),
+                    "bounds": bounds,
+                })
+    except Exception as e:
+        logger.warning(f"Error parsing uiautomator XML: {e}")
+    return elements
+
+
 def _is_button(el: Dict[str, Any]) -> bool:
     cls = el.get("class", "")
     txt = el.get("text", "").lower()
@@ -504,12 +531,12 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
         logger.info(msg)
 
     # Dump current window layout hierarchy
-    xml_path = os.path.join(tmp_dir, "window_dump.xml")
-    ok = _dump_ui(adb, xml_path)
-    if not ok:
+    ok_root = _dump_ui(adb, tmp_dir)
+    if ok_root is None:
         transcript.append(_step("login_simulation", "UI layout dump failed", "failed"))
         return
 
+    xml_path = os.path.join(tmp_dir, "ui_dump.xml")
     elements = parse_uiautomator_xml(xml_path)
     fields = [e for e in elements if _is_edittext(e)]
     if not elements or not fields:
@@ -629,7 +656,7 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
             time.sleep(0.3)
 
         # Try to submit: look for a login/submit button
-        all_els = _clickable_elements(root)
+        all_els = _clickable_elements(ok_root)
         submit_btn = next(
             (e for e in all_els
              if re.search(r"(login|sign.?in|submit|continue|next)", e.get("text",""), re.I)),

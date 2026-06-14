@@ -363,6 +363,7 @@ def run_analysis(apk_path: str, output_path: str):
             }
             
             active_methods = []
+            app_pkg = (a.get_package() or "").strip()
             for d in d_list:
                 for cls in d.get_classes():
                     class_name = str(cls.name or "")
@@ -370,10 +371,37 @@ def run_analysis(apk_path: str, output_path: str):
                     is_lib = False
                     for p in _PRUNED_LIBS:
                         if cleaned_cls.startswith(p):
+                            # Never prune if it starts with the application package name
+                            if app_pkg and cleaned_cls.startswith(app_pkg):
+                                is_lib = False
+                                break
                             is_lib = True
                             break
                     if is_lib:
-                        continue
+                        # Fast pre-check: only prune library class if it does not reference any target APIs
+                        has_target_api = False
+                        for m in cls.get_methods():
+                            code = m.get_code()
+                            if not code:
+                                continue
+                            try:
+                                if hasattr(code, "get_bc"):
+                                    insts = code.get_bc().get_instructions()
+                                elif hasattr(code, "get_instructions"):
+                                    insts = code.get_instructions()
+                                else:
+                                    insts = code
+                                for inst in insts:
+                                    output = str(inst.get_output() or "")
+                                    if any(target in output for target in _ALL_TARGET_APIS):
+                                        has_target_api = True
+                                        break
+                            except Exception:
+                                pass
+                            if has_target_api:
+                                break
+                        if not has_target_api:
+                            continue
 
                     c_name_str = class_name.replace("/", ".").strip("L;")
 

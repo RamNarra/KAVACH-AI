@@ -146,7 +146,7 @@ class IndexedDBCache {
 
 export const indexedDbCache = new IndexedDBCache();
 
-// No-auth fetch — Firebase suspended, open access for hackathon demo
+// No-auth fetch — Open access fallback for hackathon demo
 export async function apiFetch(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type') && init.body) {
@@ -256,6 +256,16 @@ export async function triggerDynamicAnalysis(analysisId: string, uid: string): P
   const data = await res.json();
   if (!res.ok) throw new Error(data.detail || 'Dynamic analysis failed to start.');
   return data as DynamicAnalysisResponse;
+}
+
+export async function cancelAnalysis(analysisId: string): Promise<void> {
+  const res = await apiFetch(`/api/analysis/${analysisId}/cancel`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || 'Failed to cancel analysis.');
+  }
 }
 
 export const isLocalAPI = typeof window !== 'undefined' &&

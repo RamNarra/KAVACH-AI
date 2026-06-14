@@ -126,7 +126,7 @@ def cluster_runtime_findings(
 ) -> List[Dict[str, Any]]:
     """
     Cluster normalized events into RuntimeFinding objects.
-    Returns a list of dicts (serialisable for Firestore / JSON).
+    Returns a list of dicts (serializable for Database / JSON).
     """
     findings: List[RuntimeFinding] = []
 

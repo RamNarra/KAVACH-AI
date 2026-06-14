@@ -17,6 +17,8 @@ from typing import List, Optional
 
 logger = logging.getLogger("kavach-api")
 
+is_production = os.getenv("KAVACH_ENV", "development").strip().lower() == "production"
+
 DOCKER_SANDBOX_ENV = os.getenv("KAVACH_DOCKER_SANDBOX")
 if DOCKER_SANDBOX_ENV is None:
     DOCKER_SANDBOX_ENABLED = True
@@ -24,6 +26,10 @@ if DOCKER_SANDBOX_ENV is None:
 else:
     DOCKER_SANDBOX_ENABLED = DOCKER_SANDBOX_ENV in ("1", "true", "True")
     STRICT_SANDBOX = DOCKER_SANDBOX_ENABLED
+
+if is_production:
+    DOCKER_SANDBOX_ENABLED = True
+    STRICT_SANDBOX = True
 
 SANDBOX_IMAGE = os.getenv("KAVACH_SANDBOX_IMAGE", "kavach-sandbox:latest")
 

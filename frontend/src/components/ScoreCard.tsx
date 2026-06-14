@@ -37,7 +37,7 @@ export function ScoreCard({
   const [rubricTab, setRubricTab] = useState<'confidence' | 'severity'>('confidence');
 
   return (
-    <div className={`space-y-6 lg:sticky lg:top-6 transition-all duration-500 ${chatOpen ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
+    <div className={`space-y-6 lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)] lg:overflow-y-auto pr-1.5 scrollbar-thin transition-all duration-500 ${chatOpen ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
       <div className="security-card p-6 flex flex-col items-center text-center space-y-6 relative overflow-hidden">
         {/* SVG Gauge */}
         <div className="relative flex items-center justify-center w-40 h-40 mx-auto">

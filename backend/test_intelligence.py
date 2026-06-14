@@ -5,6 +5,7 @@ from attack_mapping import map_evidence_to_attack
 from risk_engine import build_risk_decomposition, derive_dynamic_score
 import threading
 import uuid
+from supabase_db import ArrayUnion as SupabaseArrayUnion, Query as SupabaseQuery
 
 class MockSnapshot:
     def __init__(self, doc_id, data):
@@ -63,6 +64,8 @@ class MockColRef:
         return MockDocRef(self.name, doc_id, self.storage, self.lock)
 
 class MockDB:
+    ArrayUnion = SupabaseArrayUnion
+    Query = SupabaseQuery
     def __init__(self):
         self.storage = {}
         self.lock = threading.Lock()
@@ -501,43 +504,6 @@ def test_sandbox_runner_path_separation():
         sandbox_runner.DOCKER_SANDBOX_ENABLED = original_enabled
 
 
-def test_auth_verify_request_uid_with_firebase_mock():
-    import os
-    import pytest
-    from fastapi import Request
-    from auth import verify_request_uid
-    from unittest.mock import Mock
-    
-    # Create a mock Request
-    mock_request = Mock(spec=Request)
-    mock_request.headers = {"Authorization": "Bearer fake_firebase_token"}
-    
-    # Mock firebase_admin._apps so that it tries to verify token
-    import firebase_admin
-    original_apps = firebase_admin._apps
-    
-    class FakeApp:
-        pass
-    firebase_admin._apps = [FakeApp()]
-    
-    try:
-        # We also mock firebase_admin.auth.verify_id_token
-        from firebase_admin import auth as firebase_auth
-        # Cache original verification method if present, else default to None
-        original_verify = getattr(firebase_auth, 'verify_id_token', None)
-        
-        firebase_auth.verify_id_token = lambda token: {"uid": "mocked_firebase_uid"}
-        
-        uid = verify_request_uid(mock_request, claimed_uid=None)
-        assert uid == "mocked_firebase_uid"
-    finally:
-        firebase_admin._apps = original_apps
-        if original_verify is not None:
-            firebase_auth.verify_id_token = original_verify
-        else:
-            delattr(firebase_auth, 'verify_id_token')
-
-
 def test_supabase_db_mocked():
     from unittest.mock import patch, Mock
     import os
@@ -575,11 +541,16 @@ def test_supabase_db_mocked():
         mock_response_get_update = Mock()
         mock_response_get_update.status_code = 200
         mock_response_get_update.json.return_value = [{"data": {"logs": ["log1"]}}]
+
+        mock_response_patch = Mock()
+        mock_response_patch.status_code = 200
+        mock_response_patch.text = '[{"key": "scans/test_doc"}]'
+        mock_response_patch.json.return_value = [{"key": "scans/test_doc"}]
         
         with patch("requests.get", return_value=mock_response_get_update), \
-             patch("requests.post", return_value=mock_response_post) as mock_post_update:
+             patch("requests.patch", return_value=mock_response_patch) as mock_patch_update:
             doc_ref.update({"logs": ArrayUnion(["log2"])})
-            mock_post_update.assert_called_once()
+            mock_patch_update.assert_called_once()
             
     finally:
         del os.environ["SUPABASE_URL"]
@@ -710,6 +681,79 @@ def test_emulator_pool_file_locking():
         # Cleanup
         pool.release_device(dev2)
         pool_other.release_device(dev_other_leased)
+
+
+def test_gcs_url_safety_check():
+    import os
+    from main import is_safe_ingest_url
+    
+    # When KAVACH_ALLOWED_GCS_BUCKETS is set
+    os.environ["KAVACH_ALLOWED_GCS_BUCKETS"] = "kavach-scans,kavach-public"
+    try:
+        assert is_safe_ingest_url("gs://kavach-scans/target.apk") is True
+        assert is_safe_ingest_url("gs://kavach-public/target.apk") is True
+        assert is_safe_ingest_url("gs://unsafe-bucket/target.apk") is False
+    finally:
+        del os.environ["KAVACH_ALLOWED_GCS_BUCKETS"]
+
+    # In production without whitelisted env, gs:// should return False
+    os.environ["KAVACH_ENV"] = "production"
+    try:
+        assert is_safe_ingest_url("gs://any-bucket/target.apk") is False
+    finally:
+        del os.environ["KAVACH_ENV"]
+
+
+def test_zipbomb_file_count_and_depth():
+    import os
+    import tempfile
+    import zipfile
+    import pytest
+    from main import _postprocess_downloaded_apk_file
+    
+    # 1. Test too many files
+    fd, temp_zip = tempfile.mkstemp(suffix=".apk")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(temp_zip, 'w') as z:
+            for i in range(10005): # Over limit 10000
+                z.writestr(f"file_{i}.txt", "data")
+        
+        with pytest.raises(Exception, match="contains too many files"):
+            _postprocess_downloaded_apk_file(temp_zip)
+    finally:
+        if os.path.exists(temp_zip):
+            os.remove(temp_zip)
+            
+    # 2. Test too deep directory depth
+    fd, temp_zip = tempfile.mkstemp(suffix=".apk")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(temp_zip, 'w') as z:
+            # Depth of 16 (Limit is 15)
+            nested_path = "/".join([f"dir{i}" for i in range(16)]) + "/file.txt"
+            z.writestr(nested_path, "data")
+        
+        with pytest.raises(Exception, match="directory nesting depth exceeds maximum"):
+            _postprocess_downloaded_apk_file(temp_zip)
+    finally:
+        if os.path.exists(temp_zip):
+            os.remove(temp_zip)
+
+
+def test_redis_mandatory_in_production():
+    import os
+    from routes import HybridRateLimiter
+    
+    os.environ["KAVACH_ENV"] = "production"
+    os.environ["REDIS_URL"] = "redis://invalid-nonexistent-redis-host:6379"
+    try:
+        limiter = HybridRateLimiter("test_prod_limit", 5, 60)
+        # Should fail closed and return False because Redis is unreachable in production
+        assert limiter.check("127.0.0.1") is False
+    finally:
+        del os.environ["KAVACH_ENV"]
+        del os.environ["REDIS_URL"]
 
 
 

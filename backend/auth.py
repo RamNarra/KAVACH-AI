@@ -1,7 +1,7 @@
 """
 Session-scoped request ownership and asymmetric JWT authentication.
 
-Supports JWT verification via Firebase Admin SDK when initialized, falling
+Supports JWT verification via Supabase REST RPC when configured, falling
 back to RS256 with a transient RSA keypair for local demonstration, alongside
 traditional high-entropy session headers.
 """
@@ -25,9 +25,17 @@ ADMIN_TOKEN_ENV = "KAVACH_ADMIN_TOKEN"
 LEGACY_UID_ENV = "KAVACH_ALLOW_LEGACY_UID"
 _SESSION_RE = re.compile(r"^[A-Za-z0-9_\-]{24,128}$")
 
+is_production = os.getenv("KAVACH_ENV", "development").strip().lower() == "production"
+
 # Load JWT keys from env if provided (persistent), otherwise generate transient keypair
 _private_key_env = os.getenv("KAVACH_JWT_PRIVATE_KEY", "").strip()
 _public_key_env = os.getenv("KAVACH_JWT_PUBLIC_KEY", "").strip()
+_supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+
+if is_production and not _private_key_env and not _supabase_jwt_secret:
+    raise RuntimeError(
+        "CRITICAL CONFIGURATION ERROR: Either KAVACH_JWT_PRIVATE_KEY or SUPABASE_JWT_SECRET must be configured in production environment."
+    )
 
 _PRIVATE_KEY = None
 _PUBLIC_KEY = None
@@ -45,21 +53,27 @@ if _private_key_env:
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode('utf-8')
     except Exception as e:
+        if is_production:
+            raise RuntimeError(f"CRITICAL CONFIGURATION ERROR: Failed to load KAVACH_JWT_PRIVATE_KEY in production: {e}")
         logger.error(f"Failed to load KAVACH_JWT_PRIVATE_KEY from environment: {e}. Generating transient keypair.")
 
 if not _PRIVATE_KEY:
     if _public_key_env:
         _PUBLIC_PEM = _public_key_env
     else:
-        try:
-            _PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            _PUBLIC_KEY = _PRIVATE_KEY.public_key()
-            _PUBLIC_PEM = _PUBLIC_KEY.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Failed to generate transient RSA keypair: {e}")
+        if is_production:
+            # Under production, we don't fall back to transient keypair generation!
+            pass
+        else:
+            try:
+                _PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                _PUBLIC_KEY = _PRIVATE_KEY.public_key()
+                _PUBLIC_PEM = _PUBLIC_KEY.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ).decode('utf-8')
+            except Exception as e:
+                logger.error(f"Failed to generate transient RSA keypair: {e}")
 
 
 def get_session_header_name() -> str:
@@ -91,7 +105,7 @@ def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:
     """
     Return the validated session owner id (UID) for this request.
 
-    Supports JWT validation via Firebase Admin SDK, Supabase JWT, or local Authorization bearer tokens,
+    Supports JWT validation via Supabase JWT or local Authorization bearer tokens,
     falling back to X-Kavach-Session headers and legacy query params.
     """
     # 1. Check dynamic JWT Bearer token in Authorization header or token query parameter
@@ -120,21 +134,9 @@ def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:
             except jwt.ExpiredSignatureError:
                 raise HTTPException(status_code=401, detail="Supabase JWT signature has expired.")
             except jwt.InvalidTokenError as e:
-                logger.debug(f"Supabase JWT decode failed: {e}. Trying other decoders.")
+                logger.debug(f"Supabase JWT decode failed: {e}. Trying local JWT fallback.")
         
-        # B. Try Firebase Admin SDK verification if Firebase is initialized
-        try:
-            import firebase_admin
-            from firebase_admin import auth as firebase_auth
-            if firebase_admin._apps:
-                decoded = firebase_auth.verify_id_token(token)
-                uid = decoded.get("uid") or decoded.get("sub")
-                if uid:
-                    return str(uid)
-        except Exception as fb_err:
-            logger.debug(f"Firebase token verification bypassed/failed: {fb_err}. Trying local JWT fallback.")
-
-        # C. Fallback to local JWT verification
+        # B. Fallback to local JWT verification
         try:
             try:
                 header = jwt.get_unverified_header(token)

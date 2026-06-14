@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect, fetchHistory, printExecutiveReport, getClientSessionId, getAnalysisStreamUrl, indexedDbCache, isTokenValid, loginUser, registerUser, clearAuthToken, getAuthToken, updateGeminiApiKey } from '../lib/api';
+import { apiFetch, fetchSandboxHealth, downloadReport, sendChat, triggerDynamicAnalysis, uploadApkDirect, fetchHistory, printExecutiveReport, getClientSessionId, getAnalysisStreamUrl, indexedDbCache, isTokenValid, loginUser, registerUser, clearAuthToken, getAuthToken, updateGeminiApiKey, cancelAnalysis } from '../lib/api';
 import { DEMO_ANALYSIS } from '../lib/demo';
 import type { AnalysisDoc, ThreatLevel, VirusTotalSummary } from '../lib/types';
 import { livelyScanHeadline, runningStepKeys } from '../lib/scan-messages';
@@ -215,6 +215,7 @@ export default function Home() {
   };
   const [active, setActive] = useState<AnalysisDoc | null>(null);
   const [isDemo, setIsDemo] = useState(false);
+  const current = isDemo ? active : activeId ? active : null;
   const [file, setFile] = useState<File | null>(null);
   const [uploadPct, setUploadPct] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -240,6 +241,24 @@ export default function Home() {
   const [estSecondsRemaining, setEstSecondsRemaining] = useState(30);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [activeReportDialog, setActiveReportDialog] = useState<null | 'reverse_engineering' | 'static_analysis' | 'dynamic_analysis'>(null);
+
+  const dynamicLogsRef = useRef<HTMLDivElement>(null);
+
+  const dynLogsForScroll = useMemo(() => {
+    return current?.logs?.filter(x => x.includes("DYNAMIC") || x.includes("Frida") || x.includes("PLAYBOOK") || x.includes("download") || x.includes("sandbox")) || [];
+  }, [current?.logs]);
+
+  useEffect(() => {
+    if (dynamicLogsRef.current) {
+      const el = dynamicLogsRef.current;
+      const scroll = () => {
+        el.scrollTop = el.scrollHeight;
+      };
+      scroll();
+      const timer = setTimeout(scroll, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [dynLogsForScroll]);
 
 
   const loadHistory = useCallback(async () => {
@@ -325,6 +344,7 @@ export default function Home() {
       const data = await uploadApkDirect(file, null, getClientSessionId(), setUploadPct);
       setUploading(false);
       setActiveId(data.id);
+      setActive(data as any);
       setFile(null);
       loadHistory();
     } catch (e) {
@@ -375,6 +395,9 @@ export default function Home() {
   }, []);
 
   const reset = () => {
+    if (activeId && !isDemo) {
+      cancelAnalysis(activeId).catch((err) => console.warn("Failed to cancel active scan:", err));
+    }
     setActiveId(null);
     setActive(null);
     setIsDemo(false);
@@ -387,7 +410,6 @@ export default function Home() {
     loadHistory();
   };
 
-  const current = isDemo ? active : activeId ? active : null;
   const displayHistory = history;
 
   const reverseEngSummary = useMemo(() => {
@@ -406,16 +428,18 @@ export default function Home() {
   }, [current]);
 
   const view = useMemo(() => {
-    if (current?.status === 'PROCESSING') {
-      if (current?.progress?.dynamic_sandbox === 'RUNNING') {
+    if (activeId) {
+      if (active?.status === 'COMPLETED' || active?.status === 'FAILED') {
+        return 'result';
+      }
+      if (active?.progress?.dynamic_sandbox === 'RUNNING') {
         return 'result';
       }
       return 'scan';
     }
     if (busy || uploading) return 'scan';
-    if (current?.status === 'COMPLETED' || current?.status === 'FAILED') return 'result';
     return 'home';
-  }, [current, busy, uploading]);
+  }, [activeId, active, busy, uploading]);
 
   const scanHeadline = livelyScanHeadline(current?.progress, current?.logs, scanTick);
   const parallelSteps = runningStepKeys(current?.progress);
@@ -1021,7 +1045,7 @@ export default function Home() {
                 suppressHydrationWarning={true}
                 className="w-full h-11 rounded-xl border border-zinc-850 bg-zinc-900/40 text-zinc-350 text-[12px] font-bold uppercase tracking-wider cursor-pointer hover:bg-zinc-800/45 transition-colors flex items-center justify-center gap-1.5 relative z-10 hover:text-zinc-100"
               >
-                ⚡ Explore Demo Report
+                ⚡ enter demo account for testing
               </button>
             </motion.div>
           ) : (
@@ -1114,7 +1138,7 @@ export default function Home() {
                 <ul className="space-y-1 pt-2">
                   {displayHistory.slice(0, 5).map((item) => (
                     <li key={item.id}>
-                      <button type="button" onClick={() => { setIsDemo(false); setActiveId(item.id); }} className="w-full flex justify-between py-3 px-2 rounded-xl hover:bg-[var(--surface)] border-0 cursor-pointer text-left bg-transparent">
+                      <button type="button" onClick={() => { setIsDemo(false); setActiveId(item.id); setActive(item); }} className="w-full flex justify-between py-3 px-2 rounded-xl hover:bg-[var(--surface)] border-0 cursor-pointer text-left bg-transparent">
                         <span className="text-[15px] truncate">{item.filename || 'Unknown'}</span>
                         <span className="text-[13px] text-[var(--muted)] tabular-nums">{item.risk_score ?? '—'}</span>
                       </button>
@@ -1128,8 +1152,11 @@ export default function Home() {
                 <div className="flex items-center gap-2.5">
                   <span className="text-[18px]">🔑</span>
                   <div>
-                    <h3 className="text-[14px] font-bold text-zinc-200">Custom Gemini API Key</h3>
-                    <p className="text-[11px] text-zinc-400">Use your own Gemini API key and quota for analysis. Leave blank to reset to the default system quota.</p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-[14px] font-bold text-zinc-200">Custom Gemini API Key</h3>
+                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-400 uppercase font-bold tracking-wider">Optional</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-1">Use your own Gemini API key and quota for analysis. Leave blank to reset to the default system quota.</p>
                   </div>
                 </div>
                 
@@ -1220,14 +1247,24 @@ export default function Home() {
               {/* Live Progress Terminal Logs stream during decompilation analysis */}
               <TerminalLogs logs={current?.logs || []} />
 
-              <div className="flex justify-center gap-1.5 pt-2">
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="w-1.5 h-1.5 rounded-full bg-[var(--blue)] animate-pulse"
-                    style={{ animationDelay: `${i * 180}ms` }}
-                  />
-                ))}
+              <div className="flex flex-col items-center gap-4 pt-2">
+                <button
+                  type="button"
+                  onClick={reset}
+                  className="px-6 py-2 rounded-full border border-red-500/30 hover:border-red-500/50 bg-red-950/20 hover:bg-red-950/40 text-red-400 text-[12px] font-bold uppercase tracking-wider cursor-pointer transition-colors shadow-[0_0_15px_rgba(239,68,68,0.1)] hover:shadow-[0_0_20px_rgba(239,68,68,0.2)]"
+                >
+                  Cancel Analysis
+                </button>
+                
+                <div className="flex justify-center gap-1.5">
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="w-1.5 h-1.5 rounded-full bg-[var(--blue)] animate-pulse"
+                      style={{ animationDelay: `${i * 180}ms` }}
+                    />
+                  ))}
+                </div>
               </div>
             </motion.div>
           )}
@@ -2132,6 +2169,13 @@ export default function Home() {
                                 <span className="text-[11px] font-mono bg-cyan-950/30 border border-cyan-800/30 px-2.5 py-1 rounded-full text-cyan-400 font-semibold animate-pulse">
                                   Est. Left: {estSecondsRemaining}s
                                 </span>
+                                <button
+                                  type="button"
+                                  onClick={reset}
+                                  className="text-[11px] font-bold uppercase tracking-wider bg-red-950/20 hover:bg-red-950/40 border border-red-500/30 hover:border-red-500/50 text-red-400 px-3 py-1.5 rounded-full cursor-pointer transition-colors"
+                                >
+                                  Cancel Analysis
+                                </button>
                               </div>
                             </div>
 
@@ -2217,7 +2261,7 @@ export default function Home() {
                                   Live Socket Output
                                 </span>
                               </div>
-                              <div className="h-44 overflow-y-auto font-mono text-[11px] text-cyan-400 space-y-1.5 pr-2 bg-black/90 p-4 rounded-2xl border border-zinc-800 scrollbar-thin select-none scroll-smooth">
+                              <div ref={dynamicLogsRef} className="h-44 overflow-y-auto font-mono text-[11px] text-cyan-400 space-y-1.5 pr-2 bg-black/90 p-4 rounded-2xl border border-zinc-800 scrollbar-thin select-none scroll-smooth">
                                 {(() => {
                                   const dynLogs = current.logs?.filter(x => x.includes("DYNAMIC") || x.includes("Frida") || x.includes("PLAYBOOK") || x.includes("download") || x.includes("sandbox")) || [];
                                   if (dynLogs.length === 0) {
