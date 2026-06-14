@@ -750,7 +750,7 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
             files = {"file": (os.path.basename(apk_path), open(apk_path, "rb"), "application/octet-stream")}
             upload_url = f"{api_url.rstrip('/')}/api/v1/upload"
             
-            with httpx.Client(timeout=25.0) as client:
+            with httpx.Client(timeout=600.0) as client:
                 logger.info("Uploading APK to MobSF for a fresh scan...")
                 up_resp = client.post(upload_url, files=files, headers=headers)
                 if up_resp.status_code == 200:
