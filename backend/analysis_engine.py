@@ -847,7 +847,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     output_path=output_dir,
                     capture_output=True,
                     text=True,
-                    timeout=60.0
+                    timeout=300.0
                 )
                 stdout_data = proc.stdout
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -855,7 +855,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                 config_arg = config_path if os.path.isdir(config_path) else "p/android"
                 cmd = [semgrep_bin, "--config", config_arg, "--json", target_scan_dir]
                 logger.info(f"Running Semgrep subprocess: {' '.join(cmd)}")
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300.0)
                 stdout_data = res.stdout if res.returncode == 0 else ""
                 
             if stdout_data:
@@ -1018,7 +1018,7 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     output_path=output_dir,
                     capture_output=True,
                     text=True,
-                    timeout=60.0
+                    timeout=300.0
                 )
                 stdout_data = proc.stdout
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1026,7 +1026,7 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             elif trufflehog_bin:
                 cmd = [trufflehog_bin, "filesystem", target_scan_dir, "--json"]
                 logger.info(f"Running TruffleHog subprocess: {' '.join(cmd)}")
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30.0)
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300.0)
                 stdout_data = res.stdout
                 findings["trufflehog_scan"] = True
             else:
