@@ -557,6 +557,53 @@ def test_supabase_db_mocked():
         del os.environ["SUPABASE_KEY"]
 
 
+def test_supabase_db_caching():
+    from unittest.mock import patch, Mock
+    import os
+    from supabase_db import SupabaseDB, ArrayUnion
+    
+    os.environ["SUPABASE_URL"] = "https://mock.supabase.co"
+    os.environ["SUPABASE_KEY"] = "mock_key"
+    
+    try:
+        db = SupabaseDB()
+        doc_ref = db.collection("scans").document("cache_test")
+        
+        # 1. Mock first set() which populates the cache
+        mock_response_post = Mock()
+        mock_response_post.status_code = 201
+        
+        with patch("requests.post", return_value=mock_response_post) as mock_post:
+            doc_ref.set({"status": "INIT", "progress": 0})
+            mock_post.assert_called_once()
+            
+        # Verify cache is populated
+        assert doc_ref._cached_data == {"status": "INIT", "progress": 0}
+        assert doc_ref._cached_encrypted_data is not None
+        
+        # 2. Update without GET request because cache is active
+        mock_response_patch = Mock()
+        mock_response_patch.status_code = 200
+        mock_response_patch.text = '[{"key": "scans/cache_test"}]'
+        mock_response_patch.json.return_value = [{"key": "scans/cache_test"}]
+        
+        # We patch requests.get to raise AssertionError if called (to verify it is NOT called)
+        def get_should_not_be_called(*args, **kwargs):
+            raise AssertionError("requests.get was called but cache should have bypassed it!")
+            
+        with patch("requests.get", side_effect=get_should_not_be_called), \
+             patch("requests.patch", return_value=mock_response_patch) as mock_patch:
+            doc_ref.update({"progress": 50})
+            mock_patch.assert_called_once()
+            
+        # Verify cache updated with merged dict
+        assert doc_ref._cached_data == {"status": "INIT", "progress": 50}
+        
+    finally:
+        del os.environ["SUPABASE_URL"]
+        del os.environ["SUPABASE_KEY"]
+
+
 def test_supabase_jwt_verification():
     import os
     import jwt
