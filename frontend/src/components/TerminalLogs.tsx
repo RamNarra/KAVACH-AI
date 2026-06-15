@@ -16,7 +16,7 @@ export default function TerminalLogs({ logs }: TerminalLogsProps) {
     const hostname = window.location.hostname;
     let apiEndpoint = savedApi || '';
     if (!apiEndpoint && (hostname === 'localhost' || hostname === '127.0.0.1')) {
-      apiEndpoint = 'http://localhost:8080';
+      apiEndpoint = 'http://127.0.0.1:8080';
     }
     if (apiEndpoint) {
       try {

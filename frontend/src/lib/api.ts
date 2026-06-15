@@ -8,7 +8,7 @@ const getApiUrl = (): string => {
 
   // 1. Check localStorage first for manual user override
   const savedApi = window.localStorage.getItem('KAVACH_API_URL');
-  if (savedApi !== null) return savedApi;
+  if (savedApi !== null && savedApi !== '') return savedApi;
 
   // 2. Check query parameters for manual override or toggle
   const params = new URLSearchParams(window.location.search);
@@ -18,8 +18,8 @@ const getApiUrl = (): string => {
     return paramApi;
   }
   if (params.get('local') === 'true') {
-    window.localStorage.setItem('KAVACH_API_URL', 'http://localhost:8080');
-    return 'http://localhost:8080';
+    window.localStorage.setItem('KAVACH_API_URL', 'http://127.0.0.1:8080');
+    return 'http://127.0.0.1:8080';
   }
   if (params.get('local') === 'false') {
     window.localStorage.setItem('KAVACH_API_URL', '');
@@ -37,7 +37,7 @@ const getApiUrl = (): string => {
   // 4. Default for local hostname development
   const hostname = window.location.hostname;
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    return 'http://localhost:8080';
+    return 'http://127.0.0.1:8080';
   }
 
   // Non-local host: use same-origin (frontend and backend served from same domain/reverse proxy)
