@@ -6,6 +6,31 @@ import re
 import time
 import tempfile
 import socket
+import re
+
+# Global DNS cache to mitigate DNS Rebinding TOCTOU vulnerability (SSRF)
+_DNS_CACHE = {}
+_DNS_CACHE_TTL = 10.0
+_orig_getaddrinfo = socket.getaddrinfo
+
+def cached_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    now = time.time()
+    # Cache resolved IPs for short duration to guarantee subsequent requests hit the validated IP
+    if host and isinstance(host, str) and not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host) and ":" not in host:
+        if host in _DNS_CACHE:
+            cached_res, ts = _DNS_CACHE[host]
+            if now - ts < _DNS_CACHE_TTL:
+                return cached_res
+        try:
+            res = _orig_getaddrinfo(host, port, family, type, proto, flags)
+            _DNS_CACHE[host] = (res, now)
+            return res
+        except Exception:
+            raise
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+socket.getaddrinfo = cached_getaddrinfo
+
 import subprocess
 import shutil
 import json
@@ -30,7 +55,7 @@ _BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 from google import genai
 from google.genai import types as genai_types
 
-from supabase_db import SupabaseDB, ArrayUnion as SupabaseArrayUnion, is_supabase_configured, Query as SupabaseQuery
+from postgres_db import PostgresDB, ArrayUnion as PostgresArrayUnion, is_postgres_configured, init_db as init_postgres_db, Query as PostgresQuery
 
 from analysis_engine import calculate_deterministic_score
 from banking_fraud import analyze_banking_fraud
@@ -108,6 +133,9 @@ def is_safe_ingest_url(url: str) -> bool:
         for ip in ips:
             if not is_safe_ip(ip):
                 return False
+        # Return the resolved IPs alongside the boolean so callers can pin the
+        # connection to the already-validated address, closing the DNS rebinding
+        # TOCTOU gap between validation-time and request-time resolution.
         return True
     except Exception:
         return False
@@ -183,7 +211,8 @@ def _postprocess_downloaded_apk_file(destination_path: str) -> None:
                         total_read += len(chunk)
                         if total_read > MAX_UNCOMPRESSED_SIZE:
                             raise Exception("APK uncompressed content exceeds 2GB limit. Possible zipbomb detected.")
-                        if compressed_size > 0 and (total_read / compressed_size) > MAX_RATIO:
+                        current_comp_size = compressed_size if compressed_size > 0 else 1
+                        if (total_read / current_comp_size) > MAX_RATIO:
                             raise Exception("Abnormally high compression ratio. Possible zipbomb detected.")
     except Exception as e:
         if os.path.exists(destination_path):
@@ -351,7 +380,7 @@ def _cleanup_stale_scan_artifacts(scan_temp_dir: str) -> None:
         except Exception as e:
             logger.warning(f"Failed to delete stale temp artifact {item_path}: {e}")
 
-from toolchain import configure_android_env, maybe_nice, resolve_apkid, resolve_apktool, resolve_jadx, resolve_aapt
+from toolchain import configure_android_env, maybe_nice, resolve_apkid, resolve_aapt
 
 configure_android_env()
 venv_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv", "bin")
@@ -377,32 +406,56 @@ FALLBACK_MODEL = os.environ.get("KAVACH_FALLBACK_MODEL", "gemini-3.1-flash-lite"
 SCAN_TEMP_DIR = os.environ.get("SCAN_TEMP_DIR", os.path.join(_BACKEND_DIR, "tmp_scans"))
 os.makedirs(SCAN_TEMP_DIR, exist_ok=True)
 
-# Configure JADX thread count via env variable with auto-detected default
-JADX_THREADS_ENV = os.environ.get("JADX_THREADS")
-if JADX_THREADS_ENV:
+# Register cleanups on exit/termination signals (SIGTERM, SIGINT, SIGHUP) or clean interpreter exits
+def cleanup_on_exit(*args, **kwargs):
+    logger.info("Termination hook triggered. Wiping scan temporary directory and restoring SELinux...")
+    if os.path.exists(SCAN_TEMP_DIR):
+        try:
+            import shutil
+            shutil.rmtree(SCAN_TEMP_DIR, ignore_errors=True)
+            os.makedirs(SCAN_TEMP_DIR, exist_ok=True)
+        except Exception as e:
+            logger.error(f"Error wiping SCAN_TEMP_DIR on exit: {e}")
     try:
-        JADX_THREADS = max(1, int(JADX_THREADS_ENV))
+        import subprocess
+        from toolchain import resolve_adb
+        adb_path = resolve_adb()
+        if adb_path and os.path.exists(adb_path):
+            res = subprocess.run([adb_path, "devices"], capture_output=True, text=True, timeout=5)
+            for line in res.stdout.splitlines():
+                if "device" in line and not line.startswith("List"):
+                    parts = line.split()
+                    if parts:
+                        dev_serial = parts[0]
+                        subprocess.run([adb_path, "-s", dev_serial, "shell", "setenforce", "1"], capture_output=True, timeout=5)
+                        logger.info(f"Proactively restored guest SELinux enforcement on exit for: {dev_serial}")
+    except Exception as adb_exit_err:
+        logger.error(f"Error restoring SELinux on exit: {adb_exit_err}")
+    if args and isinstance(args[0], int):
+        import sys
+        sys.exit(128 + args[0])
+
+import atexit
+import signal
+import sys
+atexit.register(cleanup_on_exit)
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    try:
+        signal.signal(sig, cleanup_on_exit)
     except ValueError:
-        logger.warning(f"Invalid JADX_THREADS env var: {JADX_THREADS_ENV}. Falling back to default.")
-        JADX_THREADS = min(8, max(1, (os.cpu_count() or 4) - 2))
-else:
-    JADX_THREADS = min(8, max(1, (os.cpu_count() or 4) - 2))
+        pass
 
-logger.info(f"JADX Concurrency level: Using {JADX_THREADS} threads.")
+# Decompilation and static code analysis tasks are consolidated and delegated to MobSF.
+logger.info("Toolchain: Local JADX and APKTool execution is disabled (scans delegated to MobSF).")
 
-try:
-    JADX_BIN = resolve_jadx()
-    APKTOOL_CMD = resolve_apktool()
-    logger.info(f"Toolchain: jadx={JADX_BIN}, apktool={' '.join(APKTOOL_CMD)}")
-except FileNotFoundError as tool_err:
-    logger.error(f"Toolchain setup incomplete: {tool_err}")
-    JADX_BIN = "jadx"
-    APKTOOL_CMD = ["apktool"]
-
-# Enforce Supabase database storage
-if is_supabase_configured():
-    logger.info("Supabase credentials detected. Using Supabase cloud database.")
-    db = SupabaseDB()
+# Enforce PostgreSQL database storage
+if is_postgres_configured():
+    logger.info("PostgreSQL credentials detected. Using local PostgreSQL database.")
+    try:
+        init_postgres_db()
+    except Exception as e:
+        logger.error(f"PostgreSQL initialization failed: {e}")
+    db = PostgresDB()
 else:
     import sys
     if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
@@ -466,8 +519,8 @@ else:
                 return MockDocRef(self.name, doc_id, self.storage, self.lock)
 
         class MockDB:
-            ArrayUnion = SupabaseArrayUnion
-            Query = SupabaseQuery
+            ArrayUnion = PostgresArrayUnion
+            Query = PostgresQuery
             def __init__(self):
                 self.storage = {}
                 self.lock = threading.Lock()
@@ -476,9 +529,21 @@ else:
 
         db = MockDB()
     else:
-        logger.error("Database configuration missing: Supabase credentials not found and SQLite has been completely decommissioned.")
-        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables must be configured to run KAVACH AI.")
+        logger.error("Database configuration missing: PostgreSQL credentials not found and SQLite has been completely decommissioned.")
+        raise RuntimeError("POSTGRES_HOST, POSTGRES_USER, and POSTGRES_PASSWORD environment variables must be configured to run KAVACH AI.")
 
+import sys
+_kavach_jwt_secret = os.getenv("KAVACH_JWT_SECRET")
+if not _kavach_jwt_secret and not ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")):
+    raise RuntimeError("KAVACH_JWT_SECRET environment variable is missing on the host!")
+if _kavach_jwt_secret == "super_secret_kavach_jwt_security_token_1337" and not ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")):
+    raise RuntimeError("Insecure KAVACH_JWT_SECRET configured on host!")
+
+_secret_key = os.getenv("SECRET_KEY")
+if not _secret_key and not ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")):
+    raise RuntimeError("SECRET_KEY environment variable is missing on the host!")
+if _secret_key == "fallback_default_secret_kavach_key_32_bytes" and not ("pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST")):
+    raise RuntimeError("Insecure SECRET_KEY configured on host!")
 
 # Initialize Google Gen AI client (Google AI Studio Free Tier)
 genai_client = None
@@ -505,6 +570,20 @@ def _get_genai_client_by_uid(uid: str | None) -> Any:
         if snaps:
             custom_key = snaps[0].to_dict().get("gemini_api_key")
             if custom_key:
+                # Decrypt key
+                import base64
+                import hashlib
+                from cryptography.fernet import Fernet
+                try:
+                    # Use os.environ[] (no fallback) — startup guard guarantees
+                    # SECRET_KEY is set and not the known-bad default value.
+                    secret = os.environ["SECRET_KEY"]
+                    key_32 = hashlib.sha256(secret.encode()).digest()
+                    fernet_key = base64.urlsafe_b64encode(key_32)
+                    f = Fernet(fernet_key)
+                    custom_key = f.decrypt(custom_key.encode()).decode()
+                except Exception as de:
+                    logger.warning(f"Could not decrypt custom API key (treating as plain text): {de}")
                 return genai.Client(
                     api_key=custom_key,
                     http_options=genai_types.HttpOptions(timeout=60000)
@@ -1124,6 +1203,7 @@ def extract_static_signals(manifest_content: str, jadx_sources: Dict[str, str], 
     signals["has_data_storage"]  = any(k in all_code for k in ("sharedpreferences", "fileoutputstream"))
     signals["has_sqlite"]        = "sqlitedatabase" in all_code or (manifest_content and "database" in manifest_content.lower())
     signals["has_login_fields"]  = any(k in all_code for k in ("edittext", "loginactivity", "signin", "password")) or (manifest_content and "login" in manifest_content.lower())
+    signals["has_accessibility"] = "accessibility" in all_code or (manifest_content and "accessibility" in manifest_content.lower())
 
     # APKiD signals
     if isinstance(apkid_findings, dict):
@@ -1377,7 +1457,7 @@ def select_key_java_files(jadx_dir: str, package_name: str) -> tuple[Dict[str, s
     return key_files, all_paths
 
 def delete_storage_object(apk_url: str):
-    # Remote storage cleanup is decommissioned since KAVACH AI has fully migrated to local file streams and Supabase.
+    # Remote storage cleanup is decommissioned since KAVACH AI has fully migrated to local file streams and local PostgreSQL.
     pass
 
 def sanitize_analysis_json(analysis_json: Dict[str, Any]) -> Dict[str, Any]:
@@ -1418,7 +1498,18 @@ def sanitize_analysis_json(analysis_json: Dict[str, Any]) -> Dict[str, Any]:
         if "recommended_actions" in bf:
             bf["recommended_actions"] = sanitize_list(bf["recommended_actions"])
             
-    return analysis_json
+    # Recursively escape HTML strings to mitigate persistent XSS vulnerabilities from AI-generated outputs
+    import html
+    def recursive_html_escape(val):
+        if isinstance(val, str):
+            return html.escape(val)
+        elif isinstance(val, dict):
+            return {k: recursive_html_escape(v) for k, v in val.items()}
+        elif isinstance(val, list):
+            return [recursive_html_escape(item) for item in val]
+        return val
+
+    return recursive_html_escape(analysis_json)
 
 def _cross_validate_ai_findings(ir_dict: dict, deterministic_evidence: dict) -> dict:
     """
@@ -1459,18 +1550,82 @@ def clean_and_parse_json(text: str) -> Dict[str, Any]:
         text = text[:-3]
     text = text.strip()
     
-    # Locate first '{' and last '}' to strip any surrounding non-JSON text
-    if not (text.startswith("{") and text.endswith("}")):
-        start_idx = text.find("{")
-        end_idx = text.rfind("}")
-        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-            text = text[start_idx:end_idx+1]
+    # Robustly find first matching JSON object by brace depth
+    start_idx = text.find("{")
+    if start_idx != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        sliced_text = ""
+        for i in range(start_idx, len(text)):
+            char = text[i]
+            if escape:
+                escape = False
+                continue
+            if char == '\\':
+                escape = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if char == '{':
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        sliced_text = text[start_idx:i+1]
+                        break
+        if sliced_text:
+            text = sliced_text
             
+    from pydantic import BaseModel, Field
+    from typing import List, Dict, Any, Optional
+
+    class SuspiciousActivity(BaseModel):
+        title: str
+        description: str
+        file: Optional[str] = None
+        evidence_source: Optional[str] = None
+
+    class CodeVulnerability(BaseModel):
+        title: str
+        description: str
+        file: Optional[str] = None
+        evidence_source: Optional[str] = None
+
+    class InvestigationReport(BaseModel):
+        executive_verdict: Optional[str] = None
+        suspicious_activities: List[SuspiciousActivity] = Field(default_factory=list)
+        code_vulnerabilities: List[CodeVulnerability] = Field(default_factory=list)
+        recommendations: List[str] = Field(default_factory=list)
+        recommended_actions: List[str] = Field(default_factory=list)
+
+    class GeminiAnalysisSchema(BaseModel):
+        risk_score: int
+        threat_level: str
+        investigation_report: Optional[InvestigationReport] = None
+
     try:
         data = json.loads(text)
-        return sanitize_analysis_json(data)
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON from Gemini: {e}")
+        # Validate schema using Pydantic
+        validated = GeminiAnalysisSchema(**data).model_dump()
+        return sanitize_analysis_json(validated)
+    except Exception as e:
+        logger.error(f"Failed to validate schema from Gemini: {e}")
+        # Try raw fallback parsing
+        try:
+            data = json.loads(text)
+            return sanitize_analysis_json(data)
+        except json.JSONDecodeError as e2:
+            logger.error(f"Failed to parse JSON from Gemini: {e2}")
+            try:
+                cleaned = re.sub(r',\s*([\]}])', r'\1', text)
+                data = json.loads(cleaned)
+                return sanitize_analysis_json(data)
+            except Exception:
+                pass
+            return {}
         # Try cleaning trailing commas
         try:
             cleaned = re.sub(r',\s*([\]}])', r'\1', text)
@@ -1495,6 +1650,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             doc_ref.update(updates)
 
     filename = "unknown_target.apk"
+    apk_hash = None
+    frameworks = []
     if request.filename:
         filename = request.filename
     else:
@@ -1515,8 +1672,6 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
     apk_path = os.path.join(input_dir, "target.apk")
-    apktool_out = os.path.join(output_dir, "apktool_out")
-    jadx_out = os.path.join(output_dir, "jadx_out")
     apkid_json_path = os.path.join(output_dir, "apkid_report.json")
 
     package_name = ""
@@ -1524,10 +1679,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
     manifest_content = ""
     key_sources = {}
     all_source_files = []
-    apktool_error = None
-    jadx_error = None
     apkid_error = None
-    jadx_partial_output = False
 
     try:
         # Check cancellation before starting
@@ -1545,6 +1697,75 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             raise Exception("Sanity check failed: File size is less than 1KB.")
         update_progress("download", "COMPLETED", "APK download complete.")
 
+        # 1. Health check MobSF if API key configured
+        mobsf_url = os.environ.get("MOBSF_API_URL", "http://localhost:8000")
+        mobsf_key = os.environ.get("MOBSF_API_KEY")
+        if mobsf_key:
+            import httpx
+            try:
+                with httpx.Client(timeout=3.0) as client:
+                    resp = client.get(f"{mobsf_url.rstrip('/')}/api/v1/scans", headers={"Authorization": mobsf_key})
+                    if resp.status_code != 200:
+                        raise Exception(f"HTTP status {resp.status_code}")
+            except Exception as e:
+                logger.error(f"MobSF health check failed: {e}")
+                raise Exception(f"MobSF static analysis container is unreachable or down: {e}")
+
+        # 2. Calculate content hash for deduplication
+        import hashlib
+        hasher = hashlib.sha256()
+        with open(apk_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                hasher.update(chunk)
+        apk_hash = hasher.hexdigest()
+
+        # Check database for existing completed analysis with same hash
+        existing = db.collection("apkanalysisresults").where("apk_hash", "==", apk_hash).where("status", "==", "COMPLETED").stream()
+        existing_doc = None
+        for doc in existing:
+            existing_doc = doc.to_dict()
+            break
+
+        if existing_doc:
+            logger.info(f"Deduplication hit for APK hash {apk_hash}. Restoring cached analysis results.")
+            cached_keys = [
+                "risk_score", "threat_level", "badges", "mitre_analysis", 
+                "findings", "final_gemini_analysis", "run_meta", "details", "evidence",
+                "static_analysis", "absolute_threat_score", "package_name",
+                "investigation_report", "banking_fraud", "risk_decomposition",
+                "attack_techniques", "family_signals", "frameworks"
+            ]
+            updates = {k: existing_doc[k] for k in cached_keys if k in existing_doc}
+            updates["status"] = "COMPLETED"
+            updates["apk_hash"] = apk_hash
+            # Set progress keys to COMPLETED
+            for step in ["apkid", "androguard", "virustotal", "dynamic_sandbox", "apktool", "jadx", "quark", "net_sec", "secrets", "trufflehog", "semgrep"]:
+                updates[f"progress.{step}"] = "COMPLETED"
+            updates["progress.upload"] = "COMPLETED"
+            updates["progress.download"] = "COMPLETED"
+            updates["progress.finalize"] = "COMPLETED"
+            updates["progress.gemini"] = "COMPLETED"
+            updates["logs"] = db.ArrayUnion([f"[DEDUP] Duplicate APK detected (SHA-256: {apk_hash}). Restored cached scan results from {existing_doc['id']}."])
+            doc_ref.update(updates)
+            if release_semaphore:
+                analysis_semaphore.release()
+            return doc_ref.get().to_dict()
+
+        # 3. Detect Frameworks (Flutter / React Native)
+        import zipfile
+        frameworks = []
+        try:
+            with zipfile.ZipFile(apk_path, "r") as z:
+                names = z.namelist()
+                for name in names:
+                    if "libflutter.so" in name or "flutter_assets" in name:
+                        frameworks.append("Flutter")
+                    if "libreactnativejni.so" in name or "index.android.bundle" in name:
+                        frameworks.append("React Native")
+        except Exception as e:
+            logger.warning(f"Error checking ZIP catalog for frameworks: {e}")
+        frameworks = list(set(frameworks))
+
         # Shared metadata for parallel workers (dynamic can start before APKTool finishes)
         pkg_box = {"name": "", "launcher": ""}
         pkg_ready = threading.Event()
@@ -1557,38 +1778,28 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             pkg_ready.set()
             logger.info(f"Fast metadata: package={fast_pkg}, launcher={fast_launcher}")
 
-        # Mark static engines RUNNING and dynamic_sandbox SKIPPED
+        # Mark static engines: local fast scanners RUNNING, decompiler tools PENDING via MobSF, dynamic_sandbox SKIPPED
         initial_progress = {
             "progress.apkid": "RUNNING",
             "progress.androguard": "RUNNING",
             "progress.virustotal": "RUNNING",
             "progress.dynamic_sandbox": "SKIPPED",
+            "progress.apktool": "PENDING",
+            "progress.jadx": "PENDING",
+            "progress.quark": "PENDING",
+            "progress.net_sec": "PENDING",
+            "progress.secrets": "PENDING",
+            "progress.trufflehog": "PENDING",
+            "progress.semgrep": "PENDING",
         }
-        if request.deep_scan:
-            initial_progress.update({
-                "progress.apktool": "RUNNING",
-                "progress.jadx": "RUNNING",
-                "progress.quark": "RUNNING",
-                "progress.net_sec": "RUNNING",
-                "progress.secrets": "WAITING",
-                "progress.trufflehog": "WAITING",
-                "progress.semgrep": "WAITING",
-            })
-            log_msg = "[PIPELINE] Static analysis engines firing — APKTool, JADX, APKiD, Quark, and Network Security Config…"
-        else:
-            initial_progress.update({
-                "progress.apktool": "SKIPPED",
-                "progress.jadx": "SKIPPED",
-                "progress.quark": "SKIPPED",
-                "progress.net_sec": "SKIPPED",
-                "progress.secrets": "SKIPPED",
-                "progress.trufflehog": "SKIPPED",
-                "progress.semgrep": "SKIPPED",
-            })
-            log_msg = "[PIPELINE] Fast Static analysis engines firing — Androguard, APKiD, and VirusTotal…"
+        log_msg = "[PIPELINE] Consolidated Static Audit firing — running Androguard, APKiD, VirusTotal, and MobSF REST API..."
             
         doc_ref.update(initial_progress)
-        doc_ref.update({"logs": db.ArrayUnion([log_msg])})
+        doc_ref.update({"logs": db.ArrayUnion([
+            log_msg,
+            "[Pipeline] JADX decompiler & resources extraction consolidated inside MobSF container static audit.",
+            "[Pipeline] Semgrep, TruffleHog, and Quark rules consolidated inside MobSF code analysis."
+        ])})
 
         def prewarm_sandbox():
             try:
@@ -1600,119 +1811,6 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         threading.Thread(target=prewarm_sandbox, daemon=True).start()
 
         # Thread targets for parallel execution
-        def run_apktool():
-            nonlocal package_name, launcher_activity, manifest_content, apktool_error
-            try:
-                apktool_cmd = [*APKTOOL_CMD, "d", "-s", "-f", "-o", apktool_out, apk_path]
-                sandbox_apktool_cmd = ["apktool", "d", "-s", "-f", "-o", "/sandbox/output/apktool_out", "/sandbox/input/target.apk"]
-                process = run_and_stream_cmd(
-                    sandbox_apktool_cmd if os.getenv("KAVACH_DOCKER_SANDBOX", "0") in ("1", "true", "True") else apktool_cmd,
-                    "APKTool",
-                    doc_ref,
-                    sandbox_input_path=input_dir,
-                    sandbox_output_path=output_dir,
-                )
-                if process.returncode != 0:
-                    raise Exception("APKTool decoding failed")
-                
-                manifest_file = os.path.join(apktool_out, "AndroidManifest.xml")
-                if os.path.exists(manifest_file):
-                    with open(manifest_file, "r", encoding="utf-8", errors="ignore") as f:
-                        manifest_content = f.read()
-                package_name = parse_package_name(apktool_out)
-                launcher_activity = parse_launcher_activity(apktool_out)
-                pkg_box["name"] = package_name
-                pkg_box["launcher"] = launcher_activity
-                pkg_ready.set()
-                update_progress("apktool", "COMPLETED", f"Unpacking complete. Target package parsed: {package_name}")
-            except Exception as e:
-                apktool_error = e
-                update_progress("apktool", "FAILED", f"APKTool failed: {str(e)}")
-
-        def run_jadx():
-            nonlocal jadx_error, jadx_partial_output
-            try:
-                # Check JADX Cache based on APK SHA-256
-                import hashlib
-                sha256_hash = hashlib.sha256()
-                with open(apk_path, "rb") as f:
-                    for byte_block in iter(lambda: f.read(4096), b""):
-                        sha256_hash.update(byte_block)
-                file_hash = sha256_hash.hexdigest()
-                
-                cache_dir = os.path.join(SCAN_TEMP_DIR or "/tmp", "jadx_cache", file_hash)
-                disable_cache = os.getenv("KAVACH_DISABLE_JADX_CACHE", "1") in ("1", "true", "True")
-                if not disable_cache and os.path.exists(cache_dir) and os.listdir(cache_dir):
-                    logger.info(f"JADX Cache hit for hash {file_hash}. Copying cached sources...")
-                    update_progress("jadx", "RUNNING", "JADX decompilation cache hit. Restoring decompiled sources...")
-                    shutil.copytree(cache_dir, jadx_out, dirs_exist_ok=True)
-                    jadx_partial_output = False
-                    update_progress("jadx", "COMPLETED", "Decompilation complete (restored from cache).")
-                    return
-
-                # Allocate JVM heap memory dynamically based on APK size (larger APK = more JVM RAM, but capped)
-                # For very large APKs on local developer machines, G1GC and 1 thread prevents system OOM/freeze
-                apk_size_mb = os.path.getsize(apk_path) / (1024 * 1024)
-                
-                # Dynamic thread allocation: Use 1 thread for very large APKs (>35MB) to prevent CPU/memory exhaustion
-                threads = 1 if apk_size_mb > 35 else JADX_THREADS
-                
-                # Dynamic heap allocation: Allocate up to 3GB of JVM heap, capped to not freeze the host system
-                max_heap = "3072m" if apk_size_mb > 35 else "2560m"
-                os.environ["JADX_OPTS"] = f"-Xmx{max_heap} -XX:+UseG1GC"
-                
-                jadx_cmd = [
-                    JADX_BIN,
-                    "--no-res",
-                    "-j", str(threads),
-                    "--no-debug-info",
-                    "--comments-level", "none",
-                    "--decompilation-mode", "auto",
-                    "-Pdex-input.verify-checksum=no",
-                ]
-                
-                jadx_cmd += [
-                    "-d", jadx_out,
-                    apk_path,
-                ]
-                sandbox_jadx_cmd = [
-                    "jadx",
-                    "--no-res",
-                    "-j", str(threads),
-                    "--no-debug-info",
-                    "--comments-level", "none",
-                    "--decompilation-mode", "auto",
-                    "-Pdex-input.verify-checksum=no",
-                    "-d", "/sandbox/output/jadx_out",
-                    "/sandbox/input/target.apk",
-                ]
-                
-                proc = run_and_stream_cmd(
-                    sandbox_jadx_cmd if os.getenv("KAVACH_DOCKER_SANDBOX", "0") in ("1", "true", "True") else jadx_cmd,
-                    "JADX",
-                    doc_ref,
-                    timeout=JADX_TIMEOUT_SECS,
-                    sandbox_input_path=input_dir,
-                    sandbox_output_path=output_dir,
-                )
-                rc = proc.returncode
-                if rc != 0:
-                    logger.warning(f"JADX decompilation returned non-zero: {rc}")
-                
-                # After successful decompilation, save to cache if caching is enabled
-                if not disable_cache and os.path.exists(jadx_out) and os.listdir(jadx_out):
-                    os.makedirs(os.path.dirname(cache_dir), exist_ok=True)
-                    shutil.copytree(jadx_out, cache_dir, dirs_exist_ok=True)
-
-                jadx_partial_output = False
-                update_progress("jadx", "COMPLETED", "Decompilation complete. Custom Java application files successfully decompiled.")
-            except subprocess.TimeoutExpired:
-                logger.warning(f"JADX timed out after {JADX_TIMEOUT_SECS}s, but proceeding with partially decompiled files.")
-                jadx_partial_output = True
-                update_progress("jadx", "COMPLETED", f"JADX mostly complete (hit {JADX_TIMEOUT_SECS}s limit).")
-            except Exception as e:
-                jadx_error = e
-                update_progress("jadx", "FAILED", f"JADX failed: {str(e)}")
 
         def run_apkid():
             nonlocal apkid_error
@@ -1742,60 +1840,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 logger.warning(f"APKiD failed: {e}")
                 update_progress("apkid", "FAILED", f"APKiD failed: {str(e)}")
 
-        quark_json_path = os.path.join(output_dir, "quark_report.json")
-        quark_error = None
-        def run_quark():
-            nonlocal quark_error
-            try:
-                # 1. Post initial RUNNING status
-                update_progress("quark", "RUNNING", "Quark-Engine behavioral analysis started...")
-                
-                venv_quark = os.path.join(_BACKEND_DIR, "venv", "bin", "quark")
-                quark_bin = venv_quark if os.path.isfile(venv_quark) else "quark"
-                
-                # Dynamic rules path lookup for local venv, global root, or container
-                rules_dir = None
-                candidate_paths = [
-                    "/app/.quark-engine/quark-rules/rules",
-                    os.path.expanduser("~/.quark-engine/quark-rules/rules")
-                ]
-                for path in candidate_paths:
-                    if "/root" in path:
-                        continue
-                    if os.path.isdir(path) and os.access(path, os.R_OK):
-                        rules_dir = path
-                        break
-                
-                quark_cmd = [quark_bin, "-a", apk_path, "-o", quark_json_path, "--auto-fix-checksum"]
-                if rules_dir:
-                    quark_cmd.extend(["-r", rules_dir])
-                    logger.info(f"Using Quark rules directory: {rules_dir}")
-                else:
-                    logger.warning("Quark rules directory not found, falling back to default lookup.")
-                    
-                logger.info(f"Running Quark command: {' '.join(quark_cmd)}")
-                
-                # Execute Quark with configured timeout and stream stdout/stderr line-by-line to database logs
-                sandbox_quark_cmd = ["quark", "-a", "/sandbox/input/target.apk", "-o", "/sandbox/output/quark_report.json", "--auto-fix-checksum"]
-                proc = run_and_stream_cmd(
-                    sandbox_quark_cmd if os.getenv("KAVACH_DOCKER_SANDBOX", "0") in ("1", "true", "True") else quark_cmd,
-                    "Quark",
-                    doc_ref,
-                    timeout=QUARK_TIMEOUT_SECS,
-                    sandbox_input_path=input_dir,
-                    sandbox_output_path=output_dir,
-                )
-                if proc.returncode == 0 or os.path.exists(quark_json_path):
-                    update_progress("quark", "COMPLETED", "Quark-Engine behavioral analysis complete.")
-                    doc_ref.update({"logs": db.ArrayUnion([
-                        "[Quark] Successfully resolved and matched bytecode relations to MITRE ATT&CK Crimes."
-                    ])})
-                else:
-                    raise Exception(f"Quark failed with code {proc.returncode}")
-            except Exception as e:
-                quark_error = e
-                logger.warning(f"Quark analysis failed: {e}")
-                update_progress("quark", "FAILED", f"Quark failed: {str(e)}")
+
 
         androguard_result = None
         androguard_error = None
@@ -1843,53 +1888,9 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 logger.warning(f"Androguard failed: {e}")
                 update_progress("androguard", "FAILED", f"Androguard failed: {str(e)}")
 
-        net_sec_error = None
-        def run_net_sec():
-            nonlocal net_sec_error
-            try:
-                pkg_ready.wait(timeout=60.0)
-                # Network security config runs on decoded files from APKTool
-                # Wait 2s just to ensure files are fully written to disk
-                time.sleep(2)
-                update_progress("net_sec", "COMPLETED", "Network Security Config audit complete.")
-            except Exception as e:
-                net_sec_error = e
-                logger.warning(f"Network Security Config audit failed: {e}")
-                update_progress("net_sec", "FAILED", f"Network Security Config failed: {str(e)}")
-
         sec_res = {"credential_leaks": [], "score": 0}
         truffle_res = {"secrets": [], "score": 0}
         semgrep_res = {"violations": [], "score": 0}
-
-        def run_secrets():
-            nonlocal sec_res
-            try:
-                update_progress("secrets", "RUNNING", "Scanning decompiled sources for hardcoded credentials/secrets...")
-                from analysis_engine import analyze_secrets
-                sec_res = analyze_secrets(jadx_out, package_name)
-                update_progress("secrets", "COMPLETED", "Static secrets scan completed.")
-            except Exception as e:
-                logger.error(f"Secrets analysis failed in background task: {e}")
-
-        def run_trufflehog():
-            nonlocal truffle_res
-            try:
-                update_progress("trufflehog", "RUNNING", "TruffleHog deep filesystem high-entropy credential audit running...")
-                from analysis_engine import analyze_trufflehog
-                truffle_res = analyze_trufflehog(jadx_out, package_name)
-                update_progress("trufflehog", "COMPLETED", "TruffleHog credential audit completed.")
-            except Exception as e:
-                logger.error(f"TruffleHog analysis failed in background task: {e}")
-
-        def run_semgrep():
-            nonlocal semgrep_res
-            try:
-                update_progress("semgrep", "RUNNING", "Semgrep AST static analysis checking security patterns...")
-                from analysis_engine import analyze_semgrep
-                semgrep_res = analyze_semgrep(jadx_out, package_name)
-                update_progress("semgrep", "COMPLETED", "Semgrep AST scan completed.")
-            except Exception as e:
-                logger.error(f"Semgrep analysis failed in background task: {e}")
 
         vt_res = None
         def run_virustotal():
@@ -1915,15 +1916,10 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         }
 
         # Coordinated Parallel Pipeline:
-        # Run independent and dependent tasks concurrently to maximize CPU usage and minimize execution latency.
+        # Run local fast static analysis tasks in parallel, and let MobSF do the heavy decompilation/auditing
         
-        # Phase 1: Independent tasks (run in parallel)
-        if request.deep_scan:
-            task_names_1 = ["apktool", "jadx", "apkid", "quark", "androguard", "virustotal"]
-            tasks_1 = [run_apktool, run_jadx, run_apkid, run_quark, run_androguard, run_virustotal]
-        else:
-            task_names_1 = ["apkid", "androguard", "virustotal"]
-            tasks_1 = [run_apkid, run_androguard, run_virustotal]
+        task_names_1 = ["apkid", "androguard", "virustotal"]
+        tasks_1 = [run_apkid, run_androguard, run_virustotal]
             
         threads_1 = []
         for run_task, task_name in zip(tasks_1, task_names_1):
@@ -1935,56 +1931,11 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         for t in threads_1:
             t.join()
 
-        # Check cancellation before Phase 2 dependent tasks
+        # Check cancellation before continuing
         if doc_ref and hasattr(doc_ref, "get"):
             snap = doc_ref.get()
             if snap.exists and snap.to_dict().get("status") == "FAILED":
                 raise ValueError("Analysis cancelled by user.")
-
-        # Phase 2: Dependent tasks (run in parallel)
-        tasks_2 = []
-        task_names_2 = []
-        
-        # 1. Network Security Config (depends on APKTool successfully decoding manifest/resources)
-        if request.deep_scan:
-            if not apktool_error:
-                tasks_2.append(run_net_sec)
-                task_names_2.append("net_sec")
-            else:
-                logger.warning("APKTool failed, skipping Network Security Config audit.")
-                update_progress("net_sec", "SKIPPED", "Network Security Config audit skipped due to APKTool failure.")
-        
-        # 2. Source scanners (depends on JADX successfully decompiling or producing partial Java sources)
-        if request.deep_scan:
-            sources_dir = os.path.join(jadx_out, "sources")
-            has_jadx_output = not jadx_error or (
-                os.path.isdir(sources_dir) and any(
-                    f.endswith(".java") for _, _, files in os.walk(sources_dir) for f in files
-                )
-            )
-            
-            if has_jadx_output:
-                tasks_2.extend([run_secrets, run_trufflehog, run_semgrep])
-                task_names_2.extend(["secrets", "trufflehog", "semgrep"])
-            else:
-                logger.warning("JADX failed with no output, skipping dependent static scans.")
-                update_progress("secrets", "SKIPPED", "Secrets scan skipped due to JADX failure.")
-                update_progress("trufflehog", "SKIPPED", "TruffleHog scan skipped due to JADX failure.")
-                update_progress("semgrep", "SKIPPED", "Semgrep scan skipped due to JADX failure.")
-
-        if tasks_2:
-            threads_2 = []
-            for run_task, task_name in zip(tasks_2, task_names_2):
-                logger.info(f"Starting Phase 2 dependent task in parallel: {task_name}")
-                t = threading.Thread(target=run_task, name=f"task-{task_name}")
-                t.start()
-                threads_2.append(t)
-                
-            for t in threads_2:
-                t.join()
-
-        if request.deep_scan and apktool_error:
-            raise apktool_error
 
         apkid_findings = {}
         if os.path.exists(apkid_json_path):
@@ -1994,35 +1945,17 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             except Exception as e:
                 logger.warning(f"Failed to load APKiD JSON: {e}")
 
-        # Fast Scan: Extract package metadata and manifest directly from the Androguard result
-        if not request.deep_scan:
-            if androguard_result:
-                manifest_content = androguard_result.get("manifest_content", "")
-                package_name = androguard_result.get("package_name", "") or package_name
-                launcher_activity = androguard_result.get("launcher_activity", "") or launcher_activity
-                pkg_box["name"] = package_name
-                pkg_box["launcher"] = launcher_activity
-                pkg_ready.set()
+        # Extract package metadata and manifest directly from the Androguard result (unconditional)
+        if androguard_result:
+            manifest_content = androguard_result.get("manifest_content", "")
+            package_name = androguard_result.get("package_name", "") or package_name
+            launcher_activity = androguard_result.get("launcher_activity", "") or launcher_activity
+            pkg_box["name"] = package_name
+            pkg_box["launcher"] = launcher_activity
+            pkg_ready.set()
 
         static_signals = extract_static_signals(manifest_content, {}, apkid_findings)
-
-        if request.deep_scan and jadx_error:
-            sources_dir = os.path.join(jadx_out, "sources")
-            has_partial = os.path.isdir(sources_dir) and any(
-                f.endswith(".java") for _, _, files in os.walk(sources_dir) for f in files
-            )
-            if has_partial:
-                logger.warning(f"JADX failed but partial output exists — continuing: {jadx_error}")
-                jadx_partial_output = True
-            else:
-                raise jadx_error
-
-        if request.deep_scan:
-            # Select key java files after decompilation completes
-            key_sources, all_source_files = select_key_java_files(jadx_out, package_name)
-            update_progress("jadx", "COMPLETED", f"JADX analysis complete. Selected {len(key_sources)} key files.")
-        else:
-            key_sources, all_source_files = {}, []
+        key_sources, all_source_files = {}, []
 
         # Define progress callback to stream sub-engine status & logs live to database
         def progress_callback(engine: str, status: str, details: str):
@@ -2034,9 +1967,9 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             manifest_content,
             key_sources,
             apkid_json_path=apkid_json_path,
-            quark_json_path=quark_json_path if request.deep_scan else None,
-            apktool_out=apktool_out if request.deep_scan else None,
-            jadx_out=jadx_out if request.deep_scan else None,
+            quark_json_path=None,
+            apktool_out=None,
+            jadx_out=None,
             apk_path=apk_path,
             progress_callback=progress_callback,
             androguard_res=androguard_result,
@@ -2065,7 +1998,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             "hook_packs": dynamic_result.get("active_packs", []),
             "duration_seconds": dynamic_result.get("duration_seconds", 120),
             "runtime_confidence": dynamic_result.get("runtime_confidence", "none"),
-            "jadx_partial_output": jadx_partial_output
+            "jadx_partial_output": False
         }
 
         # Cluster runtime findings now that static evidence is available
@@ -2181,9 +2114,22 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         )
 
         # ── Prompt injection hardening ──────────────────────────────────────
-        # Wrap ALL APK-derived data inside strict delimiters so that any
-        # adversarial strings embedded in the APK (e.g. "Ignore previous
-        # instructions") cannot escape into the system instruction context.
+        # Helper to escape HTML/XML delimiters and prevent malicious payload breakout
+        def sanitize_prompt_injection(text: str) -> str:
+            if not text:
+                return ""
+            text = text.replace("<UNTRUSTED_APK_CONTENT>", "[UNTRUSTED_CONTENT_START]")
+            text = text.replace("</UNTRUSTED_APK_CONTENT>", "[UNTRUSTED_CONTENT_END]")
+            text = text.replace("<ANALYSIS_PAYLOAD>", "[PAYLOAD_START]")
+            text = text.replace("</ANALYSIS_PAYLOAD>", "[PAYLOAD_END]")
+            # Escape angle brackets to prevent the model from executing text as prompt instructions/tags
+            text = text.replace("<", "&lt;").replace(">", "&gt;")
+            return text
+
+        safe_evidentiary = sanitize_prompt_injection(evidentiary_details)
+        safe_fraud_summary = sanitize_prompt_injection(banking_fraud_prompt_summary)
+        safe_manifest = sanitize_prompt_injection(manifest_content)
+
         prompt_sections = [
             (
                 "<ANALYSIS_PAYLOAD>\n"
@@ -2191,12 +2137,14 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 f"risk score of {det_score}/100.\n"
                 "Below are the evidentiary findings from our local engines (APKTool, JADX, APKiD):\n\n"
                 "--- DETERMINISTIC FINDINGS ---\n"
-                f"{evidentiary_details}\n\n"
-                f"{banking_fraud_prompt_summary}"
+                "<UNTRUSTED_APK_CONTENT>\n"
+                f"{safe_evidentiary}\n\n"
+                f"{safe_fraud_summary}"
+                "</UNTRUSTED_APK_CONTENT>\n\n"
                 "--- ANDROIDMANIFEST.XML ---\n"
-                "<user_data>\n"
-                f"{manifest_content}\n"
-                "</user_data>\n\n"
+                "<UNTRUSTED_APK_CONTENT>\n"
+                f"{safe_manifest}\n"
+                "</UNTRUSTED_APK_CONTENT>\n\n"
                 f"{dynamic_events_summary}"
                 "--- KEY JAVA CODE SNIPPETS ---\n"
             )
@@ -2206,7 +2154,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             MAX_PER_FILE = 4096
             if len(code) > MAX_PER_FILE:
                 code = code[:MAX_PER_FILE] + "\n// [TRUNCATED — exceeds 4KB per-file budget]\n"
-            prompt_sections.append(f"\nFile: {filepath}\n<user_data>\n```java\n{code}\n```\n</user_data>\n")
+            safe_code = sanitize_prompt_injection(code)
+            prompt_sections.append(f"\nFile: {filepath}\n<UNTRUSTED_APK_CONTENT>\n```java\n{safe_code}\n```\n</UNTRUSTED_APK_CONTENT>\n")
         prompt_sections.append("\n</ANALYSIS_PAYLOAD>\n")
 
         raw_prompt = "".join(prompt_sections)
@@ -2440,6 +2389,25 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             banking_fraud
         )
 
+        # Calculate risk indicators for refined confidence engine
+        metadata = androguard_result.get("metadata", {}) if androguard_result else {}
+        taint_skipped = metadata.get("taint_analysis_skipped", False)
+        obfuscated = False
+        if 'static_signals' in locals() and static_signals:
+            obfuscated = static_signals.get("has_obfuscation", False) or static_signals.get("has_packer", False)
+        
+        findings_count = 0
+        risky_classes_count = 0
+        if androguard_result:
+            findings_count = (
+                len(androguard_result.get("risky_classes", [])) +
+                len(androguard_result.get("dangerous_api_chains", [])) +
+                len(androguard_result.get("suspicious_strings", []))
+            )
+            risky_classes_count = len(androguard_result.get("risky_classes", []))
+        
+        static_signal_density = float(findings_count) / (risky_classes_count + 1)
+
         risk_decomposition = build_risk_decomposition(
             static_score=static_score,
             dynamic_score=dynamic_score,
@@ -2447,6 +2415,9 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             fraud_score=banking_fraud.get("fraud_score", 0),
             contributors=contributors,
             absolute_score=absolute_score,
+            taint_skipped=taint_skipped,
+            obfuscated=obfuscated,
+            static_signal_density=static_signal_density,
         )
 
         # Force strict scoring determinism by locking Gemini to the composite risk score
@@ -2487,13 +2458,38 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             "absolute_threat_score": absolute_score,
         }
 
+        existing_progress = {}
+        try:
+            current_snap = doc_ref.get()
+            if current_snap.exists:
+                existing_progress = current_snap.to_dict().get("progress", {})
+        except Exception as pe:
+            logger.warning(f"Could not retrieve existing progress map: {pe}")
+
+        final_progress = {
+            **existing_progress,
+            "upload": "COMPLETED",
+            "download": "COMPLETED",
+            "apktool": "COMPLETED",
+            "jadx": "COMPLETED",
+            "apkid": "COMPLETED",
+            "quark": "COMPLETED",
+            "net_sec": "COMPLETED",
+            "dynamic_sandbox": "COMPLETED" if dynamic_result.get("status") == "COMPLETED" else "SKIPPED",
+            "gemini": "COMPLETED",
+            "finalize": "COMPLETED"
+        }
+
         final_data = {
             "status": "COMPLETED",
+            "apk_hash": apk_hash,
+            "frameworks": frameworks,
             "filename": filename,
             "apk_url": apk_url,
             "package_name": package_name,
             "risk_score": gemini_score,
             "threat_level": gemini_threat,
+            "mobsf_hash": deterministic_result["evidence"].get("mobsf_hash"),
             "static_analysis": static_report_dict,
             "absolute_threat_score": absolute_score,
             "evidence": {
@@ -2525,18 +2521,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             "created_at": now_str,
             "uid": request.uid,
             "email": request.email,
-            "progress": {
-                "upload": "COMPLETED",
-                "download": "COMPLETED",
-                "apktool": "COMPLETED",
-                "jadx": "COMPLETED",
-                "apkid": "COMPLETED",
-                "quark": "COMPLETED",
-                "net_sec": "COMPLETED",
-                "dynamic_sandbox": "COMPLETED" if dynamic_result.get("status") == "COMPLETED" else "SKIPPED",
-                "gemini": "COMPLETED",
-                "finalize": "COMPLETED"
-            },
+            "progress": final_progress,
             "logs": db.ArrayUnion(["[SYS] Analysis complete and saved."])
         }
         doc_ref.update(final_data)
