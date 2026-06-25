@@ -9,6 +9,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
   packages: write
@@ -27,11 +30,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lower case owner name
+        run: |
+          echo "OWNER_LC=${OWNER,,}" >> ${GITHUB_ENV}
+        env:
+          OWNER: '${{ github.repository_owner }}'
+
       - name: Extract metadata (tags, labels) for Backend
         id: meta-backend
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/kavach-backend
+          images: ghcr.io/${{ env.OWNER_LC }}/kavach-backend
 
       - name: Build and push Backend Docker image
         uses: docker/build-push-action@v5
@@ -40,15 +49,15 @@ jobs:
           file: ./backend/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/kavach-backend:latest
-            ghcr.io/${{ github.repository_owner }}/kavach-backend:${{ github.sha }}
+            ghcr.io/${{ env.OWNER_LC }}/kavach-backend:latest
+            ghcr.io/${{ env.OWNER_LC }}/kavach-backend:${{ github.sha }}
           labels: ${{ steps.meta-backend.outputs.labels }}
 
       - name: Extract metadata (tags, labels) for Frontend
         id: meta-frontend
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/kavach-frontend
+          images: ghcr.io/${{ env.OWNER_LC }}/kavach-frontend
 
       - name: Build and push Frontend Docker image
         uses: docker/build-push-action@v5
@@ -57,6 +66,6 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/kavach-frontend:latest
-            ghcr.io/${{ github.repository_owner }}/kavach-frontend:${{ github.sha }}
+            ghcr.io/${{ env.OWNER_LC }}/kavach-frontend:latest
+            ghcr.io/${{ env.OWNER_LC }}/kavach-frontend:${{ github.sha }}
           labels: ${{ steps.meta-frontend.outputs.labels }}
