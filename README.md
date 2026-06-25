@@ -1,6 +1,12 @@
 <p align="center">
-  <img src="assets/readme/boi_logo_reversed.png" alt="KAVACH AI Logo" width="260px"/>
+  <a href="https://www.bankofindia.co.in/">
+    <img src="assets/readme/boi_logo_reversed.png" alt="Bank of India" height="100" align="left"/>
+  </a>
+  <a href="https://iith.ac.in/">
+    <img src="assets/readme/iith_logo.svg" alt="IIT Hyderabad" height="100" align="right"/>
+  </a>
 </p>
+<br clear="all" />
 
 <h1 align="center">🛡️ KAVACH AI</h1>
 
