@@ -12,6 +12,13 @@ Interaction model:
 """
 
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+load_dotenv()
+
 import re
 import time
 import subprocess
@@ -47,14 +54,19 @@ def _get_genai_client(api_key: str | None = None):
         return None
 
 
-def _generate_content_with_fallback(client, contents, config, primary_model="gemini-3.5-flash"):
+def _generate_content_with_fallback(client, contents, config, primary_model="gemini-2.5-flash", generate_fn=None):
+    if generate_fn:
+        return generate_fn(
+            client=client,
+            model=primary_model,
+            contents=contents,
+            config=config
+        )
     models_to_try = [
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3.1-pro",
         "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash"
+        "gemini-3.1-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-3.5-flash"
     ]
     if primary_model not in models_to_try:
         models_to_try.insert(0, primary_model)
@@ -84,7 +96,7 @@ thread_local = threading.local()
 
 
 def _ts() -> str:
-    return datetime.datetime.utcnow().isoformat() + "Z"
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None).isoformat() + "Z"
 
 
 def _run(args: List[str], timeout: int = _ADB_TIMEOUT) -> subprocess.CompletedProcess:
@@ -516,7 +528,8 @@ def _step_deep_link(adb: str, package: str, schemes: List[str],
 
 
 def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
-                            coverage: Dict, log_callback=None, gemini_api_key: Optional[str] = None) -> None:
+                            coverage: Dict, log_callback=None, gemini_api_key: Optional[str] = None,
+                            genai_client=None, generate_fn=None) -> None:
     """
     Find EditText fields in the current UI and type test credentials.
     Uses Gemini AI if available to dynamically classify fields and enter appropriate dummy data,
@@ -548,10 +561,13 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
     _log(f"Detected {len(fields)} EditText fields. Initiating dynamic UI classification...")
 
     # Attempt AI-driven simulation
-    try:
-        client = _get_genai_client(api_key=gemini_api_key)
-    except TypeError:
-        client = _get_genai_client()
+    if genai_client:
+        client = genai_client
+    else:
+        try:
+            client = _get_genai_client(api_key=gemini_api_key)
+        except TypeError:
+            client = _get_genai_client()
     ai_success = False
     
     if client:
@@ -592,7 +608,8 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
                     response_mime_type="application/json",
                     temperature=0.4,
                 ),
-                primary_model="gemini-3.5-flash"
+                primary_model="gemini-2.5-flash",
+                generate_fn=generate_fn
             )
 
             
@@ -675,6 +692,60 @@ def _step_login_simulation(adb: str, tmp_dir: str, transcript: list,
         ))
 
 
+def _step_transaction_simulation(adb: str, tmp_dir: str, transcript: list,
+                                coverage: Dict, log_callback=None, gemini_api_key: Optional[str] = None) -> None:
+    """
+    Search for transaction or payment workflow elements (like 'pay', 'send', 'transfer', 'amount', 'confirm')
+    and simulate filling transfer info and tapping confirm.
+    """
+    def _log(msg: str):
+        if log_callback:
+            try:
+                log_callback(f"[PLAYBOOK_TX_SIM] {msg}")
+            except Exception:
+                pass
+        logger.info(msg)
+
+    ok_root = _dump_ui(adb, tmp_dir)
+    if ok_root is None:
+        transcript.append(_step("transaction_simulation", "UI layout dump failed", "failed"))
+        return
+
+    xml_path = os.path.join(tmp_dir, "ui_dump.xml")
+    elements = parse_uiautomator_xml(xml_path)
+    inputs = [e for e in elements if _is_edittext(e)]
+    if not elements or not inputs:
+        transcript.append(_step("transaction_simulation",
+                                "No EditText fields visible — transaction simulation skipped",
+                                "skipped"))
+        return
+
+    _log(f"Detected {len(inputs)} input fields. Simulating transaction details...")
+    tx_values = ["9876543210", "10000"]
+    entered = 0
+    for i, field in enumerate(inputs[:2]):
+        _tap(adb, field["x"], field["y"])
+        time.sleep(0.4)
+        val = tx_values[i] if i < len(tx_values) else "100"
+        _text_input(adb, val)
+        entered += 1
+        _log(f"Entered mock transfer value: '{val}'")
+        time.sleep(0.3)
+
+    pay_btn = next(
+        (e for e in elements
+         if re.search(r"(pay|send|transfer|confirm|submit|ok)", e.get("text", "") or e.get("content_desc") or "", re.I)),
+        None
+    )
+    if pay_btn:
+        _tap(adb, pay_btn["x"], pay_btn["y"])
+        _log(f"Tapped transaction confirmation button: '{pay_btn.get('text')}'")
+        time.sleep(2.0)
+        transcript.append(_step("transaction_simulation", f"Simulated transfer and tapped '{pay_btn.get('text')}'", "succeeded"))
+    else:
+        transcript.append(_step("transaction_simulation", "Simulated inputs but no confirm button found", "failed"))
+
+
 def _step_vision_guided_play(
     adb: str,
     tmp_dir: str,
@@ -682,7 +753,9 @@ def _step_vision_guided_play(
     static_signals: Optional[Dict[str, Any]] = None,
     log_callback=None,
     max_steps: Optional[int] = None,
-    gemini_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None,
+    genai_client=None,
+    generate_fn=None
 ) -> None:
     """
     Take a screenshot of the running emulator screen, send it directly to Gemini
@@ -697,16 +770,23 @@ def _step_vision_guided_play(
                 pass
         logger.info(msg)
 
+    if os.environ.get("KAVACH_DISABLE_VISION_PLAYBOOK", "0") in ("1", "true", "True"):
+        _log("KAVACH_DISABLE_VISION_PLAYBOOK is active — skipping vision-guided play.")
+        return
+
     if max_steps is None:
         try:
-            max_steps = int(os.environ.get("KAVACH_MAX_VISION_STEPS", "8"))
+            max_steps = int(os.environ.get("KAVACH_MAX_VISION_STEPS", "2"))
         except Exception:
-            max_steps = 8
+            max_steps = 2
 
-    try:
-        client = _get_genai_client(api_key=gemini_api_key)
-    except TypeError:
-        client = _get_genai_client()
+    if genai_client:
+        client = genai_client
+    else:
+        try:
+            client = _get_genai_client(api_key=gemini_api_key)
+        except TypeError:
+            client = _get_genai_client()
     if not client:
         _log("Gemini client not initialized, skipping vision-guided play.")
         return
@@ -730,6 +810,7 @@ def _step_vision_guided_play(
             permissions = static_signals["permissions"]
         
         hits = evidence.get("malware_rule_hits", [])
+        yara_matches = evidence.get("yara_matches", [])
         urls = evidence.get("suspicious_urls", [])
         net = evidence.get("network_indicators", [])
         
@@ -755,6 +836,10 @@ def _step_vision_guided_play(
                     hit_names.append(name)
             if hit_names:
                 context_parts.append(f"- Static Threat Hits: {', '.join(hit_names)}")
+        if yara_matches:
+            yara_names = [m.get("rule_name") for m in yara_matches if m.get("rule_name")]
+            if yara_names:
+                context_parts.append(f"- YARA Signature Matches: {', '.join(yara_names)}")
         if urls:
             url_list = []
             for u in urls[:5]:
@@ -861,7 +946,8 @@ def _step_vision_guided_play(
                     response_mime_type="application/json",
                     temperature=0.2,
                 ),
-                primary_model="gemini-3.5-flash"
+                primary_model="gemini-2.5-flash",
+                generate_fn=generate_fn
             )
 
 
@@ -1018,6 +1104,8 @@ def run_playbook(
     static_signals: Dict[str, Any],
     log_callback=None,
     gemini_api_key: Optional[str] = None,
+    genai_client=None,
+    generate_fn=None,
 ) -> Dict[str, Any]:
     """
     Execute the trigger playbook against a running emulator.
@@ -1097,26 +1185,30 @@ def run_playbook(
         _step_system_broadcasts(adb, package_name, exported_receivers, transcript)
 
         # Step 12: login simulation (if EditText fields are present)
-        _log("Step 12/14: Login field simulation")
+        _log("Step 12/16: Login field simulation")
         if has_login_fields:
-            _step_login_simulation(adb, tmp_dir, transcript, coverage, log_callback=_log, gemini_api_key=gemini_api_key)
+            _step_login_simulation(adb, tmp_dir, transcript, coverage, log_callback=_log, gemini_api_key=gemini_api_key, genai_client=genai_client, generate_fn=generate_fn)
         else:
             transcript.append(_step("login_simulation",
                                     "Skipped (no login field signal in static analysis)", "skipped"))
 
-        # Step 13: Vision-guided dynamic play
-        _log("Step 13/15: Vision-guided dynamic play")
-        _step_vision_guided_play(adb, tmp_dir, transcript, static_signals=static_signals, log_callback=_log, gemini_api_key=gemini_api_key)
+        # Step 13: transaction simulation
+        _log("Step 13/16: Transaction simulation")
+        _step_transaction_simulation(adb, tmp_dir, transcript, coverage, log_callback=_log, gemini_api_key=gemini_api_key)
 
-        # Step 14: wait for background jobs + network
-        _log("Step 14/15: Background job wait")
+        # Step 14: Vision-guided dynamic play
+        _log("Step 14/16: Vision-guided dynamic play")
+        _step_vision_guided_play(adb, tmp_dir, transcript, static_signals=static_signals, log_callback=_log, gemini_api_key=gemini_api_key, genai_client=genai_client, generate_fn=generate_fn)
+
+        # Step 15: wait for background jobs + network
+        _log("Step 15/16: Background job wait")
         _step_background_job_wait(adb, transcript)
 
-        # Step 15: force stop + cold relaunch
-        _log("Step 15/15: Force-stop and cold relaunch")
+        # Step 16: force stop + cold relaunch
+        _log("Step 16/16: Force-stop and cold relaunch")
         _step_force_stop_relaunch(adb, package_name, launcher_activity, transcript)
 
-    # Calculate high-level step statistics strictly out of 15 steps
+    # Calculate high-level step statistics strictly out of 16 steps
     high_level_steps = [
         "prime_clipboard",
         "wait_activity",
@@ -1130,12 +1222,13 @@ def run_playbook(
         "deep_link_intent",
         "system_broadcast_trigger",
         "login_simulation",
+        "transaction_simulation",
         "vision_guided_play",
         "background_job_wait",
         "force_stop_relaunch"
     ]
     succeeded = 0
-    attempted = 15
+    attempted = 16
     for step_name in high_level_steps:
         steps_of_type = [s for s in transcript if s.get("step") == step_name]
         if not steps_of_type:

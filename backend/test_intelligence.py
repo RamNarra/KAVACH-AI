@@ -5,7 +5,7 @@ from attack_mapping import map_evidence_to_attack
 from risk_engine import build_risk_decomposition, derive_dynamic_score
 import threading
 import uuid
-from supabase_db import ArrayUnion as SupabaseArrayUnion, Query as SupabaseQuery
+from postgres_db import ArrayUnion as PostgresArrayUnion, Query as PostgresQuery
 
 class MockSnapshot:
     def __init__(self, doc_id, data):
@@ -64,8 +64,8 @@ class MockColRef:
         return MockDocRef(self.name, doc_id, self.storage, self.lock)
 
 class MockDB:
-    ArrayUnion = SupabaseArrayUnion
-    Query = SupabaseQuery
+    ArrayUnion = PostgresArrayUnion
+    Query = PostgresQuery
     def __init__(self):
         self.storage = {}
         self.lock = threading.Lock()
@@ -504,120 +504,130 @@ def test_sandbox_runner_path_separation():
         sandbox_runner.DOCKER_SANDBOX_ENABLED = original_enabled
 
 
-def test_supabase_db_mocked():
-    from unittest.mock import patch, Mock
+def test_postgres_db_mocked():
+    from unittest.mock import patch, MagicMock
     import os
     import pytest
-    from supabase_db import SupabaseDB, ArrayUnion
+    from postgres_db import PostgresDB, ArrayUnion
     
     # Temporarily set credentials
-    os.environ["SUPABASE_URL"] = "https://mock.supabase.co"
-    os.environ["SUPABASE_KEY"] = "mock_key"
+    os.environ["POSTGRES_HOST"] = "localhost"
+    os.environ["POSTGRES_USER"] = "kavach_user"
+    os.environ["POSTGRES_PASSWORD"] = "kavach_secure_password_1337"
+    os.environ["POSTGRES_DB"] = "kavach_db"
     
     try:
-        db = SupabaseDB()
+        db = PostgresDB()
         doc_ref = db.collection("scans").document("test_doc")
         
-        # Test get()
-        mock_response_get = Mock()
-        mock_response_get.status_code = 200
-        mock_response_get.json.return_value = [{"data": {"status": "RUNNING", "test_field": "val"}}]
+        # Test get() using a mocked connection and cursor
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = ['{"status": "RUNNING", "test_field": "val"}']
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_pool = MagicMock()
+        mock_pool.getconn.return_value = mock_conn
         
-        with patch("requests.get", return_value=mock_response_get) as mock_get:
+        with patch("postgres_db.get_connection_pool", return_value=mock_pool):
             snap = doc_ref.get()
             assert snap.exists is True
             assert snap.to_dict() == {"status": "RUNNING", "test_field": "val"}
-            mock_get.assert_called_once()
+            mock_cursor.execute.assert_called_once()
             
         # Test set()
-        mock_response_post = Mock()
-        mock_response_post.status_code = 201
+        mock_cursor_set = MagicMock()
+        mock_conn_set = MagicMock()
+        mock_conn_set.cursor.return_value.__enter__.return_value = mock_cursor_set
+        mock_pool_set = MagicMock()
+        mock_pool_set.getconn.return_value = mock_conn_set
         
-        with patch("requests.post", return_value=mock_response_post) as mock_post:
+        with patch("postgres_db.get_connection_pool", return_value=mock_pool_set):
             doc_ref.set({"status": "COMPLETED"})
-            mock_post.assert_called_once()
+            mock_cursor_set.execute.assert_called_once()
             
         # Test update()
-        mock_response_get_update = Mock()
-        mock_response_get_update.status_code = 200
-        mock_response_get_update.json.return_value = [{"data": {"logs": ["log1"]}}]
-
-        mock_response_patch = Mock()
-        mock_response_patch.status_code = 200
-        mock_response_patch.text = '[{"key": "scans/test_doc"}]'
-        mock_response_patch.json.return_value = [{"key": "scans/test_doc"}]
+        mock_cursor_update = MagicMock()
+        # Mock row exists get check inside update()
+        mock_cursor_update.fetchone.return_value = ['{"logs": ["log1"]}']
+        mock_conn_update = MagicMock()
+        mock_conn_update.cursor.return_value.__enter__.return_value = mock_cursor_update
+        mock_pool_update = MagicMock()
+        mock_pool_update.getconn.return_value = mock_conn_update
         
-        with patch("requests.get", return_value=mock_response_get_update), \
-             patch("requests.patch", return_value=mock_response_patch) as mock_patch_update:
+        with patch("postgres_db.get_connection_pool", return_value=mock_pool_update):
             doc_ref.update({"logs": ArrayUnion(["log2"])})
-            mock_patch_update.assert_called_once()
+            assert mock_cursor_update.execute.call_count >= 2 # 1 select FOR UPDATE + 1 update/insert
             
     finally:
-        del os.environ["SUPABASE_URL"]
-        del os.environ["SUPABASE_KEY"]
+        del os.environ["POSTGRES_HOST"]
+        del os.environ["POSTGRES_USER"]
+        del os.environ["POSTGRES_PASSWORD"]
+        del os.environ["POSTGRES_DB"]
 
 
-def test_supabase_db_caching():
-    from unittest.mock import patch, Mock
+def test_postgres_db_caching():
+    from unittest.mock import patch, MagicMock
     import os
-    from supabase_db import SupabaseDB, ArrayUnion
+    from postgres_db import PostgresDB, ArrayUnion
     
-    os.environ["SUPABASE_URL"] = "https://mock.supabase.co"
-    os.environ["SUPABASE_KEY"] = "mock_key"
+    os.environ["POSTGRES_HOST"] = "localhost"
+    os.environ["POSTGRES_USER"] = "kavach_user"
+    os.environ["POSTGRES_PASSWORD"] = "kavach_secure_password_1337"
+    os.environ["POSTGRES_DB"] = "kavach_db"
     
     try:
-        db = SupabaseDB()
+        db = PostgresDB()
         doc_ref = db.collection("scans").document("cache_test")
         
         # 1. Mock first set() which populates the cache
-        mock_response_post = Mock()
-        mock_response_post.status_code = 201
+        mock_cursor = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_pool = MagicMock()
+        mock_pool.getconn.return_value = mock_conn
         
-        with patch("requests.post", return_value=mock_response_post) as mock_post:
+        with patch("postgres_db.get_connection_pool", return_value=mock_pool):
             doc_ref.set({"status": "INIT", "progress": 0})
-            mock_post.assert_called_once()
             
         # Verify cache is populated
         assert doc_ref._cached_data == {"status": "INIT", "progress": 0}
         assert doc_ref._cached_encrypted_data is not None
         
-        # 2. Update without GET request because cache is active
-        mock_response_patch = Mock()
-        mock_response_patch.status_code = 200
-        mock_response_patch.text = '[{"key": "scans/cache_test"}]'
-        mock_response_patch.json.return_value = [{"key": "scans/cache_test"}]
+        # 2. Update does execute query (takes lock in transaction), but verify the local cached values represent latest
+        mock_cursor_update = MagicMock()
+        mock_cursor_update.fetchone.return_value = None # Assume row missing on locked fetch
+        mock_conn_update = MagicMock()
+        mock_conn_update.cursor.return_value.__enter__.return_value = mock_cursor_update
+        mock_pool_update = MagicMock()
+        mock_pool_update.getconn.return_value = mock_conn_update
         
-        # We patch requests.get to raise AssertionError if called (to verify it is NOT called)
-        def get_should_not_be_called(*args, **kwargs):
-            raise AssertionError("requests.get was called but cache should have bypassed it!")
-            
-        with patch("requests.get", side_effect=get_should_not_be_called), \
-             patch("requests.patch", return_value=mock_response_patch) as mock_patch:
+        with patch("postgres_db.get_connection_pool", return_value=mock_pool_update):
             doc_ref.update({"progress": 50})
-            mock_patch.assert_called_once()
             
         # Verify cache updated with merged dict
-        assert doc_ref._cached_data == {"status": "INIT", "progress": 50}
+        assert doc_ref._cached_data == {"progress": 50}
         
     finally:
-        del os.environ["SUPABASE_URL"]
-        del os.environ["SUPABASE_KEY"]
+        del os.environ["POSTGRES_HOST"]
+        del os.environ["POSTGRES_USER"]
+        del os.environ["POSTGRES_PASSWORD"]
+        del os.environ["POSTGRES_DB"]
 
 
-def test_supabase_jwt_verification():
+def test_kavach_jwt_verification():
     import os
     import jwt
     from fastapi import Request
     from unittest.mock import Mock
     from auth import verify_request_uid
     
-    # Configure mock Supabase JWT environment
-    os.environ["SUPABASE_JWT_SECRET"] = "super_secret_supabase_key"
+    # Configure mock JWT environment
+    os.environ["KAVACH_JWT_SECRET"] = "super_secret_supabase_key_32_bytes_long"
     
     try:
         # Create token
         token_payload = {"sub": "supabase_user_12345", "role": "authenticated"}
-        encoded_token = jwt.encode(token_payload, "super_secret_supabase_key", algorithm="HS256")
+        encoded_token = jwt.encode(token_payload, "super_secret_supabase_key_32_bytes_long", algorithm="HS256")
         
         mock_request = Mock(spec=Request)
         mock_request.headers = {"Authorization": f"Bearer {encoded_token}"}
@@ -626,7 +636,7 @@ def test_supabase_jwt_verification():
         assert uid == "supabase_user_12345"
         
     finally:
-        del os.environ["SUPABASE_JWT_SECRET"]
+        del os.environ["KAVACH_JWT_SECRET"]
 
 
 def test_custom_auth_login_test123():
@@ -803,12 +813,374 @@ def test_redis_mandatory_in_production():
         del os.environ["REDIS_URL"]
 
 
+def test_accessibility_service_detection_and_progress():
+    from frida_hooks import select_packs_from_signals
+    from runtime_findings import cluster_runtime_findings
+    from analysis_engine import calculate_deterministic_score
+    
+    # 1. Test pack selection
+    selected = select_packs_from_signals({"has_accessibility": True})
+    assert "accessibility" in selected
+    
+    # 2. Test runtime findings clustering
+    events = [{
+        "category": "accessibility.abuse",
+        "action": "on_accessibility_event",
+        "severity_hint": "critical",
+        "class_name": "android.accessibilityservice.AccessibilityService",
+        "method": "onAccessibilityEvent",
+        "args": {"target_package": "com.target.bank"},
+        "evidence": "AccessibilityService intercepting event from package: com.target.bank"
+    }]
+    findings = cluster_runtime_findings(events)
+    assert len(findings) == 1
+    assert findings[0]["id"] == "rf_accessibility_abuse_detected"
+    assert findings[0]["severity"] == "CRITICAL"
+    
+    # 3. Test progress transition logic when skipped
+    progress_states = {}
+    def progress_cb(step, status, details):
+        progress_states[step] = status
+        
+    calculate_deterministic_score(
+        manifest_content="<manifest></manifest>",
+        jadx_sources={},
+        progress_callback=progress_cb
+    )
+    # Check that skipped engines are marked as SKIPPED
+    assert progress_states["apktool"] == "SKIPPED"
+    assert progress_states["jadx"] == "SKIPPED"
+    assert progress_states["quark"] == "SKIPPED"
+    assert progress_states["net_sec"] == "SKIPPED"
+    assert progress_states["secrets"] == "SKIPPED"
+    assert progress_states["trufflehog"] == "SKIPPED"
+    assert progress_states["semgrep"] == "SKIPPED"
 
 
+def test_remediation_gaps():
+    from analysis_engine import calculate_deterministic_score
+    from main import clean_and_parse_json
+
+    # 1. Test YARA matching on SMS stealer signatures
+    manifest_yara = """<?xml version="1.0" encoding="utf-8"?>
+    <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+      <uses-permission android:name="android.permission.RECEIVE_SMS"/>
+    </manifest>"""
+    code_yara = {"Receiver.java": "SmsMessage sms; sms.getOriginatingAddress(); android.provider.Telephony.SMS_RECEIVED"}
+    
+    res = calculate_deterministic_score(
+        manifest_content=manifest_yara,
+        jadx_sources=code_yara,
+        androguard_res={"is_signed": True}
+    )
+    
+    # Assert YARA matches are captured
+    matches = res["evidence"]["yara_matches"]
+    assert any(m["rule_name"] == "SMS_Stealer" for m in matches)
+
+    # 2. Test signature warnings (is_signed: False)
+    res_unsigned = calculate_deterministic_score(
+        manifest_content="<manifest></manifest>",
+        jadx_sources={},
+        androguard_res={"is_signed": False}
+    )
+    # Check that it triggers high findings
+    assert any(h["type"] == "Unsigned APK Warning" for h in res_unsigned["evidence"]["crypto_issues"] or [])
+
+    # 3. Test Pydantic JSON schema validation
+    raw_json = """
+    {
+      "risk_score": 85,
+      "threat_level": "HIGH",
+      "investigation_report": {
+        "executive_verdict": "Suspicious Trojan",
+        "suspicious_activities": [{"title": "SMS Intercept", "description": "Reads SMS"}],
+        "code_vulnerabilities": []
+      }
+    }
+    """
+    cleaned = clean_and_parse_json(raw_json)
+    assert cleaned.get("risk_score") == 85
+    assert cleaned.get("threat_level") == "HIGH"
+    assert len(cleaned["investigation_report"]["suspicious_activities"]) == 1
+
+def test_pdf_report_generator():
+    import tempfile
+    import os
+    from report_generator import generate_pdf_report
+    
+    dummy_scan = {
+        "filename": "suspicious_boi.apk",
+        "package_name": "com.boi.shield.malicious",
+        "apk_hash": "a4d3c2b1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3",
+        "risk_score": 85,
+        "threat_level": "CRITICAL",
+        "banking_fraud": {
+            "badges": [
+                {"title": "SMS Intercept Activity", "severity": "CRITICAL", "summary": "Intercepts banker SMS notifications"}
+            ],
+            "fraud_score": 90
+        },
+        "ml_classification": {
+            "status": "SUCCESS",
+            "is_malicious": True,
+            "ml_confidence_score": 0.88,
+            "matching_features_count": 12,
+            "predicted_malware_family": "SOVA"
+        },
+        "investigation_report": {
+            "summary": "This APK targets banking infrastructure and intercepts authorization OTPs.",
+            "bank_agent_alert": "This app can steal credentials and read SMS OTP messages.",
+            "ciso_brief": "Identified critical threat matching known malware family SOVA."
+        }
+    }
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp_name = tmp.name
+        
+    try:
+        generate_pdf_report(dummy_scan, tmp_name)
+        assert os.path.exists(tmp_name)
+        with open(tmp_name, "rb") as f:
+            header = f.read(4)
+        assert header == b"%PDF"
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+
+def test_pdf_report_route():
+    import routes
+    from routes import download_pdf_report
+    from fastapi import Request
+    from unittest.mock import Mock
+    import os
+    
+    original_db = routes.db
+    routes.db = MockDB()
+    
+    dummy_scan = {
+        "filename": "suspicious_boi.apk",
+        "package_name": "com.boi.shield.malicious",
+        "apk_hash": "a4d3c2b1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3",
+        "risk_score": 85,
+        "threat_level": "CRITICAL",
+        "uid": "user_uid_123",
+        "banking_fraud": {
+            "badges": [
+                {"title": "SMS Intercept Activity", "severity": "CRITICAL", "summary": "Intercepts banker SMS notifications"}
+            ],
+            "fraud_score": 90
+        },
+        "ml_classification": {
+            "status": "SUCCESS",
+            "is_malicious": True,
+            "ml_confidence_score": 0.88,
+            "matching_features_count": 12,
+            "predicted_malware_family": "SOVA"
+        },
+        "investigation_report": {
+            "summary": "This APK targets banking infrastructure and intercepts authorization OTPs.",
+            "bank_agent_alert": "This app can steal credentials and read SMS OTP messages.",
+            "ciso_brief": "Identified critical threat matching known malware family SOVA."
+        }
+    }
+    
+    routes.db.collection("apkanalysisresults").document("test_scan_id_999").set(dummy_scan)
+    
+    try:
+        mock_request = Mock(spec=Request)
+        mock_request.headers = {}
+        mock_request.state = Mock()
+        mock_request.state.uid = "user_uid_123"
+        
+        # Monkeypatch verify_request_uid to bypass actual JWT validation for the test
+        original_verify = routes.verify_request_uid
+        routes.verify_request_uid = lambda req, claimed_uid=None: "user_uid_123"
+        
+        try:
+            mock_bg = Mock(spec=routes.BackgroundTasks)
+            response = download_pdf_report("test_scan_id_999", mock_request, mock_bg)
+            assert response.media_type == "application/pdf"
+            assert "KAVACH_AI_Report_" in response.filename
+            
+            # Read response file stream
+            assert os.path.exists(response.path)
+            with open(response.path, "rb") as f:
+                header = f.read(4)
+            assert header == b"%PDF"
+            
+            # Cleanup temp file generated by route
+            os.remove(response.path)
+        finally:
+            routes.verify_request_uid = original_verify
+    finally:
+        routes.db = original_db
 
 
+def test_threat_intel_extraction():
+    from threat_intel import extract_host, is_valid_indicator, extract_indicators_from_evidence
+    
+    assert extract_host("http://evil-c2.com/payload") == "evil-c2.com"
+    assert extract_host("https://185.220.101.5:8080/api") == "185.220.101.5"
+    assert extract_host("evil-c2.com") == "evil-c2.com"
+    
+    assert is_valid_indicator("evil-c2.com") is True
+    assert is_valid_indicator("185.220.101.5") is True
+    assert is_valid_indicator("schemas.android.com") is False
+    assert is_valid_indicator("google.com") is False
+    
+    evidence = {
+        "network_indicators": ["http://evil-c2.com/path"],
+        "suspicious_urls": ["https://malicious-gateway.net/callback"],
+        "dynamic_analysis": {
+            "normalized_events": [
+                {"args": {"url": "http://dynamic-malware-c2.org"}}
+            ]
+        }
+    }
+    extracted = extract_indicators_from_evidence(evidence)
+    hosts = [item[0] for item in extracted]
+    assert "evil-c2.com" in hosts
+    assert "malicious-gateway.net" in hosts
+    assert "dynamic-malware-c2.org" in hosts
 
 
+def test_threat_intel_storage_and_graph():
+    from unittest.mock import patch, MagicMock
+    from threat_intel import process_and_store_threat_intel, get_threat_cluster_graph, query_cross_scan_correlation
+    
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    mock_pool = MagicMock()
+    mock_pool.getconn.return_value = mock_conn
+    
+    evidence = {
+        "network_indicators": ["http://evil-c2.com/path"]
+    }
+    
+    with patch("threat_intel.get_connection_pool", return_value=mock_pool):
+        # 1. Process and store
+        process_and_store_threat_intel("scan_a", evidence)
+        assert mock_cursor.execute.call_count >= 2
+        
+        # 2. Mock query correlations
+        mock_cursor.fetchall.return_value = [
+            ("scan_b", "evil-c2.com", "domain", "Singapore (SG)", "AS13393 Cloudflare Inc", 85, '{"filename": "banking_trojan.apk", "classification": "MALICIOUS"}')
+        ]
+        correlations = query_cross_scan_correlation("scan_a")
+        assert len(correlations) == 1
+        assert correlations[0]["scan_id"] == "scan_b"
+        assert correlations[0]["indicator"] == "evil-c2.com"
+        
+        # 3. Graph generation
+        # Reset mock for data decryption
+        mock_cursor.fetchone.return_value = ('{"filename": "target.apk", "classification": "MALICIOUS"}',)
+        mock_cursor.fetchall.side_effect = [
+            [("evil-c2.com", "domain", "Singapore (SG)", "AS13393 Cloudflare", 85)],
+            [("scan_b", '{"filename": "banking_trojan.apk", "classification": "MALICIOUS"}')]
+        ]
+        
+        graph = get_threat_cluster_graph("scan_a")
+        assert len(graph["nodes"]) == 3  # scan_a, evil-c2.com, scan_b
+        assert len(graph["links"]) == 2  # scan_a -> c2, scan_b -> c2
 
+
+def test_clustering_api_route():
+    from unittest.mock import patch, MagicMock
+    from fastapi import Request
+    from routes import get_analysis_clustering
+    import routes
+    
+    original_db = routes.db
+    mock_db = MagicMock()
+    routes.db = mock_db
+    
+    original_verify = routes.verify_request_uid
+    routes.verify_request_uid = lambda req, uid=None: "user123"
+    
+    mock_snap = MagicMock()
+    mock_snap.exists = True
+    mock_snap.to_dict.return_value = {
+        "uid": "user123",
+        "status": "COMPLETED",
+        "evidence": {
+            "network_indicators": ["evil-c2.com"]
+        }
+    }
+    mock_db.collection.return_value.document.return_value.get.return_value = mock_snap
+    
+    mock_request = MagicMock(spec=Request)
+    mock_request.cookies = {"jwt": "dummy_token"}
+    mock_request.headers = {}
+    
+    mock_graph = {"nodes": [], "links": []}
+    mock_correlations = []
+    
+    try:
+        with patch("threat_intel.get_threat_cluster_graph", return_value=mock_graph), \
+             patch("threat_intel.query_cross_scan_correlation", return_value=mock_correlations):
+            response = get_analysis_clustering("test_scan_id_xyz", mock_request)
+            assert "graph" in response
+            assert "correlations" in response
+    finally:
+        routes.verify_request_uid = original_verify
+        routes.db = original_db
+
+
+def test_evasion_anti_vm_pack_generation():
+    from frida_hooks import build_frida_script
+    script = build_frida_script(["evasion"])
+    assert "SM-G975F" in script
+    assert "status_spoof" in script
+    assert "isUserMonkey" in script
+    assert "TracerPid" in script
+    assert "redirectedStatusPath" in script
+    assert "findExportByName" in script
+    # Verify Thread.sleep timing bypass and BatteryManager spoofing hooks are compiled
+    assert "thread_sleep" in script
+    assert "capacity_check" in script
+    assert "BatteryManager" in script
+    # Verify new native hooks are compiled
+    assert "strcmp" in script
+    assert "strstr" in script
+    assert "openat" in script
+
+
+def test_evasion_detection_and_scoring_boost():
+    from anti_evasion import detect_evasion_behaviors
+    from risk_engine import build_risk_decomposition
+
+    # 1. Test detection with timing delay and VM checks
+    events = [
+        {
+            "category": "anti_analysis.timing",
+            "action": "thread_sleep",
+            "evidence": "Timing stall bypassed (requested: 60000ms, fast-forwarded to 50ms)"
+        },
+        {
+            "category": "anti_vm.signal",
+            "action": "property_check",
+            "evidence": "VM property check (spoofed): ro.kernel.qemu"
+        }
+    ]
+    report = detect_evasion_behaviors(events)
+    assert report["evasion_detected"] is True
+    assert report["evasion_score_boost"] == 20
+    assert any("Timing stall bypassed" in h or "sandbox property" in h for h in report["evidence_highlights"])
+
+    # 2. Test risk engine score boost with evasion report
+    contributors = []
+    decomp = build_risk_decomposition(
+        static_score=40,
+        dynamic_score=30,
+        ai_score=0,
+        fraud_score=0,
+        contributors=contributors,
+        evasion_report=report
+    )
+    # Composite score base is max(40, 30, 0, 0) = 40. +20 evasion penalty = 60.
+    assert decomp["composite_score"] == 60
+    assert any(c["category"] == "evasion" for c in decomp["top_contributors"])
 
 

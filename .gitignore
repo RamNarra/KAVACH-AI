@@ -27,3 +27,9 @@ HACKATHON_SUBMISSION.md
 backend/tmp_scans/
 backend/.env
 *.env
+
+# Local agent memory and docs
+internal-docs/
+.agents/
+graphify-out/
+scratch/

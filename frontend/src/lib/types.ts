@@ -1,135 +1,297 @@
-export type ThreatLevel = 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-export type AnalysisStatus = 'PROCESSING' | 'COMPLETED' | 'FAILED';
+// TypeScript type definitions for all KAVACH AI API payloads
 
-export interface FraudBadge {
-  id: string;
-  title: string;
-  severity: string;
-  summary: string;
-  evidence?: string[];
+export type ThreatLevel = 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export type ScanStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+
+export interface User {
+  uid: string;
+  username: string;
+  token: string;
 }
 
-export interface VirusTotalSummary {
-  status?: string;
-  reason?: string;
-  malicious?: number;
-  undetected?: number;
-  total?: number;
-  permalink?: string;
+export interface AuthResponse {
+  token: string;
+  uid: string;
+  username: string;
+}
+
+export interface ScanProgress {
+  download?: string;
+  jadx?: string;
+  androguard?: string;
+  gemini?: string;
+  finalize?: string;
+  dynamic_sandbox?: string;
+}
+
+export interface Permission {
+  permission: string;
+  status: string;
+  description: string;
+}
+
+export interface Finding {
+  title: string;
+  description: string;
+  severity: string;
+  file?: string;
+  type?: string;
+  name?: string;
+}
+
+export interface BankingFraudBadge {
+  id: string;
+  title: string;
+  summary: string;
+  severity: string;
+  details?: string[];
 }
 
 export interface AttackTechnique {
   id: string;
   name: string;
   tactic: string;
-  sources?: { source: string; detail: string }[];
+  description?: string;
+}
+
+export interface InvestigationReport {
+  summary?: string;
+  dynamic_summary?: string;
+  final_report?: string;
+  executive_verdict?: string;
+  runtime_findings_interpretation?: string;
+  static_confirmed_at_runtime?: string[];
+  runtime_only_findings?: string[];
+  analysis_limitations?: string;
+  permissions_analysis?: Permission[];
+  suspicious_activities?: Finding[];
+  code_vulnerabilities?: Finding[];
+  recommendations?: string[];
 }
 
 export interface RiskDecomposition {
-  composite_score?: number;
-  confidence?: string;
-  summary?: string;
-  components?: Record<string, number>;
-  weights?: Record<string, number>;
-  weighted_contribution?: Record<string, number>;
-  top_contributors?: { label: string; category: string; weight: number }[];
-  absolute_score?: number;
+  static_score: number;
+  dynamic_score: number;
+  ai_score: number;
+  fraud_score: number;
+  composite_score: number;
+  contributors?: Record<string, number>;
 }
 
-export interface AnalysisDoc {
+export interface DynamicAnalysisResult {
+  status: string;
+  event_count: number;
+  events?: unknown[];
+  normalized_events?: unknown[];
+  trigger_transcript?: unknown[];
+  runtime_findings?: unknown[];
+  error_message?: string;
+  has_video?: boolean;
+  video_path?: string;
+  current_screenshot?: string;
+  screenshot_ts?: string;
+  run_metadata?: {
+    sandbox_status: string;
+    event_count: number;
+    duration_seconds: number;
+    hook_packs?: string[];
+  };
+}
+
+export interface CertificateInfo {
+  is_signed?: boolean;
+  verdict?: 'UNSIGNED' | 'DEBUG_KEY_SIGNED' | 'LEGIT_MATCHED_SIGNER' | 'MISMATCHED_SIGNER_FOR_KNOWN_BANK_PACKAGE' | 'UNKNOWN_SELF_SIGNED_DEVELOPER';
+  verdict_description?: string;
+  subject?: string;
+  issuer?: string;
+  sha256?: string;
+  valid_from?: string;
+  valid_to?: string;
+  serial_number?: string;
+}
+
+export interface YaraMatch {
+  rule: string;
+  namespace?: string;
+  tags?: string[];
+  meta?: {
+    family?: string;
+    description?: string;
+    severity?: string;
+    [key: string]: unknown;
+  };
+  strings?: unknown[];
+}
+
+export interface CallGraphNode {
   id: string;
-  status: AnalysisStatus;
+  label: string;
+  class: string;
+  method: string;
+  type: string;
+  tags: string[];
+  risk: 'benign' | 'malicious' | 'high-risk';
+}
+
+export interface CallGraphEdge {
+  id: string;
+  from: string;
+  to: string;
+  kind: string;
+  risk: string;
+}
+
+export interface CallGraph {
+  nodes: CallGraphNode[];
+  edges: CallGraphEdge[];
+}
+
+export interface EvasionReport {
+  evasion_detected: boolean;
+  evasion_score_boost: number;
+  evidence_highlights: string[];
+  categories_triggered: {
+    vm: boolean;
+    timing: boolean;
+    root_frida: boolean;
+    battery: boolean;
+  };
+}
+
+export interface DangerousLine {
+  line_number: number;
+  threat_action: string;
+  severity: string;
+  source_line_content?: string;
+  is_verified?: boolean;
+}
+
+export interface SuspiciousMethod {
+  method_name: string;
+  description: string;
+  apis_used: string[];
+}
+
+export interface ClassAutopsyResult {
+  class_name: string;
+  is_malicious: boolean;
+  attack_category: string;
+  confidence: number;
+  rationale: string;
+  suspicious_methods: SuspiciousMethod[];
+  dangerous_lines: DangerousLine[];
+  mitre_technique_id?: string;
+  mitre_technique_name?: string;
+  _verified_count?: number;
+  _total_claimed?: number;
+  plain_english_summary?: string;
+  source?: string;
+}
+
+export interface CodeAutopsyReport {
+  autopsy_status: 'SKIPPED' | 'RUNNING' | 'COMPLETE' | 'PARTIAL' | 'FAILED';
+  total_classes_inspected: number;
+  malicious_classes_found: number;
+  class_results: ClassAutopsyResult[];
+  top_smoking_guns: DangerousLine[];
+  overall_threat_narrative: string;
+  banking_attack_chain: string;
+  error?: string;
+}
+
+export interface Evidence {
+  permissions?: Finding[];
+  exported_components?: Finding[];
+  dangerous_manifest_flags?: Finding[];
+  network_indicators?: Finding[];
+  data_storage_issues?: Finding[];
+  crypto_issues?: Finding[];
+  hardcoded_secrets?: Finding[];
+  suspicious_urls?: Finding[];
+  reflection_dynamic_loading?: Finding[];
+  obfuscation_signals?: Finding[];
+  malware_rule_hits?: Finding[];
+  dynamic_analysis?: DynamicAnalysisResult;
+  certificate_info?: CertificateInfo;
+  yara_matches?: YaraMatch[];
+  callgraph?: CallGraph;
+}
+
+export interface BankingFraud {
+  fraud_score: number;
+  badges?: BankingFraudBadge[];
+  recommended_actions?: string[];
+}
+
+export interface AnalysisResult {
+  id?: string;
+  uid?: string;
   filename?: string;
   package_name?: string;
+  status: ScanStatus;
   risk_score?: number;
   threat_level?: ThreatLevel;
   absolute_threat_score?: number;
-  error_message?: string;
   created_at?: string;
-  email?: string;
+  updated_at?: string;
+  apk_url?: string;
+  apk_hash?: string;
+  progress?: ScanProgress;
+  logs?: string[];
+  investigation_report?: InvestigationReport;
   static_analysis?: {
     risk_score?: number;
-    threat_level?: ThreatLevel;
-    absolute_threat_score?: number;
-    banking_fraud?: {
-      fraud_score?: number;
-      badges?: FraudBadge[];
-      recommended_actions?: string[];
-      indicator_count?: number;
-    };
-    risk_decomposition?: RiskDecomposition;
-    attack_techniques?: AttackTechnique[];
-    investigation_report?: {
-      summary?: string;
-      bank_agent_alert?: string;
-      ciso_brief?: string;
-      reverse_engineering_summary?: string;
-      static_analysis_summary?: string;
-      dynamic_analysis_summary?: string;
-      executive_verdict?: string;
-      dynamic_summary?: string;
-      final_report?: string;
-      runtime_findings_interpretation?: string;
-      static_confirmed_at_runtime?: string[];
-      runtime_only_findings?: string[];
-      analysis_limitations?: string;
-      suspicious_activities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
-      code_vulnerabilities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
-      recommendations?: string[];
-    };
+    investigation_report?: InvestigationReport;
   };
-  progress?: Record<string, string>;
-  logs?: string[];
-  banking_fraud?: {
-    fraud_score?: number;
-    badges?: FraudBadge[];
-    recommended_actions?: string[];
-    indicator_count?: number;
-  };
+  evidence?: Evidence;
+  banking_fraud?: BankingFraud;
   risk_decomposition?: RiskDecomposition;
   attack_techniques?: AttackTechnique[];
-  family_signals?: {
-    anti_vm?: { description?: string; match?: string }[];
-    packers_obfuscators?: { description?: string; type?: string }[];
+  executive_verdict?: string;
+  error_message?: string;
+  code_autopsy?: CodeAutopsyReport;
+  evasion_report?: EvasionReport;
+  ml_classification?: {
+    predicted_malware_family?: string;
+    ml_confidence_score?: number;
+    is_malicious?: boolean;
+    status?: string;
+    error?: string;
   };
-  investigation_report?: {
-    summary?: string;
-    bank_agent_alert?: string;
-    ciso_brief?: string;
-    reverse_engineering_summary?: string;
-    static_analysis_summary?: string;
-    dynamic_analysis_summary?: string;
-    executive_verdict?: string;
-    dynamic_summary?: string;
-    final_report?: string;
-    runtime_findings_interpretation?: string;
-    static_confirmed_at_runtime?: string[];
-    runtime_only_findings?: string[];
-    analysis_limitations?: string;
-    suspicious_activities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
-    code_vulnerabilities?: { title: string; description: string; severity?: string; evidence_source?: string }[];
-    recommendations?: string[];
-  };
-  evidence?: {
-    permissions?: { name?: string; description?: string; risk_score?: number }[];
-    exported_components?: { name?: string; type?: string; risk_score?: number; description?: string }[];
-    dangerous_manifest_flags?: { flag?: string; risk_score?: number; description?: string }[];
-    network_indicators?: { type?: string; risk_score?: number; description?: string; file?: string; source?: string }[];
-    data_storage_issues?: { type?: string; risk_score?: number; description?: string; file?: string; severity?: string; rule?: string }[];
-    crypto_issues?: { type?: string; risk_score?: number; description?: string; file?: string; severity?: string; rule?: string }[];
-    hardcoded_secrets?: { type?: string; risk_score?: number; description?: string; file?: string; severity?: string }[];
-    suspicious_urls?: { url?: string; file?: string; type?: string; value?: string; risk_score?: number; severity?: string; description?: string }[];
-    reflection_dynamic_loading?: { type?: string; risk_score?: number; description?: string; file?: string; severity?: string }[];
-    obfuscation_signals?: { type?: string; risk_score?: number; description?: string; file?: string; match?: string; class?: string; severity?: string }[];
-    malware_rule_hits?: { rule?: string; description?: string; severity?: string; confidence?: string; risk_score?: number; type?: string; match?: string; file?: string }[];
-    virustotal?: VirusTotalSummary;
-    mobsf_scorecard?: { title?: string; description?: string; severity?: string; type?: string }[];
-    dynamic_analysis?: {
-      status?: string;
-      runtime_findings?: { id?: string; title?: string; summary?: string; severity?: string }[];
-      normalized_events?: unknown[];
-      trigger_transcript?: unknown[];
-      run_metadata?: Record<string, unknown>;
-    };
-  };
+}
+
+export interface HistoryItem {
+  id?: string;
+  filename?: string;
+  package_name?: string;
+  status: ScanStatus;
+  risk_score?: number;
+  threat_level?: ThreatLevel;
+  created_at?: string;
+}
+
+export interface ClusterNode {
+  id: string;
+  label: string;
+  type: string;
+  severity?: string;
+  count?: number;
+}
+
+export interface ClusterLink {
+  source: string;
+  target: string;
+  weight?: number;
+}
+
+export interface ClusterGraph {
+  nodes: ClusterNode[];
+  links: ClusterLink[];
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
 }

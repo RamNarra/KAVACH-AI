@@ -1,7 +1,7 @@
 """
-Session-scoped request ownership and asymmetric JWT authentication.
+Session-scoped request ownership and asymmetric/symmetric JWT authentication.
 
-Supports JWT verification via Supabase REST RPC when configured, falling
+Supports local HS256/RS256 JWT validation, falling
 back to RS256 with a transient RSA keypair for local demonstration, alongside
 traditional high-entropy session headers.
 """
@@ -30,11 +30,11 @@ is_production = os.getenv("KAVACH_ENV", "development").strip().lower() == "produ
 # Load JWT keys from env if provided (persistent), otherwise generate transient keypair
 _private_key_env = os.getenv("KAVACH_JWT_PRIVATE_KEY", "").strip()
 _public_key_env = os.getenv("KAVACH_JWT_PUBLIC_KEY", "").strip()
-_supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
+_kavach_jwt_secret = os.getenv("KAVACH_JWT_SECRET", "").strip()
 
-if is_production and not _private_key_env and not _supabase_jwt_secret:
+if is_production and not _private_key_env and not _kavach_jwt_secret:
     raise RuntimeError(
-        "CRITICAL CONFIGURATION ERROR: Either KAVACH_JWT_PRIVATE_KEY or SUPABASE_JWT_SECRET must be configured in production environment."
+        "CRITICAL CONFIGURATION ERROR: Either KAVACH_JWT_PRIVATE_KEY or KAVACH_JWT_SECRET must be configured in production environment."
     )
 
 _PRIVATE_KEY = None
@@ -81,14 +81,16 @@ def get_session_header_name() -> str:
 
 
 def is_admin_request(request: Request) -> bool:
+    import hmac
     admin_token = os.getenv(ADMIN_TOKEN_ENV, "").strip()
-    if not admin_token:
+    # Reject weak or unconfigured admin tokens (must be at least 32 characters long)
+    if not admin_token or len(admin_token) < 32:
         return False
 
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
-        if token == admin_token:
+        if hmac.compare_digest(token, admin_token):
             return True
         try:
             pub_key = os.getenv("KAVACH_JWT_PUBLIC_KEY", _PUBLIC_PEM)
@@ -98,14 +100,15 @@ def is_admin_request(request: Request) -> bool:
         except Exception:
             pass
 
-    return request.headers.get("X-Kavach-Admin", "").strip() == admin_token
+    x_admin = request.headers.get("X-Kavach-Admin", "").strip()
+    return hmac.compare_digest(x_admin, admin_token)
 
 
 def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:
     """
     Return the validated session owner id (UID) for this request.
 
-    Supports JWT validation via Supabase JWT or local Authorization bearer tokens,
+    Supports JWT validation via local HS256/RS256 token validation,
     falling back to X-Kavach-Session headers and legacy query params.
     """
     # 1. Check dynamic JWT Bearer token in Authorization header or token query parameter
@@ -118,47 +121,30 @@ def verify_request_uid(request: Request, claimed_uid: Optional[str]) -> str:
     if auth_header.startswith("Bearer "):
         token = auth_header[7:].strip()
         
-        # A. Try Supabase JWT verification first if SUPABASE_JWT_SECRET is set
-        supabase_jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
-        if supabase_jwt_secret:
-            try:
-                decoded = jwt.decode(
-                    token, 
-                    supabase_jwt_secret, 
-                    algorithms=["HS256", "RS256"], 
-                    options={"verify_aud": False}
-                )
-                uid = decoded.get("sub") or decoded.get("uid")
-                if uid:
-                    return str(uid)
-            except jwt.ExpiredSignatureError:
-                raise HTTPException(status_code=401, detail="Supabase JWT signature has expired.")
-            except jwt.InvalidTokenError as e:
-                logger.debug(f"Supabase JWT decode failed: {e}. Trying local JWT fallback.")
-        
-        # B. Fallback to local JWT verification
+        # Try local HS256/RS256 JWT verification using KAVACH_JWT_SECRET or RSA keys
+        kavach_jwt_secret = os.getenv("KAVACH_JWT_SECRET", "").strip()
         try:
             try:
                 header = jwt.get_unverified_header(token)
-                alg = header.get("alg", "RS256")
+                alg = header.get("alg", "HS256")
             except Exception:
-                alg = "RS256"
+                alg = "HS256"
 
             if alg == "HS256":
-                secret = os.getenv("SUPABASE_JWT_SECRET")
-                if not secret:
-                    raise HTTPException(status_code=500, detail="Backend configuration error: SUPABASE_JWT_SECRET is missing on the host.")
-                decoded = jwt.decode(token, secret.strip(), algorithms=["HS256"])
+                if not kavach_jwt_secret:
+                    raise HTTPException(status_code=500, detail="Backend configuration error: KAVACH_JWT_SECRET is missing on the host.")
+                decoded = jwt.decode(token, kavach_jwt_secret, algorithms=["HS256"], options={"verify_aud": False})
             else:
                 pub_key = os.getenv("KAVACH_JWT_PUBLIC_KEY", _PUBLIC_PEM)
-                decoded = jwt.decode(token, pub_key, algorithms=["RS256"])
+                decoded = jwt.decode(token, pub_key, algorithms=["RS256"], options={"verify_aud": False})
+            
             uid = decoded.get("sub") or decoded.get("uid")
             if uid:
                 return str(uid)
         except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="JWT signature has expired.")
+            raise HTTPException(status_code=401, detail="JWT token signature has expired.")
         except jwt.InvalidTokenError as e:
-            raise HTTPException(status_code=401, detail=f"Invalid JWT: {e}")
+            raise HTTPException(status_code=401, detail=f"Invalid JWT token: {e}")
 
     # 2. Check if admin or legacy override is active
     if is_admin_request(request):

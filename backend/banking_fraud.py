@@ -28,40 +28,61 @@ BANK_KEYWORDS = re.compile(
 
 KNOWN_INDIAN_TROJAN_FAMILIES = {
     "SOVA": {
-        "signatures": ["sova", "sovacorp", "accessibility_stealer"],
-        "targets": ["SBI YONO", "HDFC Bank", "ICICI iMobile", "Kotak 811"],
+        "signatures": ["sova", "sovacorp", "accessibility_stealer", "sovabanking", "sovarat", "update_service_run"],
+        "targets": ["SBI YONO", "HDFC Bank", "ICICI iMobile", "Kotak 811", "Canara Bank", "Union Bank"],
         "technique": "Overlay + Cookie Theft + Clipboard Monitor",
         "active_since": "2021",
         "indian_incident_count": 312,
     },
     "BRATA": {
-        "signatures": ["brata", "remote_wipe", "factory_reset"],
-        "targets": ["Paytm", "PhonePe", "Google Pay"],
+        "signatures": ["brata", "remote_wipe", "factory_reset", "device_admin_lock", "bratabanking", "bratarat"],
+        "targets": ["Paytm", "PhonePe", "Google Pay", "BHIM UPI", "Axis Mobile"],
         "technique": "Remote Wipe After Transfer",
         "active_since": "2022",
         "indian_incident_count": 87,
     },
     "Xenomorph": {
-        "signatures": ["xenomorph", "hadopro", "accessibility_watcher"],
-        "targets": ["SBI YONO", "HDFC Bank", "ICICI iMobile"],
+        "signatures": ["xenomorph", "hadopro", "accessibility_watcher", "xenooverlay", "hadopro_family", "xenoservice"],
+        "targets": ["SBI YONO", "HDFC Bank", "ICICI iMobile", "Axis Mobile", "PNB One"],
         "technique": "Accessibility hijacking + overlay injection",
         "active_since": "2021",
         "indian_incident_count": 140,
     },
     "Cerberus_India": {
-        "signatures": ["cerberus", "grub", "pingback_url"],
-        "targets": ["Paytm", "SBI YONO", "HDFC Bank"],
+        "signatures": ["cerberus", "grub", "pingback_url", "cerb_sms", "cerberusrat", "cerberus_family"],
+        "targets": ["Paytm", "SBI YONO", "HDFC Bank", "ICICI iMobile", "PhonePe"],
         "technique": "SMS Interception + Keylogging",
         "active_since": "2020",
         "indian_incident_count": 450,
     },
     "Drinik": {
-        "signatures": ["drinik", "income_tax", "itr"],
-        "targets": ["Indian Income Tax portal clones"],
+        "signatures": ["drinik", "income_tax", "itr", "refund_claim", "drinikrat", "tax_refund_form"],
+        "targets": ["Indian Income Tax portal clones", "SBI YONO", "ICICI iMobile", "HDFC Bank"],
         "technique": "Phishing + Accessibility Screen Reader",
         "active_since": "2021",
         "indian_incident_count": 1200,
     },
+    "SpyNote": {
+        "signatures": ["spynote", "cypher_rat", "spynoterat", "device_audio_record", "spynote_service"],
+        "targets": ["OTP SMS Sniffing", "Google Authenticator", "WhatsApp API"],
+        "technique": "RAT + OTP / Authenticator Exfiltration",
+        "active_since": "2020",
+        "indian_incident_count": 850,
+    },
+    "Anubis": {
+        "signatures": ["anubis", "anubispaket", "anubisrat", "anubisfraud"],
+        "targets": ["SBI YONO", "HDFC Bank", "Axis Mobile", "ICICI iMobile", "Kotak 811"],
+        "technique": "SMS Grabber + Overlay Phishing + Ransomware",
+        "active_since": "2019",
+        "indian_incident_count": 280,
+    },
+    "TeaBot": {
+        "signatures": ["teabot", "anvil", "teafraud", "teabot_keylogger"],
+        "targets": ["SBI YONO", "Paytm", "PhonePe", "Google Pay"],
+        "technique": "Real-time Screen Streaming + Keylogging",
+        "active_since": "2021",
+        "indian_incident_count": 190,
+    }
 }
 
 
@@ -143,13 +164,26 @@ def analyze_banking_fraud(
     
     if BFL >= 5.0:
         for trojan_name, info in KNOWN_INDIAN_TROJAN_FAMILIES.items():
+            matches_count = 0
+            package_matched = False
+            matched_sigs = []
             for sig in info["signatures"]:
-                pattern = rf"(?:\b|\.){re.escape(sig.lower())}(?:\b|\.)"
-                if re.search(pattern, search_space):
-                    matched_trojan = trojan_name
-                    matched_trojan_details = info
-                    break
-            if matched_trojan:
+                sig_lower = sig.lower()
+                pattern = rf"(?:\b|\.){re.escape(sig_lower)}(?:\b|\.)"
+                
+                # Check package name match specifically
+                if re.search(pattern, package_name.lower()):
+                    package_matched = True
+                    matched_sigs.append(sig)
+                    matches_count += 1
+                elif re.search(pattern, search_space):
+                    matched_sigs.append(sig)
+                    matches_count += 1
+            
+            # Require either a package name match OR at least 2 independent signature hits
+            if package_matched or matches_count >= 2:
+                matched_trojan = trojan_name
+                matched_trojan_details = info
                 break
 
     if matched_trojan:

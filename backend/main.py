@@ -43,6 +43,7 @@ import xml.etree.ElementTree as ET
 import threading
 from urllib.parse import urlparse, unquote, urljoin
 from typing import Dict, List, Any
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -61,6 +62,7 @@ from analysis_engine import calculate_deterministic_score
 from banking_fraud import analyze_banking_fraud
 from attack_mapping import map_evidence_to_attack
 from risk_engine import build_risk_decomposition, derive_dynamic_score, build_contributors
+from ml_classifier import predict_apk_risk
 from auth import verify_request_uid
 from frida_hooks import select_packs_from_signals
 from runtime_findings import (
@@ -396,11 +398,12 @@ if os.path.isdir(tools_dir):
 # Load environment configurations
 PROJECT_ID = os.environ.get("PROJECT_ID", "kavach-ai-497708")
 LOCATION = os.environ.get("LOCATION", "global")
-STATIC_MODEL = os.environ.get("KAVACH_STATIC_MODEL", "gemini-3.5-flash")
-DYNAMIC_MODEL = os.environ.get("KAVACH_DYNAMIC_MODEL", "gemini-3.5-flash")
-CHAT_MODEL = os.environ.get("KAVACH_CHAT_MODEL", "gemini-3.5-flash")
+STATIC_MODEL = os.environ.get("KAVACH_STATIC_MODEL", "gemini-2.5-flash")
+DYNAMIC_MODEL = os.environ.get("KAVACH_DYNAMIC_MODEL", "gemini-2.5-flash")
+CHAT_MODEL = os.environ.get("KAVACH_CHAT_MODEL", "gemini-2.5-flash")
 MODEL_NAME = STATIC_MODEL
 FALLBACK_MODEL = os.environ.get("KAVACH_FALLBACK_MODEL", "gemini-3.1-flash-lite")
+
 
 # Decide where to put temporary extraction files to avoid RAM exhaustion on tmpfs systems
 SCAN_TEMP_DIR = os.environ.get("SCAN_TEMP_DIR", os.path.join(_BACKEND_DIR, "tmp_scans"))
@@ -594,27 +597,35 @@ def _get_genai_client_by_uid(uid: str | None) -> Any:
 
 
 class GeminiRateLimiter:
-    def __init__(self, rpm: int = 15):
+    def __init__(self, rpm: int = 15, burst: int = 5):
+        self.rpm = rpm
+        self.burst = burst
         self.interval = 60.0 / rpm
-        self.last_request_time = 0.0
+        self.tokens = float(burst)
+        self.last_update = time.time()
         self.lock = threading.Lock()
 
     def wait_if_needed(self):
-        sleep_time = 0.0
+        required_wait = 0.0
         with self.lock:
             now = time.time()
-            next_allowed = self.last_request_time + self.interval
-            if now < next_allowed:
-                sleep_time = next_allowed - now
-                self.last_request_time = next_allowed
-            else:
-                self.last_request_time = now
+            elapsed = now - self.last_update
+            self.tokens = min(float(self.burst), self.tokens + elapsed / self.interval)
+            self.last_update = now
+            
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return
+                
+            required_wait = (1.0 - self.tokens) * self.interval
+            self.tokens = 0.0
+            self.last_update = now + required_wait
+            
+        if required_wait > 0.0:
+            logger.info(f"Gemini API rate limiting active. Sleeping for {required_wait:.2f} seconds...")
+            time.sleep(required_wait)
 
-        if sleep_time > 0.0:
-            logger.info(f"Gemini API rate limiting active (15 RPM limit). Sleeping for {sleep_time:.2f} seconds...")
-            time.sleep(sleep_time)
-
-gemini_limiter = GeminiRateLimiter(rpm=15)
+gemini_limiter = GeminiRateLimiter(rpm=15, burst=5)
 
 def generate_content_with_fallback(
     client,
@@ -637,12 +648,10 @@ def generate_content_with_fallback(
         
     # The user's requested fallback sequence
     models_to_try = [
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3.1-pro",
         "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash"
+        "gemini-3.1-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-3.5-flash"
     ]
     
     # Ensure the parameterized model is at the front of the try list if not already
@@ -669,31 +678,8 @@ def generate_content_with_fallback(
     logger.error("All models in the fallback chain failed to generate content.")
     raise last_exc
 
-# Initialize FastAPI App
-app = FastAPI(
-    title="Kavach AI API",
-    description="Generative AI-Based APK Malware Analysis Backend",
-    version="1.0.0"
-)
-
-# Enable CORS for frontend integration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.getenv(
-            "KAVACH_CORS_ORIGINS",
-            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080",
-        ).split(",")
-        if origin.strip()
-    ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.on_event("startup")
-def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     # Run cleanup in a background daemon thread to avoid blocking API startup
     cleanup_thread = threading.Thread(
         target=_cleanup_stale_scan_artifacts,
@@ -738,6 +724,33 @@ def startup_event():
     except Exception as e:
         logger.error(f"[sandbox] Error starting sandbox bootstrap: {e}")
 
+    yield
+
+# Initialize FastAPI App
+app = FastAPI(
+    title="Kavach AI API",
+    description="Generative AI-Based APK Malware Analysis Backend",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Enable CORS for frontend integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv(
+            "KAVACH_CORS_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080,http://127.0.0.1:8080",
+        ).split(",")
+        if origin.strip()
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 class AnalysisRequest(BaseModel):
     apk_url: str
     email: str | None = None
@@ -745,6 +758,7 @@ class AnalysisRequest(BaseModel):
     filename: str | None = None
     profile: str = "default"
     deep_scan: bool = True
+    force_rescan: bool = False
 
 class ChatRequest(BaseModel):
     analysis_id: str
@@ -1292,7 +1306,7 @@ def calculate_absolute_threat_score(evidence: dict, banking_fraud: dict = None) 
         "permissions", "exported_components", "dangerous_manifest_flags", 
         "network_indicators", "data_storage_issues", "crypto_issues", 
         "hardcoded_secrets", "suspicious_urls", "reflection_dynamic_loading", 
-        "obfuscation_signals", "malware_rule_hits"
+        "obfuscation_signals", "malware_rule_hits", "yara_matches"
     ]
     
     for cat in categories:
@@ -1594,8 +1608,26 @@ def clean_and_parse_json(text: str) -> Dict[str, Any]:
         file: Optional[str] = None
         evidence_source: Optional[str] = None
 
+    class PermissionAnalysis(BaseModel):
+        permission: str
+        status: str
+        description: str
+
     class InvestigationReport(BaseModel):
         executive_verdict: Optional[str] = None
+        summary: Optional[str] = None
+        bank_agent_alert: Optional[str] = None
+        ciso_brief: Optional[str] = None
+        reverse_engineering_summary: Optional[str] = None
+        static_analysis_summary: Optional[str] = None
+        dynamic_analysis_summary: Optional[str] = None
+        dynamic_summary: Optional[str] = None
+        final_report: Optional[str] = None
+        runtime_findings_interpretation: Optional[str] = None
+        static_confirmed_at_runtime: List[str] = Field(default_factory=list)
+        runtime_only_findings: List[str] = Field(default_factory=list)
+        analysis_limitations: Optional[str] = None
+        permissions_analysis: List[PermissionAnalysis] = Field(default_factory=list)
         suspicious_activities: List[SuspiciousActivity] = Field(default_factory=list)
         code_vulnerabilities: List[CodeVulnerability] = Field(default_factory=list)
         recommendations: List[str] = Field(default_factory=list)
@@ -1703,13 +1735,12 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         if mobsf_key:
             import httpx
             try:
-                with httpx.Client(timeout=3.0) as client:
+                with httpx.Client(timeout=60.0) as client:
                     resp = client.get(f"{mobsf_url.rstrip('/')}/api/v1/scans", headers={"Authorization": mobsf_key})
                     if resp.status_code != 200:
                         raise Exception(f"HTTP status {resp.status_code}")
             except Exception as e:
-                logger.error(f"MobSF health check failed: {e}")
-                raise Exception(f"MobSF static analysis container is unreachable or down: {e}")
+                logger.warning(f"MobSF health check failed: {e}. Attempting to proceed anyway.")
 
         # 2. Calculate content hash for deduplication
         import hashlib
@@ -1719,37 +1750,41 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 hasher.update(chunk)
         apk_hash = hasher.hexdigest()
 
-        # Check database for existing completed analysis with same hash
-        existing = db.collection("apkanalysisresults").where("apk_hash", "==", apk_hash).where("status", "==", "COMPLETED").stream()
-        existing_doc = None
-        for doc in existing:
-            existing_doc = doc.to_dict()
-            break
+        # Check database for existing completed analysis with same hash (if cache is enabled and force_rescan is not requested)
+        enable_cache = os.getenv("ENABLE_ANALYSIS_CACHE", "false").strip().lower() == "true"
+        force_rescan = getattr(request, "force_rescan", False)
+        
+        if enable_cache and not force_rescan:
+            existing = db.collection("apkanalysisresults").where("apk_hash", "==", apk_hash).where("status", "==", "COMPLETED").stream()
+            existing_doc = None
+            for doc in existing:
+                existing_doc = doc.to_dict()
+                break
 
-        if existing_doc:
-            logger.info(f"Deduplication hit for APK hash {apk_hash}. Restoring cached analysis results.")
-            cached_keys = [
-                "risk_score", "threat_level", "badges", "mitre_analysis", 
-                "findings", "final_gemini_analysis", "run_meta", "details", "evidence",
-                "static_analysis", "absolute_threat_score", "package_name",
-                "investigation_report", "banking_fraud", "risk_decomposition",
-                "attack_techniques", "family_signals", "frameworks"
-            ]
-            updates = {k: existing_doc[k] for k in cached_keys if k in existing_doc}
-            updates["status"] = "COMPLETED"
-            updates["apk_hash"] = apk_hash
-            # Set progress keys to COMPLETED
-            for step in ["apkid", "androguard", "virustotal", "dynamic_sandbox", "apktool", "jadx", "quark", "net_sec", "secrets", "trufflehog", "semgrep"]:
-                updates[f"progress.{step}"] = "COMPLETED"
-            updates["progress.upload"] = "COMPLETED"
-            updates["progress.download"] = "COMPLETED"
-            updates["progress.finalize"] = "COMPLETED"
-            updates["progress.gemini"] = "COMPLETED"
-            updates["logs"] = db.ArrayUnion([f"[DEDUP] Duplicate APK detected (SHA-256: {apk_hash}). Restored cached scan results from {existing_doc['id']}."])
-            doc_ref.update(updates)
-            if release_semaphore:
-                analysis_semaphore.release()
-            return doc_ref.get().to_dict()
+            if existing_doc:
+                logger.info(f"Deduplication hit for APK hash {apk_hash}. Restoring cached analysis results.")
+                cached_keys = [
+                    "risk_score", "threat_level", "badges", "mitre_analysis", 
+                    "findings", "final_gemini_analysis", "run_meta", "details", "evidence",
+                    "static_analysis", "absolute_threat_score", "package_name",
+                    "investigation_report", "banking_fraud", "risk_decomposition",
+                    "attack_techniques", "family_signals", "frameworks"
+                ]
+                updates = {k: existing_doc[k] for k in cached_keys if k in existing_doc}
+                updates["status"] = "COMPLETED"
+                updates["apk_hash"] = apk_hash
+                # Set progress keys to COMPLETED
+                for step in ["apkid", "androguard", "virustotal", "dynamic_sandbox", "apktool", "jadx", "quark", "net_sec", "secrets", "trufflehog", "semgrep"]:
+                    updates[f"progress.{step}"] = "COMPLETED"
+                updates["progress.upload"] = "COMPLETED"
+                updates["progress.download"] = "COMPLETED"
+                updates["progress.finalize"] = "COMPLETED"
+                updates["progress.gemini"] = "COMPLETED"
+                updates["logs"] = db.ArrayUnion([f"[DEDUP] Duplicate APK detected (SHA-256: {apk_hash}). Restored cached scan results from {existing_doc['id']}."])
+                doc_ref.update(updates)
+                if release_semaphore:
+                    analysis_semaphore.release()
+                return doc_ref.get().to_dict()
 
         # 3. Detect Frameworks (Flutter / React Native)
         import zipfile
@@ -1957,6 +1992,15 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         static_signals = extract_static_signals(manifest_content, {}, apkid_findings)
         key_sources, all_source_files = {}, []
 
+        # Initialize ML-Hybrid Classifier response dict
+        ml_res = {
+            "is_malicious": False,
+            "ml_confidence_score": 0.0,
+            "predicted_malware_family": "BENIGN",
+            "matching_features_count": 0,
+            "status": "SKIPPED"
+        }
+
         # Define progress callback to stream sub-engine status & logs live to database
         def progress_callback(engine: str, status: str, details: str):
             update_progress(engine, status, details)
@@ -1980,12 +2024,102 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         )
         det_score = deterministic_result["risk_score"]
         det_threat = deterministic_result["threat_level"]
-        evidentiary_details = "\n".join(
-            deterministic_result["details"]["manifest"] + 
-            deterministic_result["details"]["jadx"] + 
-            deterministic_result["details"]["evasion"] +
-            deterministic_result["details"]["mobsf"]
-        )
+
+        # Populate JADX sources dynamically from MobSF view_source endpoint
+        mobsf_hash_val = deterministic_result.get("evidence", {}).get("mobsf_hash")
+        if mobsf_hash_val:
+            try:
+                logger.info(f"[AUTOPSY] Dynamically downloading JADX source files from MobSF REST API for hash {mobsf_hash_val}...")
+                import httpx
+                mobsf_url = os.environ.get("MOBSF_API_URL", "http://localhost:8000")
+                mobsf_key = os.environ.get("MOBSF_API_KEY")
+                if mobsf_key:
+                    headers = {"Authorization": mobsf_key}
+                    # Gather candidate classes from risky classes
+                    risky_list = (androguard_result or {}).get("risky_classes", [])
+                    candidates = []
+                    for cls in risky_list:
+                        name = cls if isinstance(cls, str) else cls.get("class_name", "") if isinstance(cls, dict) else ""
+                        if name:
+                            candidates.append(name.replace(".", "/") + ".java")
+                    # Also include MainActivity
+                    ma_path = f"{package_name.replace('.', '/')}/MainActivity.java"
+                    if ma_path not in candidates:
+                        candidates.append(ma_path)
+                    
+                    for rel_path in candidates[:15]:
+                        for prefix in ["java_source/", ""]:
+                            file_query = f"{prefix}{rel_path}"
+                            try:
+                                with httpx.Client(timeout=4.0) as client:
+                                    resp = client.post(
+                                        f"{mobsf_url.rstrip('/')}/api/v1/view_source",
+                                        data={"hash": mobsf_hash_val, "type": "apk", "file": file_query},
+                                        headers=headers
+                                    )
+                                    if resp.status_code == 200:
+                                        res_json = resp.json()
+                                        if res_json.get("code"):
+                                            key_sources[rel_path] = res_json.get("code")
+                                            logger.info(f"[AUTOPSY] Dynamic JADX download success: {rel_path}")
+                                            break
+                            except Exception as e:
+                                continue
+            except Exception as e:
+                logger.warning(f"[AUTOPSY] Failed to populate JADX sources from MobSF: {e}")
+
+        # Fall back to local Smali disassembly if JADX sources are unavailable (e.g., MobSF offline/disabled)
+        if not key_sources and androguard_result and androguard_result.get("smali_sources"):
+            key_sources.update(androguard_result["smali_sources"])
+            logger.info(f"[AUTOPSY] Populated {len(key_sources)} class source files from local Androguard Smali disassembler.")
+
+        # Run ML-Hybrid Classifier prediction on Android bytecode & manifest features
+        try:
+            logger.info("[ML] Invoking machine learning malware classifier with populated JADX sources...")
+            ml_res = predict_apk_risk(androguard_result, key_sources)
+            logger.info(f"[ML] Verdict: family={ml_res.get('predicted_malware_family')}, conf={ml_res.get('ml_confidence_score')}")
+        except Exception as ml_exc:
+            logger.error(f"[ML] ML prediction failed: {ml_exc}")
+            ml_res["status"] = "ERROR_INFERENCE_FAILED"
+            ml_res["error"] = str(ml_exc)
+
+        # Structured and concise summaries for final prompt
+        curated_manifest = deterministic_result["details"]["manifest"][:3]
+        curated_jadx = deterministic_result["details"]["jadx"][:5]
+        curated_evasion = deterministic_result["details"]["evasion"][:3]
+        curated_mobsf = deterministic_result["details"]["mobsf"][:3]
+
+        cert_info = deterministic_result.get("evidence", {}).get("certificate_info") or {}
+        cert_summary = f"- Verdict: {cert_info.get('verdict', 'UNKNOWN')}\n- Description: {cert_info.get('verdict_description', 'No certificate details available.')}"
+
+        yara_list = deterministic_result.get("evidence", {}).get("yara_matches") or []
+        yara_summary_lines = []
+        for m in yara_list[:3]:
+            yara_summary_lines.append(f"- YARA Rule '{m.get('rule')}' matched (family: {m.get('meta', {}).get('family', 'unknown')})")
+        if not yara_summary_lines:
+            yara_summary_lines.append("- No banking trojan YARA rules triggered.")
+        yara_summary = "\n".join(yara_summary_lines)
+
+        ml_summary = f"- Machine Learning Verdict: {ml_res.get('predicted_malware_family', 'BENIGN')}\n- ML Confidence Score: {ml_res.get('ml_confidence_score', 0.0):.2%}"
+
+        evidentiary_details_parts = [
+            "--- DETECTED MANIFEST PROPERTIES (Top 3) ---",
+            "\n".join(curated_manifest) if curated_manifest else "- No major manifest flags.",
+            "\n--- DETECTED DECOMPILED JAVA SIGNALS (Top 5) ---",
+            "\n".join(curated_jadx) if curated_jadx else "- No suspicious API calls.",
+            "\n--- DETECTED ANTI-EVASION / HARDENING CHECKS (Top 3) ---",
+            "\n".join(curated_evasion) if curated_evasion else "- No VM/emulator evasion flags.",
+            "\n--- DETECTED MOBSF SECURITY ALERTS (Top 3) ---",
+            "\n".join(curated_mobsf) if curated_mobsf else "- No MobSF scorecard issues.",
+            "\n--- CERTIFICATE FORENSICS VERDICT ---",
+            cert_summary,
+            "\n--- YARA GENOME FINGERPRINT (Top 3) ---",
+            yara_summary,
+            "\n--- MACHINE LEARNING MALWARE CLASSIFICATION ---",
+            ml_summary
+        ]
+        evidentiary_details = "\n".join(evidentiary_details_parts)
+
 
         trigger_transcript = dynamic_result.get("trigger_transcript", [])
         
@@ -2039,6 +2173,121 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         for badge in banking_fraud.get("badges", []):
             banking_fraud_prompt_summary += f"- [{badge['severity']}] {badge['title']}: {badge['summary']}\n"
         banking_fraud_prompt_summary += "\n"
+
+        # ── PHASE 2: AI Code Autopsy Engine (Background Task) ───────────────────
+        # Run multi-pass Gemini-powered forensic analysis in the background
+        # so it doesn't block the main report synthesis pipeline.
+        code_autopsy = {
+            "autopsy_status": "SKIPPED",
+            "total_classes_inspected": 0,
+            "malicious_classes_found": 0,
+            "class_results": [],
+            "top_smoking_guns": [],
+            "overall_threat_narrative": "AI code autopsy skipped (no triggers).",
+            "banking_attack_chain": "",
+        }
+        
+        autopsy_has_triggers = bool(
+            banking_fraud.get("badges") or 
+            (androguard_result or {}).get("risky_classes") or 
+            (androguard_result or {}).get("dangerous_api_chains")
+        )
+        
+        if key_sources and autopsy_has_triggers and genai_client:
+            code_autopsy["autopsy_status"] = "RUNNING"
+            code_autopsy["overall_threat_narrative"] = "AI code autopsy is executing in the background..."
+            doc_ref.update({"code_autopsy": code_autopsy})
+            
+            def execute_code_autopsy_bg(
+                doc_id_val,
+                key_sources_val,
+                badges_val,
+                risky_classes_val,
+                dangerous_api_chains_val,
+                package_name_val,
+                matched_trojan_val,
+                client_val,
+                autopsy_model_val
+            ):
+                logger.info(f"[AUTOPSY-BG] Started background code autopsy task for {doc_id_val}")
+                doc_ref_bg = db.collection("apkanalysisresults").document(doc_id_val)
+                try:
+                    from code_interpreter import run_code_autopsy
+                    res = run_code_autopsy(
+                        jadx_sources=key_sources_val,
+                        banking_badges=badges_val,
+                        risky_classes=risky_classes_val,
+                        dangerous_api_chains=dangerous_api_chains_val,
+                        package_name=package_name_val,
+                        matched_trojan=matched_trojan_val,
+                        scan_id=doc_id_val,
+                        genai_client=client_val,
+                        triage_model=autopsy_model_val,
+                        deep_model=autopsy_model_val,
+                        generate_fn=generate_content_with_fallback,
+                    )
+                    malicious_count = res.get("malicious_classes_found", 0)
+                    inspected_count = res.get("total_classes_inspected", 0)
+                    log_msg = (
+                        f"[AUTOPSY] Complete: {malicious_count} malicious class(es) found "
+                        f"across {inspected_count} analyzed. "
+                        f"{len(res.get('top_smoking_guns', []))} critical lines source-verified."
+                    )
+                    doc_ref_bg.update({
+                        "code_autopsy": res,
+                        "logs": db.ArrayUnion([log_msg])
+                    })
+                    logger.info(f"[AUTOPSY-BG] Successfully completed background autopsy for {doc_id_val}")
+                except Exception as bg_exc:
+                    logger.error(f"[AUTOPSY-BG] Autopsy failed: {bg_exc}")
+                    doc_ref_bg.update({
+                        "code_autopsy.autopsy_status": "FAILED",
+                        "code_autopsy.error": str(bg_exc),
+                        "logs": db.ArrayUnion([f"[AUTOPSY] Background code autopsy encountered an error: {bg_exc}"])
+                    })
+
+            _autopsy_model = os.getenv("KAVACH_AUTOPSY_MODEL", STATIC_MODEL)
+            autopsy_client = _get_genai_client_by_uid(request.uid) or genai_client
+            
+            t_autopsy = threading.Thread(
+                target=execute_code_autopsy_bg,
+                args=(
+                    doc_id,
+                    key_sources,
+                    banking_fraud.get("badges", []),
+                    (androguard_result or {}).get("risky_classes", []),
+                    (androguard_result or {}).get("dangerous_api_chains", []),
+                    package_name,
+                    banking_fraud.get("matched_trojan"),
+                    autopsy_client,
+                    _autopsy_model
+                ),
+                daemon=True,
+                name=f"autopsy-bg-{doc_id}"
+            )
+            t_autopsy.start()
+            doc_ref.update({"logs": db.ArrayUnion(["[AUTOPSY] Spawning background AI autopsy thread..."])})
+        else:
+            reasons = []
+            if not key_sources:
+                reasons.append("no JADX sources")
+            if not autopsy_has_triggers:
+                reasons.append("no static engine triggers")
+            if not genai_client:
+                reasons.append("no Gemini client")
+            logger.info(f"[AUTOPSY] Skipped: {', '.join(reasons)}")
+            doc_ref.update({"code_autopsy": code_autopsy})
+
+        # Append top autopsy findings if they exist (they won't in the hot path, but will if cached/restored)
+        if code_autopsy.get("top_smoking_guns"):
+            banking_fraud_prompt_summary += "--- AI CODE AUTOPSY TOP FINDINGS ---\n"
+            for gun in code_autopsy["top_smoking_guns"][:3]:
+                banking_fraud_prompt_summary += (
+                    f"- [{gun.get('severity','')}] {gun.get('class_name','').split('.')[-1]} "
+                    f"Line {gun.get('line_number','?')}: {gun.get('threat_action','')}\n"
+                )
+            banking_fraud_prompt_summary += "\n"
+        # ────────────────────────────────────────────────────────────────────
 
         # Check cancellation before Gemini call
         if doc_ref and hasattr(doc_ref, "get"):
@@ -2189,6 +2438,8 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                 fallback_model=FALLBACK_MODEL,
             )
             analysis_json = clean_and_parse_json(ai_response.text)
+            if not analysis_json or not analysis_json.get("investigation_report") or not isinstance(analysis_json.get("investigation_report"), dict):
+                raise ValueError("Parsed Gemini response is empty or missing investigation_report")
             
             # Programmatically copy summary to keep summaries unified and satisfy frontend contracts
             ir_dict = analysis_json.setdefault("investigation_report", {})
@@ -2381,6 +2632,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             deterministic_result["evidence"],
             banking_fraud.get("badges", []),
             runtime_findings,
+            ml_result=ml_res,
         )
         
         # Calculate absolute threat index points
@@ -2408,16 +2660,23 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
         
         static_signal_density = float(findings_count) / (risky_classes_count + 1)
 
+        ml_score = int(ml_res.get("ml_confidence_score", 0.0) * 100)
+        from anti_evasion import detect_static_evasion_behaviors, merge_evasion_reports
+        static_evasion = detect_static_evasion_behaviors(deterministic_result["evidence"])
+        dynamic_evasion = dynamic_result.get("evasion_report")
+        evasion_rep = merge_evasion_reports(static_evasion, dynamic_evasion)
         risk_decomposition = build_risk_decomposition(
             static_score=static_score,
             dynamic_score=dynamic_score,
             ai_score=ai_score_for_decomp,  # 0 on fallback path to prevent double-counting det_score
             fraud_score=banking_fraud.get("fraud_score", 0),
+            ml_score=ml_score,
             contributors=contributors,
             absolute_score=absolute_score,
             taint_skipped=taint_skipped,
             obfuscated=obfuscated,
             static_signal_density=static_signal_density,
+            evasion_report=evasion_rep,
         )
 
         # Force strict scoring determinism by locking Gemini to the composite risk score
@@ -2443,7 +2702,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
 
         update_progress("finalize", "RUNNING", "Saving final report to database...")
         
-        now_str = datetime.datetime.utcnow().isoformat() + "Z"
+        now_str = datetime.datetime.now(datetime.UTC).replace(tzinfo=None).isoformat() + "Z"
 
         static_report_dict = {
             "risk_score": gemini_score,
@@ -2454,6 +2713,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             },
             "banking_fraud": banking_fraud,
             "risk_decomposition": risk_decomposition,
+            "ml_classification": ml_res,
             "attack_techniques": attack_techniques,
             "absolute_threat_score": absolute_score,
         }
@@ -2495,6 +2755,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             "evidence": {
                 **deterministic_result["evidence"],
                 "virustotal": vt_res,
+                "callgraph": (androguard_result or {}).get("callgraph") if androguard_result else {"nodes": [], "edges": []},
                 "dynamic_analysis": {
                     "status": dynamic_result.get("status"),
                     "events": dynamic_result.get("events"),
@@ -2508,6 +2769,7 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
                     "error": dynamic_result.get("error_message") or dynamic_result.get("error") or "",
                     "apk_abis": dynamic_result.get("apk_abis") or [],
                     "emulator_abis": dynamic_result.get("emulator_abis") or [],
+                    "evasion_report": evasion_rep,
                 }
             },
             "investigation_report": {
@@ -2516,14 +2778,22 @@ def run_analysis_pipeline(doc_id: str, request: AnalysisRequest, release_semapho
             },
             "banking_fraud": banking_fraud,
             "risk_decomposition": risk_decomposition,
+            "ml_classification": ml_res,
             "attack_techniques": attack_techniques,
             "family_signals": family_signals,
+            "code_autopsy": code_autopsy,
             "created_at": now_str,
             "uid": request.uid,
             "email": request.email,
             "progress": final_progress,
             "logs": db.ArrayUnion(["[SYS] Analysis complete and saved."])
         }
+        from threat_intel import process_and_store_threat_intel
+        try:
+            process_and_store_threat_intel(doc_id, final_data["evidence"])
+        except Exception as tie:
+            logger.error(f"Threat intel storage failed: {tie}")
+
         doc_ref.update(final_data)
         logger.info(f"Analysis completed successfully for {doc_id}")
         

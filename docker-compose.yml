@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:alpine
     container_name: kavach-redis
     ports:
       - "6379:6379"
@@ -9,7 +9,25 @@ services:
         limits:
           memory: 512M
           cpus: '0.5'
-    restart: always
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: kavach-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=kavach_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=kavach_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+    restart: unless-stopped
 
   backend:
     build:
@@ -29,17 +47,24 @@ services:
       - USE_CELERY=1
       - MOBSF_API_URL=http://mobsf:8000
       - MOBSF_API_KEY=${MOBSF_API_KEY}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=kavach_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=kavach_db
+      - KAVACH_JWT_SECRET=${KAVACH_JWT_SECRET}
     volumes:
       - ./backend/service-account.json:/app/service-account.json:ro
       - scan-cache:/app/tmp_scans
     depends_on:
       - redis
+      - postgres
     deploy:
       resources:
         limits:
           memory: 4G
           cpus: '2'
-    restart: always
+    restart: unless-stopped
 
   celery_worker:
     build:
@@ -55,17 +80,24 @@ services:
       - USE_CELERY=1
       - MOBSF_API_URL=http://mobsf:8000
       - MOBSF_API_KEY=${MOBSF_API_KEY}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=kavach_user
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=kavach_db
+      - KAVACH_JWT_SECRET=${KAVACH_JWT_SECRET}
     volumes:
       - ./backend/service-account.json:/app/service-account.json:ro
       - scan-cache:/app/tmp_scans
     depends_on:
       - redis
+      - postgres
     deploy:
       resources:
         limits:
           memory: 4G
           cpus: '2'
-    restart: always
+    restart: unless-stopped
 
   frontend:
     build:
@@ -84,21 +116,29 @@ services:
         limits:
           memory: 1G
           cpus: '1'
-    restart: always
+    restart: unless-stopped
 
   mobsf:
     image: opensecurity/mobile-security-framework-mobsf:latest
     container_name: kavach-mobsf
+    # Ports removed per INFRA-1 to prevent public static analyzer access.
+    # Backend accesses it via docker network (http://mobsf:8000).
+    # Restored localhost binding for host-running backend integration.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - MOBSF_API_KEY=${MOBSF_API_KEY}
+      - MOBSF_ANALYZER_IDENTIFIER=${MOBSF_ANALYZER_IDENTIFIER:-host.docker.internal:5556}
+      - MOBSF_DEX2SMALI_ENABLED=0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     deploy:
       resources:
         limits:
-          memory: 4G
-          cpus: '2'
-    restart: always
+          memory: 8G
+          cpus: '6'
+    restart: unless-stopped
 
 volumes:
   scan-cache:
+  postgres-data:

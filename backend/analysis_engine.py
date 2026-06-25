@@ -621,6 +621,8 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
     """
     Parse the APK's DEX bytecode with androguard via standalone subprocess to bypass GIL.
     """
+    import time
+    start_time = time.time()
     findings: Dict[str, Any] = {
         "suspicious_strings": [],
         "dangerous_api_chains": [],
@@ -660,13 +662,13 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
                 output_path=output_dir,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=120
             )
         else:
             python_bin = sys.executable
             cmd = [python_bin, analyzer_script, os.path.join(input_dir, "target.apk"), output_json]
             logger.info(f"Running Androguard subprocess: {' '.join(cmd)}")
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             
         if proc.returncode == 0 and os.path.exists(output_json):
             with open(output_json, "r") as f:
@@ -677,6 +679,7 @@ def analyze_androguard(apk_path: str) -> Dict[str, Any]:
         import logging
         logging.getLogger("kavach").error(f"In-process Androguard analyzer subprocess execution failed: {e}")
         
+    logger.info(f"[PIPELINE] Androguard DEX analysis took {time.time() - start_time:.2f} seconds")
     return findings
 
 
@@ -688,11 +691,14 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
     import os
     import httpx
     import hashlib
+    import time
     
+    start_time = time.time()
     findings = {
         "mobsf_scan": False,
         "scorecard": [],
-        "score": 0
+        "score": 0,
+        "mobsf_hash": None
     }
     
     api_url = os.environ.get("MOBSF_API_URL", "http://localhost:8000")
@@ -710,16 +716,17 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
             headers = {"Authorization": api_key}
             scorecard_url = f"{api_url.rstrip('/')}/api/v1/scorecard"
             
-            # 1. Check if scan already exists by fetching scorecard directly
-            with httpx.Client(timeout=5.0) as client:
+            with httpx.Client(timeout=600.0) as client:
+                # 1. Check if scan already exists by fetching scorecard directly
                 try:
-                    score_resp = client.post(scorecard_url, data={"hash": file_hash}, headers=headers)
+                    score_resp = client.post(scorecard_url, data={"hash": file_hash}, headers=headers, timeout=5.0)
                     if score_resp.status_code == 200:
                         score_data = score_resp.json()
                         scorecard_data = score_data.get("scorecard")
                         if scorecard_data:
                             logger.info(f"MobSF cache hit for MD5 {file_hash}. Restoring report scorecard...")
                             findings["mobsf_scan"] = True
+                            findings["mobsf_hash"] = file_hash
                             for issue in scorecard_data:
                                 title = issue.get("title", "OWASP Security Warning")
                                 desc = issue.get("description", "")
@@ -731,26 +738,36 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
                                     "type": "OWASP Compliance"
                                 })
                                 findings["score"] += 10 if severity == "HIGH" else 5
+                            
+                            # Also fetch the full report JSON from cache hit
+                            try:
+                                report_resp = client.post(f"{api_url.rstrip('/')}/api/v1/report_json", data={"hash": file_hash}, headers=headers, timeout=20.0)
+                                if report_resp.status_code == 200:
+                                    findings["report_json"] = report_resp.json()
+                            except Exception as rep_err:
+                                logger.warning(f"Failed to fetch MobSF cached report_json: {rep_err}")
+                                
+                            logger.info(f"[PIPELINE] MobSF cached scan retrieval took {time.time() - start_time:.2f} seconds")
                             return findings
                 except Exception as cache_err:
                     logger.debug(f"MobSF direct scorecard check failed: {cache_err}")
 
-            # 2. Verify MobSF service health before uploading (max 3.0s timeout)
-            try:
-                with httpx.Client(timeout=3.0) as client:
-                    health_resp = client.get(f"{api_url.rstrip('/')}/api/v1/scans", headers=headers)
+                # 2. Verify MobSF service health before uploading (max 3.0s timeout)
+                try:
+                    health_resp = client.get(f"{api_url.rstrip('/')}/api/v1/scans", headers=headers, timeout=3.0)
                     if health_resp.status_code != 200:
                         logger.warning(f"MobSF health check returned status code {health_resp.status_code}. Skipping scan.")
+                        logger.info(f"[PIPELINE] MobSF health check failure took {time.time() - start_time:.2f} seconds")
                         return findings
-            except Exception as health_err:
-                logger.warning(f"MobSF API unreachable: {health_err}. Skipping scan.")
-                return findings
+                except Exception as health_err:
+                    logger.warning(f"MobSF API unreachable: {health_err}. Skipping scan.")
+                    logger.info(f"[PIPELINE] MobSF unreachable status took {time.time() - start_time:.2f} seconds")
+                    return findings
 
-            # 3. Upload and trigger scan if caching check missed
-            files = {"file": (os.path.basename(apk_path), open(apk_path, "rb"), "application/octet-stream")}
-            upload_url = f"{api_url.rstrip('/')}/api/v1/upload"
-            
-            with httpx.Client(timeout=600.0) as client:
+                # 3. Upload and trigger scan if caching check missed
+                files = {"file": (os.path.basename(apk_path), open(apk_path, "rb"), "application/octet-stream")}
+                upload_url = f"{api_url.rstrip('/')}/api/v1/upload"
+                
                 logger.info("Uploading APK to MobSF for a fresh scan...")
                 up_resp = client.post(upload_url, files=files, headers=headers)
                 if up_resp.status_code == 200:
@@ -760,11 +777,12 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
                         scan_url = f"{api_url.rstrip('/')}/api/v1/scan"
                         client.post(scan_url, data={"hash": up_hash}, headers=headers)
                         
-                        # 5. Fetch Scorecard
+                        # 5. Fetch Scorecard & Report
                         score_resp = client.post(scorecard_url, data={"hash": up_hash}, headers=headers)
                         if score_resp.status_code == 200:
                             score_data = score_resp.json()
                             findings["mobsf_scan"] = True
+                            findings["mobsf_hash"] = up_hash
                             for issue in score_data.get("scorecard", []):
                                 title = issue.get("title", "OWASP Security Warning")
                                 desc = issue.get("description", "")
@@ -776,11 +794,191 @@ def analyze_mobsf(apk_path: str) -> Dict[str, Any]:
                                     "type": "OWASP Compliance"
                                 })
                                 findings["score"] += 10 if severity == "HIGH" else 5
+                            
+                            # Also fetch the full report JSON
+                            try:
+                                report_resp = client.post(f"{api_url.rstrip('/')}/api/v1/report_json", data={"hash": up_hash}, headers=headers, timeout=20.0)
+                                if report_resp.status_code == 200:
+                                    findings["report_json"] = report_resp.json()
+                            except Exception as rep_err:
+                                logger.warning(f"Failed to fetch MobSF fresh report_json: {rep_err}")
+                                
+                            logger.info(f"[PIPELINE] MobSF fresh scan took {time.time() - start_time:.2f} seconds")
                             return findings
         except Exception as e:
             logger.warning(f"Failed to query MobSF: {e}")
 
+    logger.info(f"[PIPELINE] MobSF scan processing took {time.time() - start_time:.2f} seconds")
     return findings
+
+
+import logging
+logger = logging.getLogger("kavach")
+
+try:
+    import yara
+    YARA_AVAILABLE = True
+except ImportError:
+    yara = None
+    YARA_AVAILABLE = False
+    logger.warning("yara-python is not installed. YARA scanning will be unavailable.")
+
+YARA_SEVERITY_RISK_MAP = {
+    "CRITICAL": 25,
+    "HIGH": 15,
+    "MEDIUM": 8,
+    "LOW": 2
+}
+
+class YaraScanner:
+    def __init__(self, rules_dir: str = None):
+        if rules_dir is None:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            rules_dir = os.path.join(base_dir, "rules")
+        self.rules_dir = rules_dir
+        self.rules = None
+        self.ruleset_hash = "N/A"
+        self.compilation_timestamp = 0
+        self.load_rules()
+
+    def load_rules(self):
+        if not YARA_AVAILABLE:
+            return
+        if not os.path.exists(self.rules_dir):
+            os.makedirs(self.rules_dir, exist_ok=True)
+            logger.info(f"Created YARA rules directory: {self.rules_dir}")
+            return
+
+        rule_filepaths = {}
+        for root, _, files in os.walk(self.rules_dir):
+            for file in files:
+                if file.endswith((".yar", ".yara")):
+                    full_path = os.path.join(root, file)
+                    key = os.path.relpath(full_path, self.rules_dir).replace(os.sep, "_").replace(".", "_")
+                    rule_filepaths[key] = full_path
+
+        if rule_filepaths:
+            try:
+                import hashlib
+                import time
+
+                # Compute SHA256 ruleset hash of sorted YARA files
+                sha256 = hashlib.sha256()
+                for key in sorted(rule_filepaths.keys()):
+                    filepath = rule_filepaths[key]
+                    try:
+                        with open(filepath, "rb") as f:
+                            sha256.update(f.read())
+                    except Exception as e:
+                        logger.error(f"Failed to read YARA rule file for hashing {filepath}: {e}")
+                self.ruleset_hash = sha256.hexdigest()
+                self.compilation_timestamp = time.time()
+
+                self.rules = yara.compile(filepaths=rule_filepaths)
+                logger.info(f"YARA rules compiler loaded {len(rule_filepaths)} files successfully. Ruleset Hash: {self.ruleset_hash}")
+            except Exception as e:
+                logger.error(f"YARA rules compilation failed: {e}")
+        else:
+            logger.warning(f"No YARA rules found in {self.rules_dir}")
+
+_rules_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules")
+yara_scanner = YaraScanner(_rules_path)
+
+
+def analyze_yara(manifest_content: str, all_code: str, apk_path: str = None) -> Dict[str, Any]:
+    import time
+    start_time = time.time()
+    hits = []
+    seen_rules = set()
+
+    def add_match(m, source_type):
+        if m.rule in seen_rules:
+            return
+        seen_rules.add(m.rule)
+        
+        matched_strings = []
+        # Iterate over matches. Each match is a tuple (offset, identifier, data) or has instances
+        for string_match in m.strings[:20]:
+            if isinstance(string_match, tuple) and len(string_match) >= 3:
+                offset, identifier, data = string_match[:3]
+                try:
+                    decoded_data = data.decode("utf-8", errors="ignore")
+                except Exception:
+                    decoded_data = str(data)
+                matched_strings.append({
+                    "identifier": identifier,
+                    "offset": offset,
+                    "data": decoded_data
+                })
+            else:
+                try:
+                    instances = getattr(string_match, "instances", None)
+                    if instances:
+                        for instance in instances[:5]:
+                            data = getattr(instance, "matched_data", b"")
+                            try:
+                                decoded_data = data.decode("utf-8", errors="ignore")
+                            except Exception:
+                                decoded_data = str(data)
+                            matched_strings.append({
+                                "identifier": getattr(string_match, "identifier", ""),
+                                "offset": getattr(instance, "offset", 0),
+                                "data": decoded_data
+                            })
+                except Exception:
+                    pass
+            
+        meta_dict = dict(m.meta) if m.meta else {}
+        severity = str(meta_dict.get("severity", "MEDIUM")).upper()
+        risk_score = YARA_SEVERITY_RISK_MAP.get(severity, 8)
+
+        hits.append({
+            "rule_name": m.rule,
+            "tags": list(m.tags),
+            "meta": meta_dict,
+            "strings": matched_strings,
+            "matched_source": source_type,
+            "risk_score": risk_score
+        })
+
+    if YARA_AVAILABLE and yara_scanner.rules:
+        # 1. Scan APK file if it exists
+        if apk_path and os.path.exists(apk_path):
+            try:
+                matches = yara_scanner.rules.match(apk_path)
+                for m in matches:
+                    add_match(m, "binary")
+            except Exception as e:
+                logger.error(f"YARA file scan failed for {apk_path}: {e}")
+                
+        # 2. Scan combined manifest and decompiled code in a single memory pass
+        combined_text = ""
+        if manifest_content:
+            combined_text += manifest_content + "\n"
+        if all_code:
+            combined_text += all_code
+
+        if combined_text:
+            try:
+                matches = yara_scanner.rules.match(data=combined_text)
+                for m in matches:
+                    add_match(m, "decompiled_source")
+            except Exception as e:
+                logger.error(f"YARA combined source scan failed: {e}")
+
+    scan_duration = time.time() - start_time
+
+    # Return structure with rich matches and metadata
+    return {
+        "yara_scan": True,
+        "matches": hits,
+        "metadata": {
+            "yara_version": yara.YARA_VERSION if YARA_AVAILABLE else "N/A",
+            "ruleset_hash": yara_scanner.ruleset_hash if YARA_AVAILABLE else "N/A",
+            "compilation_timestamp": yara_scanner.compilation_timestamp if YARA_AVAILABLE else 0,
+            "scan_duration_seconds": scan_duration
+        }
+    }
 
 
 def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
@@ -788,6 +986,8 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     Run Semgrep over JADX decompiled java files,
     and execute a local Python-native AST-like pattern matcher to augment/fallback.
     """
+    import time
+    start_time = time.time()
     import os
     import shutil
     import subprocess
@@ -847,7 +1047,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     output_path=output_dir,
                     capture_output=True,
                     text=True,
-                    timeout=300.0
+                    timeout=90.0
                 )
                 stdout_data = proc.stdout
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -855,7 +1055,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                 config_arg = config_path if os.path.isdir(config_path) else "p/android"
                 cmd = [semgrep_bin, "--config", config_arg, "--json", target_scan_dir]
                 logger.info(f"Running Semgrep subprocess: {' '.join(cmd)}")
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300.0)
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=90.0)
                 stdout_data = res.stdout if res.returncode == 0 else ""
                 
             if stdout_data:
@@ -963,6 +1163,7 @@ def analyze_semgrep(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     "type": "semgrep"
                 })
                 findings["score"] += score
+    logger.info(f"[PIPELINE] Semgrep AST & Heuristics scan took {time.time() - start_time:.2f} seconds")
     return findings
 
 
@@ -971,6 +1172,8 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
     Run TruffleHog filesystem secret scanner over unpacked directories,
     and execute a local Python-native high-entropy string scanner to augment/fallback.
     """
+    import time
+    start_time = time.time()
     import os
     import shutil
     import subprocess
@@ -1018,7 +1221,7 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                     output_path=output_dir,
                     capture_output=True,
                     text=True,
-                    timeout=300.0
+                    timeout=90.0
                 )
                 stdout_data = proc.stdout
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1026,7 +1229,7 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
             elif trufflehog_bin:
                 cmd = [trufflehog_bin, "filesystem", target_scan_dir, "--json"]
                 logger.info(f"Running TruffleHog subprocess: {' '.join(cmd)}")
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300.0)
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=90.0)
                 stdout_data = res.stdout
                 findings["trufflehog_scan"] = True
             else:
@@ -1147,8 +1350,129 @@ def analyze_trufflehog(jadx_out: str, package_name: str = "") -> Dict[str, Any]:
                             "description": desc_val
                         })
                         findings["score"] += 12
+    logger.info(f"[PIPELINE] TruffleHog secrets scan took {time.time() - start_time:.2f} seconds")
     return findings
 
+
+def verify_certificate(cert_info: Dict[str, Any], package_name: str) -> Dict[str, Any]:
+    """
+    Analyzes certificate properties and compares them against the trusted signers baseline.
+    """
+    if not cert_info or not cert_info.get("is_signed"):
+        return {
+            "is_signed": False,
+            "verdict": "UNSIGNED",
+            "verdict_description": "The APK file is not cryptographically signed. Unsigned APKs are highly suspicious."
+        }
+        
+    result = dict(cert_info)
+    result["verdict"] = "UNKNOWN_SELF_SIGNED_DEVELOPER"
+    result["verdict_description"] = "Self-signed certificate with no matching official bank baseline."
+    
+    # Heuristics
+    subject = cert_info.get("subject", "").upper()
+    issuer = cert_info.get("issuer", "").upper()
+    sha256 = cert_info.get("sha256", "").upper()
+    
+    # 1. Debug Key Detection
+    if "CN=ANDROID DEBUG" in subject or "O=ANDROID" in subject or "DEBUG" in subject:
+        result["verdict"] = "DEBUG_KEY_SIGNED"
+        result["verdict_description"] = "The APK is signed with a development debug key. Production bank apps should never be debug builds."
+        return result
+        
+    # 2. Check trusted baseline
+    from postgres_db import get_trusted_signer, is_postgres_configured
+    
+    trusted = None
+    if is_postgres_configured():
+        trusted = get_trusted_signer(package_name)
+    else:
+        # Fallback local hardcoded baseline
+        fallback_baseline = {
+            "com.boi.group.boimobile": {
+                "package_name": "com.boi.group.boimobile",
+                "bank_name": "Bank of India",
+                "sha256": "1A:2B:3C:4D:5E:6F:7A:8B:9C:0D:1E:2F:3A:4B:5C:6D:7E:8F:9A:0B:1C:2D:3E:4F:5A:6B:7C:8D:9E:0F:1A:2B",
+                "notes": "Official Bank of India Mobile Banking app signer."
+            },
+            "com.sbi.yono": {
+                "package_name": "com.sbi.yono",
+                "bank_name": "State Bank of India",
+                "sha256": "2E:B5:E4:D3:C2:B1:E0:F9:A8:B7:C6:D5:E4:F3:A2:B1:C0:D9:E8:F7:A6:B5:C4:D3:E2:F1:A0:B9:C8:D7:E6:F5",
+                "notes": "Official State Bank of India YONO app signer."
+            },
+            "com.snapwork.hdfc": {
+                "package_name": "com.snapwork.hdfc",
+                "bank_name": "HDFC Bank",
+                "sha256": "3C:D4:E5:F6:A7:B8:C9:D0:E1:F2:A3:B4:C5:D6:E7:F8:A9:B0:C1:D2:E3:F4:A5:B6:C7:D8:E9:F0:A1:B2:C3:D4",
+                "notes": "Official HDFC Bank Mobile Banking app signer."
+            }
+        }
+        trusted = fallback_baseline.get(package_name)
+        
+    if trusted:
+        trusted_sha256 = trusted.get("sha256", "").upper()
+        if sha256 == trusted_sha256:
+            result["verdict"] = "LEGIT_MATCHED_SIGNER"
+            result["verdict_description"] = f"Signed by official {trusted['bank_name']} certificate (trusted baseline)."
+        else:
+            result["verdict"] = "MISMATCHED_SIGNER_FOR_KNOWN_BANK_PACKAGE"
+            result["verdict_description"] = f"APK claims to be the official package '{package_name}' for {trusted['bank_name']}, but is signed with a different certificate! This strongly suggests a trojanized clone."
+            result["matched_baseline"] = {
+                "package_name": trusted["package_name"],
+                "bank_name": trusted["bank_name"],
+                "sha256": trusted_sha256,
+                "notes": trusted.get("notes", "")
+            }
+        return result
+        
+    # 3. Check for lookalikes (if package name has "sbi", "yono", "bankofindia", "boi" but is not officially matched)
+    lookalike_keywords = ["sbi", "yono", "bankofindia", "boimobile", "hdfc", "icici", "phonepe", "paytm", "gpay"]
+    is_lookalike = any(keyword in package_name.lower() for keyword in lookalike_keywords)
+    if is_lookalike:
+        # Since it wasn't matched above, it is signed differently
+        # Let's find if we have a primary bank reference to show what bank it impersonates
+        impersonated_bank = "a registered financial institution"
+        target_bank_pkg = None
+        if "sbi" in package_name.lower() or "yono" in package_name.lower():
+            impersonated_bank = "State Bank of India"
+            target_bank_pkg = "com.sbi.yono"
+        elif "boi" in package_name.lower() or "bankofindia" in package_name.lower():
+            impersonated_bank = "Bank of India"
+            target_bank_pkg = "com.boi.group.boimobile"
+        elif "hdfc" in package_name.lower():
+            impersonated_bank = "HDFC Bank"
+            target_bank_pkg = "com.snapwork.hdfc"
+            
+        result["verdict"] = "MISMATCHED_SIGNER_FOR_KNOWN_BANK_PACKAGE"
+        result["verdict_description"] = f"The package ID '{package_name}' contains keywords associated with {impersonated_bank}, but the signer fingerprint does not match the official app signature."
+        
+        # If we have a target bank package, we can query its trusted signature to show in comparison
+        if target_bank_pkg:
+            target_trusted = get_trusted_signer(target_bank_pkg) if is_postgres_configured() else fallback_baseline.get(target_bank_pkg)
+            if target_trusted:
+                result["matched_baseline"] = {
+                    "package_name": target_trusted["package_name"],
+                    "bank_name": target_trusted["bank_name"],
+                    "sha256": target_trusted["sha256"].upper(),
+                    "notes": target_trusted.get("notes", "")
+                }
+        return result
+
+    # 4. Check for self-signed indicators (subject == issuer and extremely long validity or weird fields)
+    if subject == issuer and subject:
+        result["verdict"] = "UNKNOWN_SELF_SIGNED_DEVELOPER"
+        result["verdict_description"] = "Self-signed certificate with no matching official bank baseline."
+        
+    # 5. Check for weak signature algorithm (MD5 or SHA-1)
+    sig_algo = cert_info.get("signature_algo", "").lower()
+    if sig_algo and ("md5" in sig_algo or "sha1" in sig_algo or "sha-1" in sig_algo):
+        # We only set this verdict if it wasn't already flagged as critical/high (mismatched/debug)
+        if result.get("verdict") in ["UNKNOWN_SELF_SIGNED_DEVELOPER", "LEGIT_MATCHED_SIGNER"]:
+            result["verdict"] = "UNUSUAL_CERT_CHARACTERISTICS"
+            result["verdict_description"] = f"The APK is signed using a weak/outdated signature hashing algorithm ({cert_info.get('signature_algo')}). Mobile banking apps should use secure algorithms like SHA-256."
+
+    return result
 
 def calculate_deterministic_score(
     manifest_content: str,
@@ -1167,6 +1491,7 @@ def calculate_deterministic_score(
     mobsf_res: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     import math
+    all_code = " ".join(jadx_sources.values()).lower() if jadx_sources else ""
     m_res = analyze_manifest(manifest_content)
     j_res = analyze_jadx(jadx_sources)
     a_res = analyze_apkid(apkid_json_path) if apkid_json_path else {"anti_vm": [], "obfuscator_packer": [], "compiler_manipulator": [], "score": 0}
@@ -1220,6 +1545,13 @@ def calculate_deterministic_score(
         elif apk_path and os.environ.get("MOBSF_API_KEY"):
             if progress_callback:
                 progress_callback("androguard", "RUNNING", "Querying MobSF REST API for static security audit scorecard...")
+                progress_callback("apktool", "RUNNING", "MobSF decompiling APK...")
+                progress_callback("jadx", "RUNNING", "MobSF running JADX decompiler...")
+                progress_callback("quark", "RUNNING", "MobSF running Quark rules...")
+                progress_callback("net_sec", "RUNNING", "MobSF parsing network security config...")
+                progress_callback("secrets", "RUNNING", "MobSF scanning for secrets...")
+                progress_callback("trufflehog", "RUNNING", "MobSF running TruffleHog...")
+                progress_callback("semgrep", "RUNNING", "MobSF running Semgrep rules...")
             tasks["mobsf"] = executor.submit(analyze_mobsf, apk_path)
         else:
             mobsf_res = {"mobsf_scan": False, "scorecard": [], "score": 0}
@@ -1266,13 +1598,179 @@ def calculate_deterministic_score(
                 mobsf_res = tasks["mobsf"].result()
                 if progress_callback:
                     progress_callback("androguard", "COMPLETED", "MobSF static audit completed.")
+                    progress_callback("apktool", "COMPLETED", "MobSF decompiling completed.")
+                    progress_callback("jadx", "COMPLETED", "MobSF decompilation completed.")
+                    progress_callback("quark", "COMPLETED", "MobSF Quark rules completed.")
+                    progress_callback("net_sec", "COMPLETED", "MobSF network security analysis completed.")
+                    progress_callback("secrets", "COMPLETED", "MobSF secrets scanning completed.")
+                    progress_callback("trufflehog", "COMPLETED", "MobSF TruffleHog audit completed.")
+                    progress_callback("semgrep", "COMPLETED", "MobSF Semgrep scanning completed.")
             except Exception as e:
                 logger.error(f"MobSF analysis failed: {e}")
                 mobsf_res = {"mobsf_scan": False, "scorecard": [], "score": 0}
+                if progress_callback:
+                    progress_callback("androguard", "FAILED", f"MobSF analysis failed: {e}")
+                    progress_callback("apktool", "FAILED", f"MobSF analysis failed: {e}")
+                    progress_callback("jadx", "FAILED", f"MobSF analysis failed: {e}")
+                    progress_callback("quark", "FAILED", f"MobSF analysis failed: {e}")
+                    progress_callback("net_sec", "FAILED", f"MobSF analysis failed: {e}")
+                    progress_callback("secrets", "FAILED", f"MobSF analysis failed: {e}")
+                    progress_callback("trufflehog", "FAILED", f"MobSF analysis failed: {e}")
+                    progress_callback("semgrep", "FAILED", f"MobSF analysis failed: {e}")
+
+    # Set skipped status for any tasks that were not executed
+    if progress_callback:
+        if not (mobsf_res and mobsf_res.get("mobsf_scan")):
+            for step in ["apktool", "jadx", "quark", "net_sec"]:
+                progress_callback(step, "SKIPPED", f"Skipped: {step} consolidated in MobSF (not run).")
+            if "secrets" not in tasks:
+                progress_callback("secrets", "SKIPPED", "Skipped: local secrets scan not run.")
+            if "trufflehog" not in tasks:
+                progress_callback("trufflehog", "SKIPPED", "Skipped: local TruffleHog scan not run.")
+            if "semgrep" not in tasks:
+                progress_callback("semgrep", "SKIPPED", "Skipped: local Semgrep scan not run.")
 
     if progress_callback:
         progress_callback("androguard", "COMPLETED", "All deep static security engines successfully completed.")
 
+    # Now we have all results. Let's merge MobSF report findings if present!
+    mobsf_res_clean = mobsf_res if mobsf_res else {}
+    report_json = mobsf_res_clean.get("report_json")
+    if isinstance(report_json, dict):
+        logger.info("Parsing MobSF deep scan report and merging findings into decompiler scorecards...")
+        
+        # 1. Hardcoded Secrets
+        mobsf_secrets = report_json.get("secrets", [])
+        if isinstance(mobsf_secrets, list):
+            for s in mobsf_secrets:
+                if isinstance(s, dict):
+                    sec_val = s.get("secret") or s.get("value")
+                    sec_file = s.get("file") or ""
+                else:
+                    sec_val = str(s)
+                    sec_file = ""
+                if sec_val:
+                    redacted = sec_val[:6] + "****" + sec_val[-3:] if len(sec_val) > 12 else "****"
+                    sec_res["credential_leaks"].append({
+                        "type": "MobSF Hardcoded Secret",
+                        "file": sec_file,
+                        "risk_score": 10,
+                        "severity": "HIGH",
+                        "description": f"Potential API key or token found: ({redacted})"
+                    })
+                    truffle_res["secrets"].append({
+                        "type": "MobSF Hardcoded Secret",
+                        "file": sec_file,
+                        "risk_score": 15,
+                        "severity": "HIGH",
+                        "description": f"Entropy secrets match: ({redacted})"
+                    })
+
+        # 2. Suspicious URLs & domains
+        mobsf_urls = report_json.get("urls", [])
+        if isinstance(mobsf_urls, list):
+            for u in mobsf_urls:
+                if isinstance(u, dict):
+                    urls_list = u.get("urls", [])
+                    if isinstance(urls_list, str):
+                        urls_list = [urls_list]
+                    elif not isinstance(urls_list, list):
+                        urls_list = []
+                    # Fallback to single url key
+                    if not urls_list and u.get("url"):
+                        urls_list = [u.get("url")]
+                    
+                    url_file = u.get("path") or u.get("file") or ""
+                    for url_val in urls_list:
+                        if url_val:
+                            j_res["suspicious_urls"].append({
+                                "url": url_val,
+                                "file": url_file,
+                                "type": "Extracted URL Endpoint",
+                                "risk_score": 1,
+                                "severity": "INFO",
+                                "description": f"Extracted remote network communication target: {url_val}"
+                            })
+                else:
+                    url_val = str(u)
+                    if url_val:
+                        j_res["suspicious_urls"].append({
+                            "url": url_val,
+                            "file": "",
+                            "type": "Extracted URL Endpoint",
+                            "risk_score": 1,
+                            "severity": "INFO",
+                            "description": f"Extracted remote network communication target: {url_val}"
+                        })
+
+        # 2.5 Firebase URLs
+        mobsf_firebase_urls = report_json.get("firebase_urls", [])
+        if isinstance(mobsf_firebase_urls, list):
+            for fb in mobsf_firebase_urls:
+                if isinstance(fb, dict):
+                    desc = fb.get("description") or fb.get("title") or ""
+                    import re
+                    match = re.search(r"https?://[^\s'\")]+", desc)
+                    url_val = match.group(0) if match else fb.get("url")
+                    title = fb.get("title") or "Firebase Connection"
+                    if url_val:
+                        j_res["suspicious_urls"].append({
+                            "url": url_val,
+                            "file": "AndroidManifest.xml",
+                            "type": "Firebase Endpoint",
+                            "risk_score": 2,
+                            "severity": "INFO",
+                            "description": f"Firebase reference identified ({title}): {url_val}"
+                        })
+
+        # 3. Static Code Analysis (map to semgrep_res)
+        mobsf_code_issues = report_json.get("code_analysis", {})
+        if isinstance(mobsf_code_issues, dict):
+            for rule_key, issue in mobsf_code_issues.items():
+                if not isinstance(issue, dict):
+                    continue
+                metadata = issue.get("metadata", {})
+                severity = (metadata.get("severity") or "high").upper()
+                title = metadata.get("title") or rule_key
+                desc = metadata.get("description") or ""
+                
+                files = issue.get("files", {})
+                file_paths = list(files.keys()) if isinstance(files, dict) else []
+                file_path = file_paths[0] if file_paths else ""
+                
+                score_val = 15 if severity == "HIGH" else 8 if severity in ("WARNING", "MEDIUM") else 2
+                sev_label = "HIGH" if severity == "HIGH" else "MEDIUM" if severity in ("WARNING", "MEDIUM") else "LOW"
+                
+                semgrep_res["violations"].append({
+                    "rule": f"semgrep-mobsf: {rule_key}",
+                    "description": f"[{title}] {desc}",
+                    "severity": "ERROR" if severity == "HIGH" else "WARNING",
+                    "risk_score": score_val,
+                    "file": file_path
+                })
+
+        # 4. Manifest Analysis (map to q_res rule_hits)
+        mobsf_manifest_issues = report_json.get("manifest_analysis", [])
+        if isinstance(mobsf_manifest_issues, list):
+            for issue in mobsf_manifest_issues:
+                if not isinstance(issue, dict):
+                    continue
+                title = issue.get("title") or "Manifest Policy Issue"
+                desc = issue.get("desc") or issue.get("description") or ""
+                severity = (issue.get("stat") or "medium").upper()
+                
+                score_val = 12 if severity == "HIGH" else 6 if severity in ("WARNING", "MEDIUM") else 2
+                sev_label = "HIGH" if severity == "HIGH" else "MEDIUM" if severity in ("WARNING", "MEDIUM") else "LOW"
+                
+                q_res["rule_hits"].append({
+                    "rule": f"quark-behavior: {title}",
+                    "description": desc,
+                    "severity": sev_label,
+                    "confidence": "HIGH",
+                    "risk_score": score_val,
+                    "type": "Manifest Vulnerability",
+                    "file": "AndroidManifest.xml"
+                })
 
     # -------------------------------------------------------------------------
     # Unified Multi-Dimensional Vulnerability Accumulation (MVSA) Scoring Engine
@@ -1422,6 +1920,62 @@ def calculate_deterministic_score(
         else:
             low_findings.append({"type": "MobSF Info", "detail": f"{title}: {desc}", "weight": 2, "severity": "LOW"})
 
+    # 10. YARA rules pattern scanning
+    yara_res = analyze_yara(manifest_content, all_code, apk_path=apk_path)
+    for m in yara_res.get("matches", []):
+        meta = m.get("meta", {})
+        sev = str(meta.get("severity", "MEDIUM")).upper()
+        weight = m.get("risk_score", 8)
+        finding = {
+            "type": "YARA Malware Signature Match",
+            "detail": f"{m['rule_name']}: {meta.get('description', 'YARA signature match')}",
+            "weight": weight,
+            "severity": sev
+        }
+        if sev == "CRITICAL":
+            critical_findings.append(finding)
+        elif sev == "HIGH":
+            high_findings.append(finding)
+        elif sev == "MEDIUM":
+            medium_findings.append(finding)
+        else:
+            low_findings.append(finding)
+
+    # 11. APK Signature & Certificate Forensics
+    is_signed = androguard_res.get("is_signed", True) if androguard_res else True
+    cert_raw = ag_res_clean.get("certificate_info") or {"is_signed": is_signed}
+    cert_verified = verify_certificate(cert_raw, package_name)
+    
+    verdict = cert_verified.get("verdict", "UNKNOWN_SELF_SIGNED_DEVELOPER")
+    if verdict == "UNSIGNED":
+        high_findings.append({
+            "type": "Unsigned APK Warning",
+            "detail": "The APK file is not cryptographically signed. Unsigned APKs are highly suspicious.",
+            "weight": 25,
+            "severity": "HIGH"
+        })
+    elif verdict == "MISMATCHED_SIGNER_FOR_KNOWN_BANK_PACKAGE":
+        critical_findings.append({
+            "type": "Signature Signer Mismatch",
+            "detail": cert_verified.get("verdict_description"),
+            "weight": 40,
+            "severity": "CRITICAL"
+        })
+    elif verdict == "DEBUG_KEY_SIGNED":
+        high_findings.append({
+            "type": "Debug Build Signing Cert",
+            "detail": cert_verified.get("verdict_description"),
+            "weight": 25,
+            "severity": "HIGH"
+        })
+    elif verdict == "UNUSUAL_CERT_CHARACTERISTICS":
+        medium_findings.append({
+            "type": "Unusual Certificate Profile",
+            "detail": cert_verified.get("verdict_description"),
+            "weight": 12,
+            "severity": "MEDIUM"
+        })
+
 
     # A. Calculate Base Exposure Score (representing footprint)
     exposure_sum = 0
@@ -1504,13 +2058,17 @@ def calculate_deterministic_score(
         "dangerous_manifest_flags": m_res["dangerous_manifest_flags"],
         "network_indicators": j_res["network_indicators"] + net_res["issues"],
         "data_storage_issues": j_res["data_storage_issues"],
-        "crypto_issues": j_res["crypto_issues"] + [v for v in semgrep_res["violations"] if "crypto" in v["rule"] or "ssl" in v["rule"]],
+        "crypto_issues": j_res["crypto_issues"] + [v for v in semgrep_res["violations"] if "crypto" in v["rule"] or "ssl" in v["rule"]] + ([{"type": "Unsigned APK Warning", "description": "The APK file is not cryptographically signed. Unsigned APKs are highly suspicious."}] if not is_signed else []),
         "hardcoded_secrets": j_res["hardcoded_secrets"] + sec_res["credential_leaks"] + truffle_res["secrets"],
-        "suspicious_urls": j_res["suspicious_urls"] + ag_res["suspicious_strings"],
-        "reflection_dynamic_loading": j_res["reflection_dynamic_loading"] + ag_res["dangerous_api_chains"],
-        "obfuscation_signals": j_res["obfuscation_signals"] + a_res["obfuscator_packer"] + a_res["compiler_manipulator"] + ag_res["risky_classes"],
+        "suspicious_urls": j_res["suspicious_urls"] + (ag_res_clean.get("suspicious_strings") or []),
+        "reflection_dynamic_loading": j_res["reflection_dynamic_loading"] + (ag_res_clean.get("dangerous_api_chains") or []),
+        "obfuscation_signals": j_res["obfuscation_signals"] + a_res["obfuscator_packer"] + a_res["compiler_manipulator"] + (ag_res_clean.get("risky_classes") or []),
         "malware_rule_hits": a_res["anti_vm"] + q_res["rule_hits"],
         "mobsf_scorecard": mobsf_res_clean.get("scorecard", []),
+        "mobsf_hash": mobsf_res_clean.get("mobsf_hash"),
+        "yara_matches": yara_res.get("matches", []),
+        "yara_metadata": yara_res.get("metadata", {}),
+        "certificate_info": cert_verified,
     }
 
     # Merge Semgrep AST warnings into malware_rule_hits

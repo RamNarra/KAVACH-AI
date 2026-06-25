@@ -24,6 +24,7 @@ from typing import List, Dict, Any, Optional
 
 RF_ID_SMS_INTERCEPTION = "rf_sms_access_or_interception_obs"
 RF_ID_OVERLAY_DRAWING  = "rf_overlay_view_drawing_detected"
+RF_ID_ACCESSIBILITY_ABUSE = "rf_accessibility_abuse_detected"
 
 
 # --------------------------------------------------------------------------- #
@@ -494,6 +495,29 @@ def cluster_runtime_findings(
             event_categories=["window.overlay"],
         ))
 
+    # ── 16. Accessibility Service Abuse ──────────────────────────────────
+    acc_events = by_cat.get("accessibility.abuse", [])
+    if acc_events:
+        findings.append(RuntimeFinding(
+            id=RF_ID_ACCESSIBILITY_ABUSE,
+            title="Accessibility Service Abuse Detected",
+            severity="CRITICAL",
+            category="accessibility.abuse",
+            summary=(
+                "The application interacted with or registered an Accessibility Service, or queried "
+                "active window hierarchy nodes at runtime. Accessibility Service abuse is a highly "
+                "dangerous capability used by banking Trojans to automate interactions, bypass permissions, "
+                "and log sensitive user keystrokes."
+            ),
+            evidence_items=[e.get("evidence", "") for e in acc_events[:5]],
+            sample_events=_samples(acc_events),
+            confidence=_calc_confidence(len(acc_events), False),
+            source="dynamic",
+            static_finding_refs=[],
+            event_count=len(acc_events),
+            event_categories=["accessibility.abuse"],
+        ))
+
     # Sort by severity priority
     SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     findings.sort(key=lambda f: SEV_ORDER.get(f.severity, 9))
@@ -634,6 +658,9 @@ def build_evidence_summary(normalized_events: List[Dict[str, Any]],
     if by_cat.get("db.write") or by_cat.get("db.query"):
         n = len(by_cat.get("db.write",[]))+len(by_cat.get("db.query",[]))
         lines.append(f"  {n} SQLite operation(s) observed")
+
+    if by_cat.get("accessibility.abuse"):
+        lines.append(f"  {len(by_cat['accessibility.abuse'])} Accessibility Service event(s) observed")
 
     cov = coverage_map or {}
     if cov.get("login_simulation_attempted") and not cov.get("login_simulation_effective"):

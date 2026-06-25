@@ -56,7 +56,7 @@ def _adb_run(args: list, timeout: float = 20) -> subprocess.CompletedProcess:
 def is_emulator_running_adb() -> bool:
     try:
         res = _adb_run(["devices"])
-        return any("emulator-" in line for line in res.stdout.splitlines())
+        return any(("emulator-" in line or "127.0.0.1:" in line or "localhost:" in line) for line in res.stdout.splitlines())
     except Exception:
         return False
 
@@ -64,7 +64,7 @@ def is_emulator_running_adb() -> bool:
 def is_emulator_online_adb() -> bool:
     try:
         res = _adb_run(["devices"])
-        return any("emulator-" in line and "device" in line for line in res.stdout.splitlines())
+        return any((("emulator-" in line or "127.0.0.1:" in line or "localhost:" in line) and "device" in line) for line in res.stdout.splitlines())
     except Exception:
         return False
 
@@ -118,7 +118,7 @@ def start_frida_server() -> bool:
             local_frida = os.getenv("KAVACH_LOCAL_FRIDA_PATH")
             if not local_frida:
                 home = os.path.expanduser("~")
-                local_frida = os.path.join(home, "Android/Sdk/frida-server-17.9.11-android-x86_64")
+                local_frida = os.path.join(home, "Android/Sdk/frida-server-17.15.3-android-x86_64")
             if os.path.exists(local_frida):
                 push_res = _adb_run(["push", local_frida, binary], timeout=30)
                 _adb_run(["shell", "chmod", "755", binary], timeout=10)

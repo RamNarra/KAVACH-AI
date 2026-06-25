@@ -1,0 +1,56 @@
+# Exclude external dependencies and virtual environments
+venv/
+.venv/
+node_modules/
+frontend/node_modules/
+backend/venv/
+
+# Exclude build and cache folders
+.next/
+frontend/.next/
+out/
+frontend/out/
+__pycache__/
+backend/__pycache__/
+.pytest_cache/
+backend/.pytest_cache/
+
+# Exclude runtime logs and scans
+*.log
+backend/*.log
+backend/tmp_scans/
+tmp_scans/
+
+# Exclude graphify output itself to prevent self-looping
+graphify-out/
+
+# Exclude system and git folders
+.git/
+.github/
+.agents/
+.gemini/
+
+# Exclude ops and scratch folders entirely
+ops/
+scratch/
+backend/scratch/
+
+# Exclude non-code files to allow code-only AST extraction without LLM API key
+*.md
+backend/*.json
+frontend/*.json
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.html
+*.pdf
+*.txt
+*.json
+*.log
+LICENSE
+docker-compose.yml
+.env
+.env.example
+.gitignore
+.watchfiles.toml

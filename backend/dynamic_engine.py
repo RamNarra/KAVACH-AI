@@ -1,4 +1,11 @@
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+load_dotenv()
+
 import time
 import datetime
 import subprocess
@@ -6,10 +13,14 @@ import logging
 import zipfile
 import frida
 import threading
-from typing import Dict, List, Any, Optional
+import base64
+import io
+from PIL import Image
+from typing import Dict, List, Any, Optional, Callable
 
 from frida_hooks import build_frida_script, select_packs_from_signals
 from redaction import deduplicate_events, redact_events
+from anti_evasion import detect_evasion_behaviors
 
 # Configure logger
 logger = logging.getLogger("kavach-dynamic")
@@ -29,6 +40,10 @@ _orig_subprocess_Popen = subprocess.Popen
 def run_cmd(args: List[str], **kwargs) -> _orig_subprocess.CompletedProcess:
     """Wrapper that routes ADB commands to the thread-local leased emulator serial if set."""
     device_serial = getattr(thread_local, "device_serial", None)
+    if device_serial:
+        import re
+        if not re.match(r"^[a-zA-Z0-9_\.\:\-]+$", device_serial):
+            raise ValueError(f"Security check failed: device serial '{device_serial}' is invalid.")
     if device_serial and args and args[0] == ADB_PATH:
         if len(args) > 1 and args[1] == "-s":
             pass
@@ -39,6 +54,10 @@ def run_cmd(args: List[str], **kwargs) -> _orig_subprocess.CompletedProcess:
 def Popen_cmd(args: List[str], **kwargs) -> _orig_subprocess.Popen:
     """Wrapper that routes ADB commands to the thread-local leased emulator serial if set."""
     device_serial = getattr(thread_local, "device_serial", None)
+    if device_serial:
+        import re
+        if not re.match(r"^[a-zA-Z0-9_\.\:\-]+$", device_serial):
+            raise ValueError(f"Security check failed: device serial '{device_serial}' is invalid.")
     if device_serial and args and args[0] == ADB_PATH:
         if len(args) > 1 and args[1] == "-s":
             pass
@@ -82,7 +101,7 @@ class EmulatorPoolManager:
             res = subprocess.run([ADB_PATH, "devices"], capture_output=True, text=True, timeout=10)
             devices = []
             for line in res.stdout.splitlines():
-                if "emulator-" in line and "device" in line:
+                if ("emulator-" in line or "127.0.0.1:" in line or "localhost:" in line) and "device" in line:
                     serial = line.split()[0]
                     devices.append(serial)
             
@@ -100,6 +119,13 @@ class EmulatorPoolManager:
                             f = open(lock_path, "w")
                             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
                             # Success! We acquired the file lock.
+                            # Proactively reset guest SELinux enforcement (watchdog) to recover from any crashed permissive leak
+                            try:
+                                res = _orig_subprocess_run([ADB_PATH, "-s", dev, "shell", "setenforce", "1"], capture_output=True, timeout=10)
+                                if res.returncode != 0:
+                                    logger.error(f"[Pool] Failed to enforce SELinux watchdog on {dev}: {res.stderr.decode('utf-8', errors='ignore')}")
+                            except Exception as watchdog_err:
+                                logger.error(f"[Pool] SELinux watchdog error on {dev}: {watchdog_err}")
                             self.busy_devices.add(dev)
                             self._lock_files[dev] = f
                             logger.info(f"[Pool] Leased emulator device (cross-process file lock): {dev}")
@@ -120,13 +146,20 @@ class EmulatorPoolManager:
             return None
 
     def release_device(self, serial: str):
+        import re
+        if not re.match(r"^[a-zA-Z0-9_\.\:\-]+$", serial):
+            logger.warning(f"[Pool] Rejected device release request for invalid serial format: {serial}")
+            return
         # Restore guest SELinux enforcement upon device release
         try:
             # Bypass thread-local serial routing to target the released device directly
-            _orig_subprocess_run([ADB_PATH, "-s", serial, "shell", "setenforce", "1"], capture_output=True, timeout=10)
-            logger.info(f"[Pool] Restored guest SELinux enforcement for: {serial}")
+            res = _orig_subprocess_run([ADB_PATH, "-s", serial, "shell", "setenforce", "1"], capture_output=True, timeout=10)
+            if res.returncode != 0:
+                logger.error(f"[Pool] Failed to restore SELinux enforcement for {serial}: {res.stderr.decode('utf-8', errors='ignore')}")
+            else:
+                logger.info(f"[Pool] Restored guest SELinux enforcement for: {serial}")
         except Exception as e:
-            logger.warning(f"[Pool] Failed to restore SELinux for {serial}: {e}")
+            logger.error(f"[Pool] Failed to restore SELinux for {serial}: {e}")
 
         import fcntl
         with self.lock:
@@ -237,11 +270,12 @@ def ensure_frida_server_running() -> bool:
         if device_serial:
             binary = sandbox_bootstrap.FRIDA_REMOTE_PATH
             name = os.path.basename(binary)
-            res = subprocess.run([ADB_PATH, "shell", "pidof", name], capture_output=True, text=True, timeout=10)
+            res = subprocess.run([ADB_PATH, "-s", device_serial, "shell", "pidof", name], capture_output=True, text=True, timeout=10)
             if res.stdout.strip():
+                subprocess.run([ADB_PATH, "-s", device_serial, "shell", "setenforce", "0"], capture_output=True, timeout=10)
                 return True
-            subprocess.run([ADB_PATH, "root"], capture_output=True, timeout=10)
-            subprocess.run([ADB_PATH, "shell", "setenforce", "0"], capture_output=True, timeout=10)
+            subprocess.run([ADB_PATH, "-s", device_serial, "root"], capture_output=True, timeout=10)
+            subprocess.run([ADB_PATH, "-s", device_serial, "shell", "setenforce", "0"], capture_output=True, timeout=10)
             cmd = [ADB_PATH, "-s", device_serial, "shell", f"killall {name} 2>/dev/null; {binary} -D"]
             subprocess.Popen(
                 cmd,
@@ -298,6 +332,121 @@ def _wait_for_pm_ready(timeout_secs: int = 90, log_fn=None) -> bool:
         time.sleep(3)
     return False
 
+class ScreenshotThread(threading.Thread):
+    def __init__(self, device_serial: Optional[str], screenshot_callback: Callable[[str], None], local_screenshot_dir: Optional[str] = None, interval: float = 2.0):
+        super().__init__()
+        self.device_serial = device_serial
+        self.screenshot_callback = screenshot_callback
+        self.local_screenshot_dir = local_screenshot_dir
+        self.interval = interval
+        self.stop_event = threading.Event()
+        self.daemon = True
+
+    def run(self):
+        logger.info("[ScreenshotThread] Started capture loop.")
+        counter = 0
+        start_ts = time.time()
+        while not self.stop_event.is_set():
+            start_time = time.time()
+            try:
+                cmd = [ADB_PATH]
+                if self.device_serial:
+                    cmd += ["-s", self.device_serial]
+                cmd += ["exec-out", "screencap", "-p"]
+
+                res = _orig_subprocess_run(cmd, capture_output=True, timeout=5)
+                if res.returncode == 0 and res.stdout:
+                    img_bytes = res.stdout
+                    # Process image with Pillow
+                    img = Image.open(io.BytesIO(img_bytes))
+                    
+                    # Save a copy locally if path is provided (for PDF report)
+                    if self.local_screenshot_dir:
+                        os.makedirs(self.local_screenshot_dir, exist_ok=True)
+                        elapsed_sec = int(time.time() - start_ts)
+                        local_path = os.path.join(self.local_screenshot_dir, f"frame_{counter:03d}_{elapsed_sec}s.png")
+                        img.save(local_path, "PNG")
+                        counter += 1
+
+                    # Resize and compress for live SSE streaming
+                    img.thumbnail((320, 568))
+                    out_bytes = io.BytesIO()
+                    img.convert("RGB").save(out_bytes, format="JPEG", quality=50)
+                    b64_str = base64.b64encode(out_bytes.getvalue()).decode("utf-8")
+                    self.screenshot_callback(f"data:image/jpeg;base64,{b64_str}")
+            except Exception as e:
+                logger.debug(f"[ScreenshotThread] Error capturing screen: {e}")
+
+            elapsed = time.time() - start_time
+            sleep_time = max(0.1, self.interval - elapsed)
+            self.stop_event.wait(sleep_time)
+        logger.info("[ScreenshotThread] Stopped capture loop.")
+
+    def stop(self):
+        self.stop_event.set()
+
+
+def start_screen_recording(duration: int, device_serial: Optional[str]) -> Optional[subprocess.Popen]:
+    try:
+        cmd_rm = [ADB_PATH]
+        if device_serial:
+            cmd_rm += ["-s", device_serial]
+        cmd_rm += ["shell", "rm", "-f", "/sdcard/kavach_dynamic.mp4"]
+        _orig_subprocess_run(cmd_rm, capture_output=True, timeout=5)
+
+        cmd_rec = [ADB_PATH]
+        if device_serial:
+            cmd_rec += ["-s", device_serial]
+        # Bounded recording: limit time to duration + 10s (max 180s per ADB specs)
+        time_limit = str(min(duration + 10, 180))
+        cmd_rec += [
+            "shell", "screenrecord",
+            "--size", "1280x720",
+            "--bit-rate", "1500000",
+            "--time-limit", time_limit,
+            "/sdcard/kavach_dynamic.mp4"
+        ]
+        proc = _orig_subprocess_Popen(cmd_rec, stdout=_orig_subprocess.DEVNULL, stderr=_orig_subprocess.DEVNULL)
+        return proc
+    except Exception as e:
+        logger.error(f"Failed to start screen recording: {e}")
+        return None
+
+
+def stop_screen_recording(record_proc: Optional[subprocess.Popen], device_serial: Optional[str]) -> bool:
+    try:
+        cmd_pid = [ADB_PATH]
+        if device_serial:
+            cmd_pid += ["-s", device_serial]
+        cmd_pid += ["shell", "pidof", "screenrecord"]
+        pid_res = _orig_subprocess_run(cmd_pid, capture_output=True, text=True, timeout=5)
+        pid_str = pid_res.stdout.strip()
+        if pid_str:
+            # Send SIGINT (2) to finalize MP4 file header safely
+            for pid in pid_str.split():
+                cmd_kill = [ADB_PATH]
+                if device_serial:
+                    cmd_kill += ["-s", device_serial]
+                cmd_kill += ["shell", "kill", "-2", pid]
+                _orig_subprocess_run(cmd_kill, capture_output=True, timeout=5)
+            logger.info("Sent SIGINT to remote screenrecord process.")
+
+        # Wait a moment for remote container packaging
+        time.sleep(2.0)
+
+        # Terminate local process
+        if record_proc:
+            try:
+                record_proc.terminate()
+                record_proc.wait(timeout=3)
+            except Exception:
+                pass
+        return True
+    except Exception as e:
+        logger.error(f"Failed to stop screen recording: {e}")
+        return False
+
+
 def run_behavioral_trace(
     apk_path: str,
     package_name: str,
@@ -308,6 +457,12 @@ def run_behavioral_trace(
     log_callback=None,
     device_serial: Optional[str] = None,
     gemini_api_key: Optional[str] = None,
+    doc_id: Optional[str] = None,
+    screenshot_callback: Optional[Callable[[str], None]] = None,
+    local_video_path: Optional[str] = None,
+    local_screenshot_dir: Optional[str] = None,
+    genai_client=None,
+    generate_fn=None,
 ) -> Dict[str, Any]:
     """
     Run the full behavioral trace pipeline:
@@ -319,8 +474,28 @@ def run_behavioral_trace(
       6. Normalize, redact, deduplicate events
       7. Return structured result with normalized_events + trigger_transcript
     """
+    # Sanitize device_serial format to prevent adb shell injections
+    if device_serial:
+        import re
+        if not re.match(r"^[a-zA-Z0-9_\.\:\-]+$", device_serial):
+            log_event(f"Security check failed: Device serial '{device_serial}' contains invalid characters.", is_error=True)
+            return {
+                "status": "FAILED",
+                "events": [],
+                "normalized_events": [],
+                "trigger_transcript": [],
+                "event_count": 0,
+                "duration_seconds": duration,
+                "error_message": "Invalid device serial format. Security validation failed."
+            }
+
     thread_local.device_serial = device_serial
     if os.environ.get("KAVACH_DEMO_MODE") == "1":
+        is_prod = (
+            os.environ.get("ENVIRONMENT") == "production" or
+            os.environ.get("KAVACH_ENV", "").strip().lower() in ("production", "prod")
+        )
+        assert not is_prod, "KAVACH_DEMO_MODE cannot be enabled in production environments!"
         import json
         demo_path = os.path.join(os.path.dirname(__file__), "demo_trace.json")
         try:
@@ -545,6 +720,8 @@ def run_behavioral_trace(
     script = None
     pid = None
     device = None
+    screenshot_thread = None
+    record_proc = None
 
     try:
         # ADB accessibility check
@@ -563,7 +740,7 @@ def run_behavioral_trace(
 
         # Restore guest SELinux boundaries at dynamic session start to proactively revert any stale dynamic trace state
         try:
-            subprocess.run([ADB_PATH, "shell", "setenforce", "1"], capture_output=True, timeout=10)
+            subprocess.run([ADB_PATH, "-s", device_serial, "shell", "setenforce", "1"], capture_output=True, timeout=10)
             log_event("Enforced guest SELinux boundaries for clean session start.")
         except Exception as se_err:
             log_event(f"Failed to enforce guest SELinux boundaries at session start (non-fatal): {se_err}", is_warn=True)
@@ -581,6 +758,13 @@ def run_behavioral_trace(
                 "duration_seconds": duration,
                 "error_message": "Frida server could not be started on emulator."
             }
+
+        # Explicitly set guest SELinux to permissive mode to allow Frida to perform ART hook injection
+        try:
+            subprocess.run([ADB_PATH, "-s", device_serial, "shell", "setenforce", "0"], capture_output=True, timeout=10)
+            log_event("Switched guest SELinux to Permissive mode for Frida instrumentation.")
+        except Exception as se_err:
+            log_event(f"Failed to switch guest SELinux to Permissive mode: {se_err}", is_warn=True)
 
         # ABI pre-flight check
         log_event("Checking native ABI compatibility with sandbox emulator...")
@@ -717,14 +901,24 @@ def run_behavioral_trace(
         except Exception:
             pass
 
+        # Start screenshot loop and video recording
+        if screenshot_callback:
+            screenshot_thread = ScreenshotThread(device_serial, screenshot_callback, local_screenshot_dir, interval=2.0)
+            screenshot_thread.start()
+
+        log_event("Starting ADB screen recording...")
+        record_proc = start_screen_recording(duration, device_serial)
+
         log_event(f"Spawning sandbox package: {package_name}...")
         
         session = None
         pid = None
+        is_spawned = False
         try:
             pid = device.spawn([package_name])
             log_event(f"Spawned package successfully. PID: {pid}")
             session = device.attach(pid)
+            is_spawned = True
         except Exception as spawn_err:
             log_event(f"Frida spawn failed: {spawn_err}. Engaging manual launch and direct PID attach fallback...", is_warn=True)
             
@@ -821,7 +1015,7 @@ def run_behavioral_trace(
                     return
 
                 # Normalize to typed event schema
-                ts_now = datetime.datetime.utcnow().isoformat() + "Z"
+                ts_now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None).isoformat() + "Z"
                 norm = {
                     "ts":           ts_now,
                     "category":     payload.get("category", "unknown"),
@@ -852,8 +1046,15 @@ def run_behavioral_trace(
 
         script.on("message", on_message)
         script.load()
-        device.resume(pid)
-        log_event(f"Process {pid} resumed. Instrumentation active.")
+        if is_spawned:
+            device.resume(pid)
+            log_event(f"Process {pid} resumed. Waiting for ART to initialize...")
+            time.sleep(2.5)  # Give ART/Dalvik time to fully init before Java bridge polls fire
+            log_event(f"Process {pid} instrumentation active.")
+        else:
+            log_event(f"Process {pid} attached (already running). Waiting for Java bridge poll...")
+            time.sleep(1.5)  # Allow setInterval to fire and detect Java bridge
+            log_event(f"Process {pid} instrumentation active.")
         dismiss_guest_system_overlays()
 
         # Explicit launcher launch
@@ -888,6 +1089,8 @@ def run_behavioral_trace(
                 static_signals=signals,
                 log_callback=log_callback,
                 gemini_api_key=gemini_api_key,
+                genai_client=genai_client,
+                generate_fn=generate_fn,
             )
             trigger_transcript = play_result["transcript"]
             coverage_map = play_result["coverage_map"]
@@ -911,6 +1114,34 @@ def run_behavioral_trace(
     finally:
         log_event("Entering sandbox cleanup sequence...")
         
+        # Stop screenshot thread
+        if screenshot_thread:
+            try:
+                screenshot_thread.stop()
+                screenshot_thread.join(timeout=3.0)
+            except Exception as se_err:
+                logger.error(f"Error stopping screenshot thread: {se_err}")
+
+        # Stop screen recording and pull video
+        if record_proc:
+            try:
+                log_event("Stopping ADB screen recording...")
+                stop_screen_recording(record_proc, device_serial)
+                if local_video_path:
+                    log_event(f"Pulling video from device to host: {local_video_path}")
+                    cmd_pull = [ADB_PATH]
+                    if device_serial:
+                        cmd_pull += ["-s", device_serial]
+                    cmd_pull += ["pull", "/sdcard/kavach_dynamic.mp4", local_video_path]
+                    
+                    pull_res = _orig_subprocess_run(cmd_pull, capture_output=True, timeout=30)
+                    if pull_res.returncode == 0 and os.path.exists(local_video_path) and os.path.getsize(local_video_path) > 0:
+                        log_event("Screen recording pulled successfully.")
+                    else:
+                        log_event(f"Failed to pull screen recording: {pull_res.stderr.decode('utf-8', errors='ignore')}", is_warn=True)
+            except Exception as rec_err:
+                logger.error(f"Error stopping/pulling screen recording: {rec_err}")
+
         # Force-stop package first to cleanly tear down process and sever active Frida injection
         try:
             subprocess.run([ADB_PATH, "shell", "am", "force-stop", package_name], capture_output=True, timeout=10)
@@ -943,6 +1174,7 @@ def run_behavioral_trace(
 
     # Post-collection: redact + deduplicate normalized events
     normalized_events = redact_events(deduplicate_events(raw_events))
+    evasion_rep = detect_evasion_behaviors(normalized_events)
 
     # Replace None/null values with empty structures to ensure schema validation
     # Determine runtime_confidence
@@ -1002,4 +1234,5 @@ def run_behavioral_trace(
         "runtime_confidence": runtime_confidence,
         "steps_attempted":   play_steps_attempted,
         "steps_succeeded":   play_steps_ok,
+        "evasion_report":    evasion_rep,
     }

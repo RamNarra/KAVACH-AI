@@ -31,7 +31,7 @@ def resolve_jadx() -> str:
     if found:
         return found
     raise FileNotFoundError(
-        "jadx not found. Run backend/scripts/install_local_tools.sh or set JADX_BIN."
+        "jadx decompiler is not found locally. Local scans are deprecated; ensure MobSF container is running."
     )
 
 
@@ -55,7 +55,7 @@ def resolve_apktool() -> List[str]:
     if os.path.isfile(docker_jar):
         return ["java", "-jar", docker_jar]
     raise FileNotFoundError(
-        "apktool not found. Run backend/scripts/install_local_tools.sh or set APKTOOL_BIN."
+        "apktool is not found locally. Local scans are deprecated; ensure MobSF container is running."
     )
 
 

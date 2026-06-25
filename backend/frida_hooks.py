@@ -202,6 +202,47 @@ try {
         return this.execute();
     };
 } catch(e) {}
+
+// TLS Client Hello SNI Interception
+try {
+    var openSslSocket = Java.use("com.android.org.conscrypt.OpenSSLSocketImpl");
+    openSslSocket.setHostname.implementation = function(hostname) {
+        _emit("network.tls", "sni_client_hello", "low",
+              "com.android.org.conscrypt.OpenSSLSocketImpl", "setHostname",
+              { hostname: String(hostname) },
+              "TLS Client Hello SNI (OpenSSLSocketImpl): " + hostname);
+        this.setHostname(hostname);
+    };
+} catch(e) {}
+
+try {
+    var conSocket = Java.use("com.android.org.conscrypt.AbstractConscryptSocket");
+    conSocket.setHostname.implementation = function(hostname) {
+        _emit("network.tls", "sni_client_hello", "low",
+              "com.android.org.conscrypt.AbstractConscryptSocket", "setHostname",
+              { hostname: String(hostname) },
+              "TLS Client Hello SNI (AbstractConscryptSocket): " + hostname);
+        this.setHostname(hostname);
+    };
+} catch(e) {}
+
+try {
+    var SSLParameters = Java.use("javax.net.ssl.SSLParameters");
+    SSLParameters.setServerNames.implementation = function(serverNames) {
+        if (serverNames !== null && serverNames.size() > 0) {
+            var sniList = [];
+            for (var i = 0; i < serverNames.size(); i++) {
+                var sni = serverNames.get(i);
+                sniList.push(String(sni.toString()));
+            }
+            _emit("network.tls", "ssl_parameters_sni", "low",
+                  "javax.net.ssl.SSLParameters", "setServerNames",
+                  { server_names: sniList },
+                  "TLS SNI via SSLParameters: " + sniList.join(", "));
+        }
+        this.setServerNames(serverNames);
+    };
+} catch(e) {}
 """
 
 # --------------------------------------------------------------------------- #
@@ -387,69 +428,141 @@ try {
 # --------------------------------------------------------------------------- #
 # Pack: evasion  (anti_vm / anti_debug / anti_hook signals)
 # --------------------------------------------------------------------------- #
-_VM_PROP_KEYWORDS = [
-    "ro.build.fingerprint", "ro.product.model", "ro.product.manufacturer",
-    "ro.build.tags", "ro.hardware", "ro.product.board", "ro.product.brand",
-    "ro.kernel.qemu", "ro.secure", "ro.debuggable"
-]
-
 _PACK_EVASION = (
-    """
-// ── Evasion detection hooks ──────────────────────────────────────────────────
+    r"""
+// ── Evasion detection & spoofing bypass hooks ────────────────────────────────
 try {
     var _Dbg = Java.use("android.os.Debug");
     _Dbg.isDebuggerConnected.implementation = function() {
-        var r = this.isDebuggerConnected();
         _emit("anti_debug.signal", "debugger_check", "medium",
               "android.os.Debug", "isDebuggerConnected",
-              { result: r },
-              "Debugger presence check (result=" + r + ")");
-        return r;
+              { result: false },
+              "Debugger presence check (bypassed: returned false)");
+        return false;
     };
 } catch(e) {}
 
 try {
     var _SysProp = Java.use("android.os.SystemProperties");
-    var _vmKeys = """ + json.dumps(_VM_PROP_KEYWORDS) + """;
     
-    function checkVMKey(key, value) {
+    function bypassSystemProperty(key, originalValue) {
         var k = String(key);
-        var r = String(value);
-        var isVM = _vmKeys.some(function(vk) { return k.indexOf(vk) !== -1; });
+        var val = String(originalValue);
+        
+        var vmKeys = ["ro.kernel.qemu", "ro.hardware", "ro.product.board", "ro.product.brand", 
+                      "ro.product.model", "ro.product.manufacturer", "ro.build.fingerprint", 
+                      "ro.secure", "ro.debuggable", "init.svc.goldfish-logcat", "ro.product.device",
+                      "ro.board.platform", "ro.boot.hardware"];
+                      
+        var isVM = vmKeys.some(function(vk) { return k.indexOf(vk) !== -1; });
         if (isVM) {
+            var fakeVal = val;
+            if (k === "ro.kernel.qemu") fakeVal = "0";
+            else if (k === "ro.secure") fakeVal = "1";
+            else if (k === "ro.debuggable") fakeVal = "0";
+            else if (k === "ro.product.model" || k === "ro.product.device") fakeVal = "SM-G975F";
+            else if (k === "ro.product.brand" || k === "ro.product.manufacturer") fakeVal = "samsung";
+            else if (k === "ro.build.fingerprint") fakeVal = "samsung/beyond1qlteue/beyond1q:10/QP1A.190711.020/G973U1UES6GVI1:user/release-keys";
+            else if (k === "ro.hardware" || k === "ro.boot.hardware" || k === "ro.board.platform") fakeVal = "qcom";
+            else if (k.indexOf("goldfish") !== -1) fakeVal = "";
+            
             _emit("anti_vm.signal", "property_check", "high",
                   "android.os.SystemProperties", "get",
-                  { key: _trunc(k, 80), value: _trunc(r, 80) },
-                  "VM property check: " + _trunc(k, 80) + " = " + _trunc(r, 60));
+                  { key: k, value: val, spoofed_value: fakeVal },
+                  "VM property check (spoofed): " + k + " (returned: " + fakeVal + ")");
+            return fakeVal;
         }
+        return originalValue;
     }
 
     _SysProp.get.overload("java.lang.String").implementation = function(key) {
         var r = this.get(key);
-        checkVMKey(key, r);
-        return r;
+        return bypassSystemProperty(key, r);
     };
 
     _SysProp.get.overload("java.lang.String", "java.lang.String").implementation = function(key, def) {
         var r = this.get(key, def);
-        checkVMKey(key, r);
-        return r;
+        return bypassSystemProperty(key, r);
+    };
+} catch(e) {}
+
+try {
+    var Build = Java.use("android.os.Build");
+    Build.FINGERPRINT.value = "samsung/beyond1qlteue/beyond1q:10/QP1A.190711.020/G973U1UES6GVI1:user/release-keys";
+    Build.MODEL.value = "SM-G975F";
+    Build.MANUFACTURER.value = "samsung";
+    Build.BRAND.value = "samsung";
+    Build.DEVICE.value = "beyond1";
+    Build.PRODUCT.value = "beyond1q";
+    Build.HARDWARE.value = "qcom";
+    Build.BOARD.value = "universal9820";
+    console.log("[Kavach] android.os.Build static properties spoofed.");
+} catch(e) {}
+
+try {
+    var ActivityManager = Java.use("android.app.ActivityManager");
+    ActivityManager.isUserMonkey.implementation = function() {
+        _emit("anti_vm.signal", "monkey_check", "medium", "android.app.ActivityManager", "isUserMonkey", {}, "Monkey UI automation check (bypassed: returned false)");
+        return false;
+    };
+} catch(e) {}
+
+try {
+    var File = Java.use("java.io.File");
+    
+    File.$init.overload("java.lang.String").implementation = function(path) {
+        var p = String(path);
+        var redirected = p;
+        
+        var rootPaths = ["/su", "/su/bin/su", "/sbin/su", "/system/bin/su", "/system/xbin/su", 
+                         "/data/local/xbin/su", "/data/local/bin/su", "/system/sd/xbin/su", 
+                         "/system/bin/failsafe/su", "/data/local/su", "/system/app/Superuser.apk", 
+                         "/system/app/Magisk.apk", "/data/adb/magisk", "bin/su", "xbin/su"];
+                         
+        var vmPaths = ["/dev/socket/qemud", "/dev/qemu_pipe", "/system/lib/libc_malloc_debug_qemu.so", 
+                       "/sys/qemu_trace", "qemu_pipe", "qemud"];
+                       
+        var fridaPaths = ["frida-server", "re.frida.server", "frida"];
+
+        if (rootPaths.some(function(r) { return p.indexOf(r) !== -1; })) {
+            _emit("anti_root.signal", "file_check", "high", "java.io.File", "<init>", { path: p }, "Root file check (bypassed): " + p);
+            redirected = "/system/nonexistent_root_file";
+        } else if (vmPaths.some(function(v) { return p.indexOf(v) !== -1; })) {
+            _emit("anti_vm.signal", "file_check", "high", "java.io.File", "<init>", { path: p }, "VM file check (bypassed): " + p);
+            redirected = "/system/nonexistent_vm_file";
+        } else if (fridaPaths.some(function(f) { return p.indexOf(f) !== -1; })) {
+            _emit("anti_hook.signal", "file_check", "high", "java.io.File", "<init>", { path: p }, "Frida file check (bypassed): " + p);
+            redirected = "/system/nonexistent_frida_file";
+        }
+        
+        return this.$init(redirected);
+    };
+
+    File.$init.overload("java.io.File", "java.lang.String").implementation = function(parent, child) {
+        var c = String(child);
+        var redirectedChild = c;
+        if (c.indexOf("su") !== -1 || c.indexOf("magisk") !== -1 || c.indexOf("frida") !== -1 || c.indexOf("qemu") !== -1) {
+            redirectedChild = "nonexistent_evasion_child";
+        }
+        return this.$init(parent, redirectedChild);
     };
 } catch(e) {}
 
 try {
     var _RTExec = Java.use("java.lang.Runtime");
     _RTExec.exec.overload("java.lang.String").implementation = function(cmd) {
+        var c = String(cmd);
         _emit("process.exec", "shell_exec", "high",
               "java.lang.Runtime", "exec",
-              { cmd: _trunc(String(cmd), 150) },
-              "Runtime.exec: " + _trunc(String(cmd), 120));
+              { cmd: _trunc(c, 150) },
+              "Runtime.exec: " + _trunc(c, 120));
+        
+        if (c.indexOf("su") !== -1 || c.indexOf("which") !== -1) {
+            cmd = "echo 'command not found'";
+        }
         return this.exec(cmd);
     };
-} catch(e) {}
 
-try {
-    var _RTExec = Java.use("java.lang.Runtime");
     _RTExec.exec.overload("[Ljava.lang.String;").implementation = function(cmdArray) {
         var cmdStr = "";
         try {
@@ -459,13 +572,284 @@ try {
             }
             cmdStr = parts.join(" ");
         } catch(e3) { cmdStr = String(cmdArray); }
+        
         _emit("process.exec", "shell_exec", "high",
               "java.lang.Runtime", "exec",
               { cmd: _trunc(cmdStr, 150) },
               "Runtime.exec: " + _trunc(cmdStr, 120));
+              
+        if (cmdStr.indexOf("su") !== -1 || cmdStr.indexOf("which") !== -1) {
+            var JavaString = Java.use("java.lang.String");
+            var newArray = [JavaString.$new("echo"), JavaString.$new("command not found")];
+            return this.exec(newArray);
+        }
         return this.exec(cmdArray);
     };
 } catch(e) {}
+
+try {
+    var Thread = Java.use("java.lang.Thread");
+    Thread.sleep.overload("long").implementation = function(millis) {
+        if (millis > 2000) {
+            _emit("anti_analysis.timing", "thread_sleep", "medium",
+                  "java.lang.Thread", "sleep", { requested_ms: millis },
+                  "Timing stall bypassed (requested: " + millis + "ms, fast-forwarded to 50ms)");
+            return this.sleep(50);
+        }
+        return this.sleep(millis);
+    };
+    Thread.sleep.overload("long", "int").implementation = function(millis, nanos) {
+        if (millis > 2000) {
+            _emit("anti_analysis.timing", "thread_sleep", "medium",
+                  "java.lang.Thread", "sleep", { requested_ms: millis, nanos: nanos },
+                  "Timing stall bypassed (requested: " + millis + "ms, fast-forwarded to 50ms)");
+            return this.sleep(50, 0);
+        }
+        return this.sleep(millis, nanos);
+    };
+} catch(e) {}
+
+try {
+    var SystemClock = Java.use("android.os.SystemClock");
+    SystemClock.sleep.implementation = function(millis) {
+        if (millis > 2000) {
+            _emit("anti_analysis.timing", "systemclock_sleep", "medium",
+                  "android.os.SystemClock", "sleep", { requested_ms: millis },
+                  "SystemClock sleep stall bypassed (requested: " + millis + "ms, fast-forwarded to 50ms)");
+            return this.sleep(50);
+        }
+        return this.sleep(millis);
+    };
+} catch(e) {}
+
+try {
+    var BatteryManager = Java.use("android.os.BatteryManager");
+    BatteryManager.getIntProperty.implementation = function(property) {
+        var BATTERY_PROPERTY_CAPACITY = 4;
+        if (property === BATTERY_PROPERTY_CAPACITY) {
+            _emit("anti_analysis.battery", "capacity_check", "medium",
+                  "android.os.BatteryManager", "getIntProperty", {},
+                  "Battery capacity queried (spoofed to 87%)");
+            return 87;
+        }
+        return this.getIntProperty(property);
+    };
+} catch(e) {}
+
+// ── Native libc hooks for files and TracerPid ────────────────────────────────
+var redirectedStatusPath = "/data/local/tmp/status_spoof";
+var redirectedMapsPath = "/data/local/tmp/maps_spoof";
+var redirectedTcpPath = "/data/local/tmp/tcp_spoof";
+
+try {
+    var File = Java.use("java.io.File");
+    var FileInputStream = Java.use("java.io.FileInputStream");
+    var FileOutputStream = Java.use("java.io.FileOutputStream");
+    var StringBuilder = Java.use("java.lang.StringBuilder");
+    var BufferedReader = Java.use("java.io.BufferedReader");
+    var InputStreamReader = Java.use("java.io.InputStreamReader");
+    var BufferedWriter = Java.use("java.io.BufferedWriter");
+    var OutputStreamWriter = Java.use("java.io.OutputStreamWriter");
+
+    // 1. Spoof /proc/self/status (TracerPid: 0)
+    var statusFile = File.$new("/proc/self/status");
+    if (statusFile.exists()) {
+        var br = BufferedReader.$new(InputStreamReader.$new(FileInputStream.$new(statusFile)));
+        var outBuilder = StringBuilder.$new();
+        var line;
+        while ((line = br.readLine()) !== null) {
+            var lineStr = String(line);
+            if (lineStr.indexOf("TracerPid:") === 0) {
+                outBuilder.append("TracerPid:\t0\n");
+            } else {
+                outBuilder.append(lineStr).append("\n");
+            }
+        }
+        br.close();
+        var bw = BufferedWriter.$new(OutputStreamWriter.$new(FileOutputStream.$new(File.$new(redirectedStatusPath))));
+        bw.write(outBuilder.toString());
+        bw.close();
+    }
+
+    // 2. Spoof /proc/self/maps (filter out Frida and gum-js traces)
+    var mapsFile = File.$new("/proc/self/maps");
+    if (mapsFile.exists()) {
+        var br = BufferedReader.$new(InputStreamReader.$new(FileInputStream.$new(mapsFile)));
+        var outBuilder = StringBuilder.$new();
+        var line;
+        while ((line = br.readLine()) !== null) {
+            var lineStr = String(line);
+            if (lineStr.indexOf("frida") === -1 && lineStr.indexOf("gum-js") === -1 && lineStr.indexOf("re.frida") === -1) {
+                outBuilder.append(lineStr).append("\n");
+            }
+        }
+        br.close();
+        var bw = BufferedWriter.$new(OutputStreamWriter.$new(FileOutputStream.$new(File.$new(redirectedMapsPath))));
+        bw.write(outBuilder.toString());
+        bw.close();
+    }
+
+    // 3. Spoof /proc/net/tcp (filter out Frida port 27042 -> 69A2 hex)
+    var tcpFile = File.$new("/proc/net/tcp");
+    if (tcpFile.exists()) {
+        var br = BufferedReader.$new(InputStreamReader.$new(FileInputStream.$new(tcpFile)));
+        var outBuilder = StringBuilder.$new();
+        var line;
+        while ((line = br.readLine()) !== null) {
+            var lineStr = String(line);
+            if (lineStr.indexOf("69A2") === -1 && lineStr.indexOf("58A2") === -1) {
+                outBuilder.append(lineStr).append("\n");
+            }
+        }
+        br.close();
+        var bw = BufferedWriter.$new(OutputStreamWriter.$new(FileOutputStream.$new(File.$new(redirectedTcpPath))));
+        bw.write(outBuilder.toString());
+        bw.close();
+    }
+} catch(e) {
+    console.log("Error creating dynamic camouflage files: " + e);
+}
+
+try {
+    var openPtr = Module.findExportByName(null, "open");
+    if (openPtr) {
+        Interceptor.attach(openPtr, {
+            before: function(args) {
+                var path = Memory.readUtf8String(args[0]);
+                if (path) {
+                    if (path.indexOf("/proc/") !== -1 && path.indexOf("/status") !== -1) {
+                        args[0] = Memory.allocUtf8String(redirectedStatusPath);
+                    } else if (path.indexOf("/proc/") !== -1 && path.indexOf("/maps") !== -1) {
+                        args[0] = Memory.allocUtf8String(redirectedMapsPath);
+                    } else if (path.indexOf("/proc/") !== -1 && path.indexOf("/tcp") !== -1) {
+                        args[0] = Memory.allocUtf8String(redirectedTcpPath);
+                    } else if (path.indexOf("qemu_pipe") !== -1 || path.indexOf("qemud") !== -1) {
+                        args[0] = Memory.allocUtf8String("/dev/nonexistent");
+                    }
+                }
+            }
+        });
+    }
+    
+    var fopenPtr = Module.findExportByName(null, "fopen");
+    if (fopenPtr) {
+        Interceptor.attach(fopenPtr, {
+            before: function(args) {
+                var path = Memory.readUtf8String(args[0]);
+                if (path) {
+                    if (path.indexOf("/proc/") !== -1 && path.indexOf("/status") !== -1) {
+                        args[0] = Memory.allocUtf8String(redirectedStatusPath);
+                    } else if (path.indexOf("/proc/") !== -1 && path.indexOf("/maps") !== -1) {
+                        args[0] = Memory.allocUtf8String(redirectedMapsPath);
+                    } else if (path.indexOf("/proc/") !== -1 && path.indexOf("/tcp") !== -1) {
+                        args[0] = Memory.allocUtf8String(redirectedTcpPath);
+                    } else if (path.indexOf("qemu_pipe") !== -1 || path.indexOf("qemud") !== -1) {
+                        args[0] = Memory.allocUtf8String("/dev/nonexistent");
+                    }
+                }
+            }
+        });
+    }
+
+    var openatPtr = Module.findExportByName(null, "openat");
+    if (openatPtr) {
+        Interceptor.attach(openatPtr, {
+            before: function(args) {
+                var path = Memory.readUtf8String(args[1]);
+                if (path) {
+                    if (path.indexOf("/proc/") !== -1 && path.indexOf("/status") !== -1) {
+                        args[1] = Memory.allocUtf8String(redirectedStatusPath);
+                    } else if (path.indexOf("/proc/") !== -1 && path.indexOf("/maps") !== -1) {
+                        args[1] = Memory.allocUtf8String(redirectedMapsPath);
+                    } else if (path.indexOf("/proc/") !== -1 && path.indexOf("/tcp") !== -1) {
+                        args[1] = Memory.allocUtf8String(redirectedTcpPath);
+                    } else if (path.indexOf("qemu_pipe") !== -1 || path.indexOf("qemud") !== -1) {
+                        args[1] = Memory.allocUtf8String("/dev/nonexistent");
+                    }
+                }
+            }
+        });
+    }
+
+    var popenPtr = Module.findExportByName(null, "popen");
+    if (popenPtr) {
+        Interceptor.attach(popenPtr, {
+            before: function(args) {
+                var command = Memory.readUtf8String(args[0]);
+                if (command) {
+                    _emit("process.exec", "popen", "high",
+                          "libc.so", "popen",
+                          { command: String(command) },
+                          "Native popen execution: " + command);
+                    
+                    if (command.indexOf("su") !== -1 || command.indexOf("which") !== -1 || command.indexOf("pm list") !== -1) {
+                        args[0] = Memory.allocUtf8String("echo 'not found'");
+                    }
+                }
+            }
+        });
+    }
+} catch(e) {
+    console.log("Error installing native open/popen/openat hooks: " + e);
+}
+
+try {
+    var strcmpPtr = Module.findExportByName(null, "strcmp");
+    if (strcmpPtr) {
+        Interceptor.attach(strcmpPtr, {
+            before: function(args) {
+                this.s1 = args[0];
+                this.s2 = args[1];
+                try {
+                    this.str1 = Memory.readUtf8String(this.s1);
+                    this.str2 = Memory.readUtf8String(this.s2);
+                } catch(e) {
+                    this.str1 = null;
+                    this.str2 = null;
+                }
+            },
+            onLeave: function(retval) {
+                try {
+                    if (this.str1 && this.str2) {
+                        var hasFrida1 = this.str1.indexOf("frida") !== -1 || this.str1.indexOf("gum-js") !== -1;
+                        var hasFrida2 = this.str2.indexOf("frida") !== -1 || this.str2.indexOf("gum-js") !== -1;
+                        if (hasFrida1 || hasFrida2) {
+                            if (retval.toInt32() === 0) {
+                                retval.replace(ptr(-1));
+                            }
+                        }
+                    }
+                } catch(e) {}
+            }
+        });
+    }
+
+    var strstrPtr = Module.findExportByName(null, "strstr");
+    if (strstrPtr) {
+        Interceptor.attach(strstrPtr, {
+            before: function(args) {
+                this.haystack = args[0];
+                this.needle = args[1];
+                try {
+                    this.str_haystack = Memory.readUtf8String(this.haystack);
+                    this.str_needle = Memory.readUtf8String(this.needle);
+                } catch(e) {
+                    this.str_haystack = null;
+                    this.str_needle = null;
+                }
+            },
+            onLeave: function(retval) {
+                try {
+                    if (this.str_needle && (this.str_needle.indexOf("frida") !== -1 || this.str_needle.indexOf("gum-js") !== -1)) {
+                        retval.replace(ptr(0));
+                    }
+                } catch(e) {}
+            }
+        });
+    }
+} catch(e) {
+    console.log("Error installing native strcmp/strstr hooks: " + e);
+}
 """
 )
 
@@ -785,6 +1169,60 @@ try {
 }
 """
 
+_PACK_ACCESSIBILITY = """
+// ── Accessibility Service hooks ──────────────────────────────────────────────
+try {
+    var _AM = Java.use("android.view.accessibility.AccessibilityManager");
+    _AM.isEnabled.implementation = function() {
+        var r = this.isEnabled();
+        _emit("accessibility.abuse", "is_enabled", "medium",
+              "android.view.accessibility.AccessibilityManager", "isEnabled",
+              { result: r },
+              "App checked if AccessibilityManager is enabled (result=" + r + ")");
+        return r;
+    };
+    _AM.getEnabledAccessibilityServiceList.implementation = function(feedbackTypeFlags) {
+        var r = this.getEnabledAccessibilityServiceList(feedbackTypeFlags);
+        _emit("accessibility.abuse", "get_enabled_services", "high",
+              "android.view.accessibility.AccessibilityManager", "getEnabledAccessibilityServiceList",
+              {},
+              "App queried enabled accessibility services");
+        return r;
+    };
+} catch(e) {}
+
+try {
+    var _AS = Java.use("android.accessibilityservice.AccessibilityService");
+    _AS.onAccessibilityEvent.implementation = function(event) {
+        var eventType = event ? event.getEventType() : -1;
+        var packageName = event ? event.getPackageName() : "";
+        _emit("accessibility.abuse", "on_accessibility_event", "critical",
+              "android.accessibilityservice.AccessibilityService", "onAccessibilityEvent",
+              { event_type: eventType, target_package: String(packageName) },
+              "AccessibilityService intercepting event from package: " + packageName + " (type=" + eventType + ")");
+        this.onAccessibilityEvent(event);
+    };
+    _AS.getRootInActiveWindow.implementation = function() {
+        _emit("accessibility.abuse", "get_root_window", "critical",
+              "android.accessibilityservice.AccessibilityService", "getRootInActiveWindow",
+              {},
+              "AccessibilityService queried root window hierarchy (credential harvesting risk)");
+        return this.getRootInActiveWindow();
+    };
+} catch(e) {}
+
+try {
+    var _ANI = Java.use("android.view.accessibility.AccessibilityNodeInfo");
+    _ANI.performAction.overload("int").implementation = function(action) {
+        _emit("accessibility.abuse", "perform_node_action", "critical",
+              "android.view.accessibility.AccessibilityNodeInfo", "performAction",
+              { action: action },
+              "AccessibilityNodeInfo simulated action execution: action=" + action);
+        return this.performAction(action);
+    };
+} catch(e) {}
+"""
+
 # --------------------------------------------------------------------------- #
 # Registry and assembler
 # --------------------------------------------------------------------------- #
@@ -807,12 +1245,13 @@ ALL_PACKS: dict = {
     "process_builder": _PACK_PROCESS_BUILDER,
     "app_listing":     _PACK_APP_LISTING,
     "ssl_unpinning":   _PACK_SSL_UNPINNING,
+    "accessibility":   _PACK_ACCESSIBILITY,
 }
 
 # Core packs always loaded — lightweight, high signal
 DEFAULT_PACKS: List[str] = [
     "shared_prefs", "network", "crypto", "native", "clipboard", "permissions",
-    "sms_telephony", "location_gps", "media_recorder", "dynamic_loading", "process_builder", "app_listing", "ssl_unpinning"
+    "sms_telephony", "location_gps", "media_recorder", "dynamic_loading", "process_builder", "app_listing", "ssl_unpinning", "accessibility"
 ]
 
 
@@ -827,29 +1266,41 @@ def build_frida_script(active_packs: List[str]) -> str:
 
     return f"""\
 // Kavach Frida Hook Script — Packs: {packs_label}
-// Guard: wait for ART/Dalvik VM to be ready before hooking
+// Guard: poll for ART/Dalvik VM readiness via setInterval (works on Android 11 x86_64 APEX)
 (function kavachMain() {{
-    if (typeof Java === 'undefined') {{
-        // Script was injected before the JVM bridge initialised (rare) — bail out cleanly
-        console.error('[Kavach] Java bridge not available at injection time.');
-        return;
-    }}
+    var MAX_RETRIES = 60;
+    var attempts = 0;
+    var intervalId = null;
 
-    if (!Java.available) {{
-        // VM not ready yet — retry after a tick
-        setTimeout(kavachMain, 200);
-        return;
-    }}
-
-    Java.perform(function() {{
-        console.log('[Kavach] Instrumentation active. Packs: {packs_label}');
+    function tryInstall() {{
+        attempts++;
+        // On Android 11 x86_64 APEX, Java global is bound AFTER script top-level runs.
+        // We use setInterval so our check runs after the Frida agent finishes initializing.
+        var javaReady = (typeof Java !== 'undefined') && Java.available;
+        if (!javaReady) {{
+            if (attempts >= MAX_RETRIES) {{
+                clearInterval(intervalId);
+                console.error('[Kavach] Java bridge unavailable after ' + attempts + ' attempts (Android 11 x86_64 APEX incompatibility).');
+            }}
+            return;
+        }}
+        clearInterval(intervalId);
+        console.log('[Kavach] Java bridge ready after ' + attempts + ' poll attempt(s).');
+        Java.perform(function() {{
+            console.log('[Kavach] Instrumentation active. Packs: {packs_label}');
 
 {_HELPER_JS}
 
 {packs_js}
 
-        console.log('[Kavach] All hook packs installed.');
-    }});
+            console.log('[Kavach] All hook packs installed.');
+        }});
+    }}
+
+    // Use setInterval so the check runs after the Frida agent fully initializes globals
+    intervalId = setInterval(tryInstall, 300);
+    // Also fire immediately in case Java is already available (spawned + resumed case)
+    tryInstall();
 }})();
 """
 
@@ -870,6 +1321,8 @@ def select_packs_from_signals(static_signals: dict) -> List[str]:
     if static_signals.get("has_data_storage") or static_signals.get("has_sqlite"):
         packs.append("file_io")
         packs.append("sqlite")
+    if static_signals.get("has_accessibility"):
+        packs.append("accessibility")
 
     # Deduplicate preserving insertion order
     seen = set()

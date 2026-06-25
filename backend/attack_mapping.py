@@ -115,6 +115,24 @@ def map_evidence_to_attack(evidence: Dict[str, Any], banking_badges: List[Dict[s
         add("T1633", "malware_rule_hits", desc)
         add("T1406", "malware_rule_hits", desc)
 
+    for m in evidence.get("yara_matches") or []:
+        meta = m.get("meta", {})
+        tid = meta.get("mitre_technique") or meta.get("techniques")
+        desc = meta.get("description") or f"YARA signature match: {m['rule_name']}"
+        if tid:
+            for t in str(tid).split(","):
+                add(t.strip(), "yara_matches", desc)
+        else:
+            rule_lower = m["rule_name"].lower()
+            if "sms" in rule_lower:
+                add("T1636.001", "yara_matches", desc)
+            elif "overlay" in rule_lower:
+                add("T1411", "yara_matches", desc)
+            elif "evasion" in rule_lower:
+                add("T1622", "yara_matches", desc)
+            else:
+                add("T1633", "yara_matches", desc)
+
     for badge in banking_badges:
         bid = badge.get("id", "")
         if "SMS" in bid:
