@@ -15,13 +15,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/RamNarra/KAVACH-AI/actions/workflows/ci-main.yml"><img src="https://github.com/RamNarra/KAVACH-AI/actions/workflows/ci-main.yml/badge.svg" alt="CI Status"/></a>
-  <a href="https://github.com/RamNarra/KAVACH-AI/actions/workflows/publish-docker.yml"><img src="https://github.com/RamNarra/KAVACH-AI/actions/workflows/publish-docker.yml/badge.svg" alt="Docker Status"/></a>
-  <img src="https://img.shields.io/github/license/RamNarra/KAVACH-AI?color=blue&style=flat-square" alt="License"/>
-  <img src="https://img.shields.io/github/repo-size/RamNarra/KAVACH-AI?color=orange&style=flat-square" alt="Size"/>
-</p>
-
-<p align="center">
   <img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi" alt="FastAPI"/>
   <img src="https://img.shields.io/badge/next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white" alt="NextJS"/>
   <img src="https://img.shields.io/badge/Google%20Gemini-8E75C2?style=for-the-badge&logo=google-gemini&logoColor=white" alt="Gemini"/>
