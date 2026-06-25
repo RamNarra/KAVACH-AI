@@ -1,72 +1,105 @@
 # 🛡️ KAVACH AI
+### Generative AI-Based Automated Analysis and Risk Scoring of Fraudulent APKs
 
 [![CI Status](https://github.com/RamNarra/KAVACH-AI/actions/workflows/ci-main.yml/badge.svg)](https://github.com/RamNarra/KAVACH-AI/actions/workflows/ci-main.yml)
 [![Docker Image Status](https://github.com/RamNarra/KAVACH-AI/actions/workflows/publish-docker.yml/badge.svg)](https://github.com/RamNarra/KAVACH-AI/actions/workflows/publish-docker.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-An intelligent, multi-layered mobile application vulnerability scanning and threat analysis platform.
-
----
-
-## 📸 Demo & Screenshots
-
-### Security Analysis Dashboard
-![KAVACH AI Dashboard](assets/readme/boi_logo_reversed.png)
-*Figure 1: The primary dashboard displaying threat score breakdowns, certificate forensic logs, and dynamic analysis findings.*
+KAVACH AI is a Generative AI-powered malware analysis and risk-scoring platform designed to automatically analyze suspicious Android Application Packages (APKs), classify threat behaviors, and generate comprehensive security audits.
 
 ---
 
 ## 📌 Table of Contents
-1. [Overview](#-overview)
-2. [Features](#-features)
-3. [Architecture](#-architecture)
-4. [Folder Structure](#-folder-structure)
-5. [Quickstart & Installation](#-quickstart--installation)
-6. [Usage Guide](#-usage-guide)
-7. [Docker Registry (GHCR) Usage](#-docker-registry-ghcr-usage)
-8. [Tech Stack](#-tech-stack)
-9. [Contributing & License](#-contributing--license)
+1. [The Problem Statement](#-the-problem-statement)
+2. [The Solution Approach](#-the-solution-approach)
+3. [System Pipeline & Architecture](#-system-pipeline--architecture)
+4. [Key Features](#-key-features)
+5. [Folder Structure](#-folder-structure)
+6. [Quickstart & Installation](#-quickstart--installation)
+7. [Usage & Scanning Flow](#-usage--scanning-flow)
+8. [Docker (GHCR) Registry Guide](#-docker-ghcr-registry-guide)
+9. [Tech Stack](#-tech-stack)
+10. [License](#-license)
 
 ---
 
-## 🔍 Overview
+## 🚨 The Problem Statement
 
-KAVACH AI is a next-generation security suite designed to detect malware, vulnerabilities, and banking fraud flags inside Android application packages (APKs). It utilizes a multi-tiered inspection pipeline (combining AST code extraction, machine learning classification, and dynamic sandbox telemetry) to assess threat levels accurately and generate deterministic vulnerability scores.
+Fraudsters increasingly distribute malicious mobile applications (APKs) through platforms such as WhatsApp, SMS, email, and phishing links to steal customer credentials, hijack sensitive information (including SMS OTPs), and perform unauthorized financial transactions. 
 
----
-
-## 🚀 Features
-
-*   **Static Code Autopsy**: Decompiles DEX files using Jadx/Apktool to extract class-level structures and identify hidden API calls.
-*   **Dynamic Sandbox Telemetry**: Automatically runs APK files inside a secure Android Virtual Device (AVD) using Frida hooks to trace live network, filesystem, and encryption APIs.
-*   **YARA Evasion Detection**: Employs custom YARA signatures to detect root-cloaking, anti-emulation, and runtime packing tricks.
-*   **Machine Learning Classifier**: Utilizes a trained random forest model to classify malicious APK behaviour flags.
-*   **Project Intelligence Layer**: Uses a Graphify codebase knowledge graph and structured local skills to keep developer operations token-efficient and safe.
+Traditional mobile malware analysis relies on manual reverse engineering, which is:
+*   **Complex & Time-Consuming**: Analyzing obfuscated code requires significant reverse-engineering cycles.
+*   **Skill-Dependent**: Requires senior security analysts to dissect application layouts, intent structures, and dynamic payloads.
+*   **Stateless**: Fails to quickly aggregate dynamic signals and ML classifications into simple, actionable intelligence for financial fraud containment.
 
 ---
 
-## 🏛️ Architecture
+## 💡 The Solution Approach
 
-KAVACH AI is organized as a decoupled monorepo:
+KAVACH AI bridges the gap between raw binary instrumentation and security analyst decision-making. The platform automates static decompilation, sandbox execution, signature matches, and leverages **Generative AI** to output natural language intent summaries, threat classifications, and risk scores.
 
 ```
-+-----------------------------------+
-|       React / Next.js UI          |  <-- Port 3000
-+-----------------+-----------------+
-                  |
-                  | FastAPI REST requests
-                  v
-+-----------------+-----------------+
-|      FastAPI Backend Engine       |  <-- Port 8080 (Dockerized)
-+--------+--------+--------+--------+
-         |        |        |
-         |        |        | Celery Tasks / Redis
-         v        v        v
-    +----+----+ +-+--+ +---+----+
-    | Static  | | ML | | Frida  |
-    | (Jadx)  | | RF | | Sandbox|
-    +---------+ +----+ +--------+
++------------------+     +--------------------+     +------------------+
+| Decompiled Code  | --> |  YARA / ML Flags   | --> | Google Gemini    | --> Investigation
+| & Sandbox Logs   |     |  (Drebin Forest)   |     | (Reasoning Engine|     Report & Score
++------------------+     +--------------------+     +------------------+
 ```
+
+### 1. Static Code Autopsy & Intent Deobfuscation
+Suspicious APKs are unpacked and decompiled into Java sources (via JADX) and DEX bytecode structures (via Androguard). The static engine audits:
+*   Requested permissions (e.g., `RECEIVE_SMS`, `READ_CONTACTS`, `SYSTEM_ALERT_WINDOW`).
+*   Suspicious API calls (e.g., dynamic class loading, cryptography execution, process creation).
+*   APKid classification to identify packers, compilers, and anti-debug protections.
+
+### 2. Dynamic Sandbox Telemetry
+The application is executed inside a secure, automated Android Virtual Device (AVD) container. A custom Frida script instrumentation bridge injects hooks into Java runtime APIs to capture:
+*   **Network Communications**: Outbound C2 server IPs, domains, and unencrypted HTTP payloads.
+*   **Filesystem Actions**: Data writes to shared preferences, database files, and dynamic Dex payloads.
+*   **API Interception**: Traces cryptographic keys, SMS receiver registrations, and overlay window creations.
+
+### 3. Generative AI Reasoning & Code Interpretation
+We leverage **Google Gemini 3.5** to digest raw code and telemetry logs:
+*   **Automated Code Interpretation**: Gemini inspects suspicious decompiled code blocks and explains the malicious intent (e.g. detailing how an accessibility service is used to steal banking inputs).
+*   **Intelligent Threat Summarization**: Aggregates static permission flags, YARA signatures, and dynamic Frida logs into an executive security verdict.
+*   **Risk Score Generation**: Synthesizes the threat indicators to calculate a final threat scoring classification (Malicious, Suspicious, Safe).
+
+---
+
+## 🏛️ System Pipeline & Architecture
+
+The following diagram illustrates how an APK flows through the KAVACH AI pipeline:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Analyst as Security Analyst
+    participant UI as Next.js Dashboard
+    participant API as FastAPI Backend
+    participant Sandbox as Frida Sandbox (AVD)
+    participant ML as YARA & ML Classifier
+    participant LLM as Google Gemini API
+
+    Analyst->>UI: Upload Suspicious APK
+    UI->>API: POST /api/scan/upload
+    API->>API: Decompile & Extract Permissions (JADX / Androguard)
+    API->>Sandbox: Install APK & Trigger Frida Hooks
+    Sandbox->>API: Return Network & Filesystem Telemetry Logs
+    API->>ML: Run YARA Signatures & Drebin RF Classifier
+    ML->>API: Return Classification Vectors & Signatures
+    API->>LLM: Send Code Snippets + Telemetry + ML Flags
+    LLM->>API: Return Threat Analysis & Scored Verdict
+    API->>Analyst: Display Interactive Report & Risk score
+```
+
+---
+
+## 🚀 Key Features
+
+*   **Generative AI Explainability**: Translates complicated decompiled Java code and obfuscated strings into plain-English summaries.
+*   **Drebin Random Forest Classifier**: Uses machine learning to verify malware classifications against historical APK datasets.
+*   **Consolidated YARA Signatures**: Employs targeted YARA rules to detect root-cloaking, anti-emulation, and common evasion techniques.
+*   **Accessibility overlay Detection**: Flags apps requesting permissions commonly abused in banking credential overlays.
+*   **PDF Report Generation**: Exports clean audit trails containing technical findings and remediation steps.
 
 ---
 
@@ -74,14 +107,16 @@ KAVACH AI is organized as a decoupled monorepo:
 
 ```
 kavach-ai/
-├── backend/            # FastAPI source code, requirements, and analysis engines
-├── frontend/           # Next.js React client source, package.json, and UI layouts
-├── scripts/            # DevOps helpers (setup, startup, graph update, local verification)
-├── .github/            # GitHub Actions CI pipelines and Docker publishing workflows
-├── Dockerfile          # Root Dockerfile for containerizing the main FastAPI API service
-├── docker-compose.yml  # Multi-container orchestration (Redis, Postgres, MobSF, Backend)
-├── LICENSE             # Apache 2.0 license file
-└── README.md           # The primary platform face
+├── backend/            # FastAPI REST backend, Requirements, and analysis engines
+│   ├── rules/          # Custom YARA rules for banking fraud and packers
+│   └── models/         # Trained Random Forest ML classification models
+├── frontend/           # Next.js App Router UI dashboard and React components
+├── scripts/            # DevOps helper scripts (setup, start, verification, graph updates)
+├── evals/              # Local agent evaluations harness and scenario checklists
+├── .github/            # GitHub Actions CI & Docker publishing workflows
+├── Dockerfile          # Root Dockerfile containerizing the main FastAPI API service
+├── docker-compose.yml  # Orchestrates Redis, Postgres, MobSF, and backend services
+└── README.md           # The primary project index
 ```
 
 ---
@@ -93,47 +128,64 @@ kavach-ai/
 - Python 3.12+ (for local backend runs)
 - Node.js 20+ & npm (for local frontend runs)
 
-### Local Environment Setup
+### Setup Configurations
 1.  **Clone the Repository**:
     ```bash
     git clone https://github.com/RamNarra/KAVACH-AI.git
     cd KAVACH-AI
     ```
-2.  **Run One-Command Setup**:
+2.  **Initialize Environment & Dependencies**:
     ```bash
     ./scripts/setup.sh
     ```
-    This script initializes python virtual environments, installs npm packages, and creates `.env` configurations.
-
-3.  **Run Locally**:
-    ```bash
-    ./scripts/start.sh
-    ```
-    Access the UI at `http://localhost:3000` and the API at `http://localhost:8080`.
+    This script builds python virtual environments, installs packages, and copies `.env.example` configurations to `.env`.
+3.  **Set Environment Keys**:
+    Open the root `.env` file and configure:
+    - `GEMINI_API_KEY`: Your Google Gemini API Key.
+    - `MOBSF_API_KEY`: API token for your Mobile Security Framework docker instance.
 
 ---
 
-## 🐳 Docker Registry (GHCR) Usage
+## 💡 Usage & Scanning Flow
 
-KAVACH AI backend is published as a pre-built Docker image to GitHub Container Registry (GHCR).
+### Running the Services Locally
+To boot the Next.js UI dashboard and FastAPI backend API simultaneously:
+```bash
+./scripts/start.sh
+```
+*   **Dashboard URL**: `http://localhost:3000`
+*   **FastAPI backend**: `http://localhost:8080`
 
 ### Running via Docker Compose
-To boot the full system including PostgreSQL, Redis, MobSF and the API server, simply run:
+To spin up the entire monorepo along with supporting databases (PostgreSQL, Redis, MobSF Docker):
 ```bash
 docker compose up -d
 ```
 
-### Direct Package Pull
-Pull the official production backend image:
+### Performing a Scan
+1.  Navigate to the Dashboard `http://localhost:3000` and sign in.
+2.  Drag and drop an APK file into the Scanner.
+3.  Observe the analysis progress (Static extraction -> Sandbox telemetry -> ML Classification -> Gemini Summarization).
+4.  Download the generated Scored PDF Report.
+
+---
+
+## 🐳 Docker (GHCR) Registry Guide
+
+Pre-built Docker images of KAVACH AI backend API are published to GitHub Container Registry.
+
+### Direct Image Pull
 ```bash
 docker pull ghcr.io/ramnarra/kavach-backend:latest
 ```
 
-Run the container stand-alone:
+### Running the Container Stand-alone
 ```bash
 docker run -d -p 8080:8080 \
-  -e GEMINI_API_KEY="your-api-key" \
+  -e PORT=8080 \
+  -e GEMINI_API_KEY="your-gemini-key" \
   -e MOBSF_API_KEY="your-mobsf-key" \
+  -e POSTGRES_HOST="your-db-host" \
   ghcr.io/ramnarra/kavach-backend:latest
 ```
 
@@ -143,11 +195,12 @@ docker run -d -p 8080:8080 \
 
 *   **Frontend**: Next.js 16 (App Router), TypeScript, React 19, Material UI, Framer Motion.
 *   **Backend**: Python 3.12, FastAPI, Celery, Uvicorn.
-*   **Database & Broker**: PostgreSQL 17, Redis, SQLAlchemy.
-*   **Security Analysis**: MobSF API, Androguard, Quark Engine, Yara-Python, Frida.
+*   **Analysis Instruments**: MobSF API, Androguard, Quark Engine, Yara-Python, Frida.
+*   **AI & ML**: Google GenAI SDK (Gemini 3.5), Scikit-Learn (Random Forest).
+*   **Database**: PostgreSQL 17, Redis.
 
 ---
 
-## 📄 License & Contributing
+## 📄 License
 
-Licensed under the [Apache License 2.0](LICENSE). For issues or security reports, please contact the maintainers.
+Licensed under the [Apache License 2.0](LICENSE).
