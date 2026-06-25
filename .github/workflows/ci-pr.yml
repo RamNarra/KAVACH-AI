@@ -56,3 +56,30 @@ jobs:
       - name: Run Verification Suite
         run: |
           ./scripts/verify_all.sh
+
+      - name: Run LLM Quality Evals
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -n "$GEMINI_API_KEY" ]; then
+            ./backend/venv/bin/python evals/run_evals.py
+          else
+            echo "[!] Skipping LLM Quality Evals because GEMINI_API_KEY is not configured in repository secrets."
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Dry-run Backend Docker Build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+
+      - name: Dry-run Frontend Docker Build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: false

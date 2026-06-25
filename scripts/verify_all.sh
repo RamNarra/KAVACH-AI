@@ -53,6 +53,24 @@ else
     fi
 fi
 
+# --- 1b. LLM Quality Evals ---
+echo "Checking for GEMINI_API_KEY to run LLM Quality Evals..."
+cd "$PROJECT_ROOT"
+if [ -z "$GEMINI_API_KEY" ] && [ -f ".env" ]; then
+    export GEMINI_API_KEY=$(grep -E "^GEMINI_API_KEY=" .env | cut -d'=' -f2- | tr -d '"' | tr -d "'")
+fi
+
+if [ -n "$GEMINI_API_KEY" ]; then
+    echo "Running LLM Quality Evals..."
+    if ./backend/venv/bin/python evals/run_evals.py; then
+        log_success "LLM Quality Evals"
+    else
+        log_failure "LLM Quality Evals"
+    fi
+else
+    echo "Skipping LLM Quality Evals (GEMINI_API_KEY not set)."
+fi
+
 # --- 2. Frontend Linting ---
 echo "Running frontend linter (eslint)..."
 cd "$FRONTEND_DIR"
